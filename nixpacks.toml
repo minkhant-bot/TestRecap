@@ -1,0 +1,10 @@
+[phases.setup]
+nixPkgs = ["...", "ffmpeg", "python311", "gcc", "gcc-c++"]
+
+[phases.install]
+cmds = [
+    "bun install",
+    "python3 -m venv /opt/venv",
+    ". /opt/venv/bin/activate && pip install -r requirements.txt",
+    ". /opt/venv/bin/activate && python3 src/ai/download_model.py"
+]

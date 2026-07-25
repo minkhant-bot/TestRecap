@@ -21,6 +21,33 @@ export const computeSimilarity = async (text1, text2) => {
 
 export const initModels = async () => {};
 
+export const buildSubtitleCharTimeline = (mergedText, subtitleParts) => {
+    if (typeof mergedText !== 'string' || !Array.isArray(subtitleParts)) return null;
+    const charToTime = new Array(mergedText.length);
+    let searchFrom = 0;
+    for (const sub of subtitleParts) {
+        if (!sub || typeof sub.part !== 'string' || sub.part.length === 0 ||
+            !Number.isFinite(sub.start) || !Number.isFinite(sub.end)) return null;
+        const partStart = mergedText.indexOf(sub.part, searchFrom);
+        if (partStart < 0) return null;
+        const startSec = sub.start / 1000;
+        const endSec = sub.end / 1000;
+        for (let k = 0; k < sub.part.length; k++) {
+            charToTime[partStart + k] = startSec + (k / sub.part.length) * (endSec - startSec);
+        }
+        searchFrom = partStart + sub.part.length;
+    }
+    return charToTime;
+};
+
+export const findSubtitleTimeAtOrAfter = (charToTime, charIndex) => {
+    if (!Array.isArray(charToTime)) return null;
+    for (let i = Math.max(0, charIndex); i < charToTime.length; i++) {
+        if (Number.isFinite(charToTime[i])) return charToTime[i];
+    }
+    return null;
+};
+
 export const validateTimestamps = (transcript, audioDuration, tolerance = 0.05, allowClamp = 2.0) => {
     if (!Array.isArray(transcript)) throw new Error("Transcript is not an array");
     let prevEnd = -1;
@@ -341,15 +368,30 @@ export const generateNarrationTTS = async (sceneNarration, cachePath, voiceId, _
         const edgeVoice = voiceConfig.edgeVoice;
         const pitch = voiceConfig.pitch;
         const rate = voiceConfig.rate;
+        const dialogueVal = getSetting('DIALOGUE_MODE');
+        const isDialogue = dialogueVal === 'true' || dialogueVal === '1' || dialogueVal === true;
 
-        const currentMeta = { voice: edgeVoice, pitch, rate, len: sceneNarration.length };
+        const narrationFingerprint = crypto.createHash('sha256').update(JSON.stringify({
+            version: 2,
+            voice: edgeVoice,
+            pitch,
+            rate,
+            dialogueMode: isDialogue,
+            narration: sceneNarration.map(scene => ({
+                text: scene.narration_text,
+                start: scene.scene_start,
+                end: scene.scene_end
+            }))
+        })).digest('hex');
+        const currentMeta = { voice: edgeVoice, pitch, rate, len: sceneNarration.length, narrationFingerprint };
         if (fs.existsSync(cachePath) && fs.existsSync(cacheMetaPath)) {
             try {
                 const existingMeta = JSON.parse(fs.readFileSync(cacheMetaPath, 'utf8'));
                 if (existingMeta.voice === currentMeta.voice && 
                     existingMeta.pitch === currentMeta.pitch && 
                     existingMeta.rate === currentMeta.rate && 
-                    existingMeta.len === currentMeta.len) {
+                    existingMeta.len === currentMeta.len &&
+                    existingMeta.narrationFingerprint === currentMeta.narrationFingerprint) {
                     console.log("[AI] Reusing cached continuous TTS audio.");
                     return cachePath;
                 }
@@ -365,8 +407,6 @@ export const generateNarrationTTS = async (sceneNarration, cachePath, voiceId, _
         const mergedBlocks = [];
         let currentBlock = null;
 
-        const dialogueVal = getSetting('DIALOGUE_MODE');
-        const isDialogue = dialogueVal === 'true' || dialogueVal === '1' || dialogueVal === true;
         const maxGap = isDialogue ? 3.0 : 0.75;
         const maxDur = isDialogue ? 60 : 12;
 
@@ -509,18 +549,9 @@ export const generateNarrationTTS = async (sceneNarration, cachePath, voiceId, _
             if (fs.existsSync(subFilePath)) {
                 try {
                     const subData = JSON.parse(fs.readFileSync(subFilePath, 'utf8'));
-                    charToTime = new Array(block.mergedText.length).fill(0);
-                    let charCounter = 0;
-                    for (const sub of subData) {
-                        const partLen = sub.part.length;
-                        const startSec = sub.start / 1000;
-                        const endSec = sub.end / 1000;
-                        for (let k = 0; k < partLen; k++) {
-                            if (charCounter < charToTime.length) {
-                                charToTime[charCounter] = startSec + (k / partLen) * (endSec - startSec);
-                                charCounter++;
-                            }
-                        }
+                    charToTime = buildSubtitleCharTimeline(block.mergedText, subData);
+                    if (!charToTime) {
+                        console.warn(`[AI] Subtitle text did not align with merged narration for chunk ${bIdx}; using proportional timing.`);
                     }
                 } catch (e) {
                     console.warn(`[AI] Failed to parse subtitle timing for chunk ${bIdx}`);
@@ -541,6 +572,23 @@ export const generateNarrationTTS = async (sceneNarration, cachePath, voiceId, _
 
             let blockRunningTime = runningAudioTime;
             const totalTextLength = block.scenes.reduce((sum, sIdx) => sum + sceneNarration[sIdx].narration_text.length, 0);
+            let sceneBoundaryTimes = null;
+            if (charToTime) {
+                const candidateBoundaries = [0];
+                for (let i = 1; i < sceneStartCharIndices.length; i++) {
+                    candidateBoundaries.push(findSubtitleTimeAtOrAfter(charToTime, sceneStartCharIndices[i]));
+                }
+                candidateBoundaries.push(actualFinalDur);
+                const validBoundaries = candidateBoundaries.every((value, index) =>
+                    Number.isFinite(value) && value >= 0 && value <= actualFinalDur &&
+                    (index === 0 || value >= candidateBoundaries[index - 1])
+                );
+                if (validBoundaries) {
+                    sceneBoundaryTimes = candidateBoundaries;
+                } else {
+                    console.warn(`[AI] Invalid subtitle boundaries for chunk ${bIdx}; using proportional timing.`);
+                }
+            }
 
             for (let i = 0; i < block.scenes.length; i++) {
                 const sIdx = block.scenes[i];
@@ -549,19 +597,8 @@ export const generateNarrationTTS = async (sceneNarration, cachePath, voiceId, _
                 
                 let sceneDur = 0;
                 
-                if (charToTime) {
-                    const startIdx = sceneStartCharIndices[i];
-                    const nextStartIdx = (i < block.scenes.length - 1) ? sceneStartCharIndices[i + 1] : block.mergedText.length;
-                    
-                    let startSec = charToTime[startIdx] || 0;
-                    let nextStartSec = (i < block.scenes.length - 1) ? (charToTime[nextStartIdx] || 0) : actualFinalDur;
-                    
-                    // Force first scene to absorb leading silence, and last scene to absorb trailing silence
-                    if (i === 0) startSec = 0;
-                    
-                    sceneDur = (i === block.scenes.length - 1) 
-                        ? (actualFinalDur - (blockRunningTime - runningAudioTime)) 
-                        : (nextStartSec - startSec);
+                if (sceneBoundaryTimes) {
+                    sceneDur = sceneBoundaryTimes[i + 1] - sceneBoundaryTimes[i];
                 } else {
                     // Fallback to proportional
                     if (totalTextLength > 0) {

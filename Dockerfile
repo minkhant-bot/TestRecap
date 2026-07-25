@@ -30,7 +30,7 @@ RUN python3 -m venv /opt/venv \
 COPY package*.json ./
 
 # Install npm dependencies (including devDependencies required to build the Vite client)
-RUN npm install
+RUN npm install --include=dev
 
 # Copy the rest of the application files
 COPY . .

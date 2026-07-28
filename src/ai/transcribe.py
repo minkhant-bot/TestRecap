@@ -2,12 +2,17 @@ import sys
 import json
 import logging
 import os
+from whisper_config import apply_whisper_environment, load_whisper_config
 
 # Send logging to stderr to prevent stdout corruption
 logging.basicConfig(level=logging.WARNING, stream=sys.stderr)
-os.environ["HF_HOME"] = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", ".cache", "huggingface"))
 
 def main():
+    config = load_whisper_config()
+    apply_whisper_environment(config)
+    if len(sys.argv) == 2 and sys.argv[1] == "--print-config":
+        sys.stdout.write(json.dumps(config) + "\n")
+        return
     if len(sys.argv) < 2:
         sys.stderr.write("Error: Missing audio file path.\n")
         sys.exit(1)
@@ -20,18 +25,35 @@ def main():
         sys.stderr.write(f"Error importing faster_whisper: {e}\n")
         sys.exit(1)
 
-    # Load model with fallback compute_types
+    sys.stderr.write(
+        "Faster-Whisper config: "
+        f"model={config['model']} device={config['device']} "
+        f"compute_type={config['compute_type']} detected_cpu_count={config['detected_cpu_count']} "
+        f"cpu_threads={config['cpu_threads']} num_workers={config['num_workers']} "
+        f"beam_size={config['beam_size']} cache_dir={config['cache_dir']}\n"
+    )
+
+    # Load model with the configured compute type and the verified CPU fallback behavior.
     model = None
     try:
-        model = WhisperModel("base", device="cpu", compute_type="int8", cpu_threads=4, num_workers=2)
+        model = WhisperModel(
+            config["model"], device=config["device"], compute_type=config["compute_type"],
+            cpu_threads=config["cpu_threads"], num_workers=config["num_workers"]
+        )
     except Exception as e:
-        sys.stderr.write(f"Warning: Failed to load model with compute_type='int8': {e}\n")
+        sys.stderr.write(f"Warning: Failed to load model with compute_type='{config['compute_type']}': {e}\n")
         try:
-            model = WhisperModel("base", device="cpu", compute_type="float32", cpu_threads=4, num_workers=2)
+            model = WhisperModel(
+                config["model"], device=config["device"], compute_type="float32",
+                cpu_threads=config["cpu_threads"], num_workers=config["num_workers"]
+            )
         except Exception as e2:
             sys.stderr.write(f"Warning: Failed to load model with compute_type='float32': {e2}\n")
             try:
-                model = WhisperModel("base", device="cpu", cpu_threads=4, num_workers=2)
+                model = WhisperModel(
+                    config["model"], device=config["device"],
+                    cpu_threads=config["cpu_threads"], num_workers=config["num_workers"]
+                )
             except Exception as e3:
                 sys.stderr.write(f"Error: Failed to load model with auto compute_type: {e3}\n")
                 sys.exit(1)
@@ -39,7 +61,7 @@ def main():
     try:
         segments, info = model.transcribe(
             audio_path,
-            beam_size=3,
+            beam_size=config["beam_size"],
             word_timestamps=True,
             condition_on_previous_text=False,
             vad_filter=True

@@ -1,16 +1,19 @@
-import axios from 'axios';
 
 import fs from 'fs';
 import path from 'path';
 import crypto from 'crypto';
-import { spawn } from 'child_process';
 import { EdgeTTS } from 'node-edge-tts';
-import { GoogleGenAI } from '@google/genai';
 import { getVoiceConfig } from './voices.js';
 import { getTranslationSystemInstruction } from './translation.js';
-import { runFFmpeg, getDuration, getAudioDetails } from '../ffmpeg/index.js';
+import { normalizeBurmeseNumberText } from './numberNormalization.js';
+import { synthesizeEdgeTts, formatEdgeTtsDiagnostics } from './edgeTtsRequest.js';
+import { fitTtsSegmentDuration, rewriteBurmeseSegmentForDuration, MAX_TTS_TEMPO } from './durationFit.js';
+import { runFFmpeg, getDuration } from '../ffmpeg/index.js';
 import { getSetting } from '../services/settings.js';
 import { fileURLToPath } from 'url';
+import { WORKFLOW_VERSION } from '../domain/workflow.js';
+import { transcribeWithFasterWhisper, fingerprintFile } from './fasterWhisper.js';
+import { translateTranscriptWithGemini } from './geminiTranslation.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -18,6 +21,19 @@ const __dirname = path.dirname(__filename);
 export const computeSimilarity = async (text1, text2) => {
     return null;
 };
+
+export const waitForAllTtsWorkers = async (workers) => {
+    let firstError = null;
+    const trackedWorkers = workers.map(worker => Promise.resolve(worker).catch(error => {
+        if (firstError === null) firstError = error;
+        throw error;
+    }));
+    await Promise.allSettled(trackedWorkers);
+    if (firstError !== null) throw firstError;
+};
+
+export const getTtsRetryDelayMs = attempt => Math.min(4000, 500 * (2 ** (attempt - 1)));
+
 
 export const initModels = async () => {};
 
@@ -48,670 +64,796 @@ export const findSubtitleTimeAtOrAfter = (charToTime, charIndex) => {
     return null;
 };
 
-export const validateTimestamps = (transcript, audioDuration, tolerance = 0.05, allowClamp = 2.0) => {
-    if (!Array.isArray(transcript)) throw new Error("Transcript is not an array");
-    let prevEnd = -1;
-    // We will filter out invalid chunks to avoid throwing out the entire valid transcript
-    const validTranscript = [];
-    
-    for (let i = 0; i < transcript.length; i++) {
-        const chunk = transcript[i];
-        if (!Array.isArray(chunk.timestamp) || chunk.timestamp.length !== 2) {
-            console.warn(`[Validate] Invalid timestamp structure at chunk ${i}, skipping`);
-            continue;
+const narrationGraphemeSegmenter = new Intl.Segmenter('my', { granularity: 'grapheme' });
+
+const narrationGraphemes = text =>
+    Array.from(narrationGraphemeSegmenter.segment(text), item => item.segment);
+
+export const splitNarrationText = (text, maxChars = 180) => {
+    if (typeof text !== 'string' || text.length <= maxChars) return [text];
+    const tokens = text.trim().split(/\s+/);
+    const parts = [];
+    let current = '';
+    for (const token of tokens) {
+        const candidate = current ? `${current} ${token}` : token;
+        if (current && candidate.length > maxChars) {
+            parts.push(current);
+            current = token;
+        } else {
+            current = candidate;
         }
-        let [start, end] = chunk.timestamp;
-        if (!Number.isFinite(start) || !Number.isFinite(end)) {
-            console.warn(`[Validate] Non-finite timestamp at chunk ${i}, skipping`);
-            continue;
+        let graphemes = narrationGraphemes(current);
+        while (graphemes.length > maxChars) {
+            parts.push(graphemes.slice(0, maxChars).join(''));
+            graphemes = graphemes.slice(maxChars);
+            current = graphemes.join('');
         }
-        if (start < 0) {
-            console.warn(`[Validate] Negative start timestamp at chunk ${i}, clamping to 0`);
-            start = 0;
-            chunk.timestamp[0] = start;
-        }
-        if (end <= start) {
-            console.warn(`[Validate] end <= start at chunk ${i}, skipping`);
-            continue;
-        }
-        
-        if (start >= audioDuration) {
-            if (start - audioDuration <= allowClamp) {
-                console.warn(`[Validate] start timestamp (${start}) exceeds WAV duration (${audioDuration}) but within clamp range. Skipping segment.`);
-                continue;
-            } else {
-                const isNearEnd = i >= transcript.length - 2;
-                if (isNearEnd) {
-                    console.warn(`[Validate] Severe start overshoot at chunk ${i} (${start} >= ${audioDuration}). Discarding trailing segment.`);
-                    continue;
-                }
-                throw new Error(`start timestamp (${start}) exceeds WAV duration (${audioDuration}) at chunk ${i} (overshoot: ${start - audioDuration})`);
-            }
-        }
-        
-        if (i > 0 && start < prevEnd - tolerance) {
-            console.warn(`[Validate] Overlapping transcript timestamps at chunk ${i}: start ${start} < prevEnd ${prevEnd} - ${tolerance}. Adjusting start.`);
-            start = prevEnd;
-            chunk.timestamp[0] = start;
-            if (end <= start) {
-                 continue; // skip if fixing overlap breaks length
-            }
-        }
-        
-        if (end > audioDuration) {
-            if (end - audioDuration <= allowClamp) {
-                console.warn(`[Validate] end timestamp (${end}) exceeds WAV duration (${audioDuration}). Clamping to ${audioDuration}`);
-                end = audioDuration;
-                chunk.timestamp[1] = end;
-            } else {
-                const isNearEnd = i >= transcript.length - 2;
-                if (isNearEnd) {
-                    console.warn(`[Validate] Severe end overshoot at chunk ${i} (${end} > ${audioDuration}). Discarding trailing segment.`);
-                    continue;
-                }
-                throw new Error(`end timestamp (${end}) exceeds WAV duration (${audioDuration}) at chunk ${i} by more than allowClamp (${allowClamp})`);
-            }
-        }
-        
-        validTranscript.push(chunk);
-        prevEnd = end;
     }
-    
-    if (validTranscript.length === 0 && transcript.length > 0) {
-        throw new Error("All segments were invalid or out of bounds.");
-    }
-    
-    return validTranscript;
+    if (current) parts.push(current);
+    return parts.length ? parts : [text];
 };
 
-export const transcribeWav = async (wavPath, cachePath, apiKey) => {
-    if (cachePath && fs.existsSync(cachePath) && fs.statSync(cachePath).size > 0) {
-        try {
-            const cachedData = JSON.parse(fs.readFileSync(cachePath, 'utf8'));
-            const duration = await getDuration(wavPath);
-            const validated = validateTimestamps(cachedData, duration);
-            return validated;
-        } catch(e) {
-            console.warn(`[Transcription] Cache rejected: ${e.message}`);
-            try { fs.unlinkSync(cachePath); } catch (err) {}
+export const isSpeakableTtsText = text => typeof text === 'string' && /[\p{L}\p{N}]/u.test(text);
+
+export const mergeOrphanTtsBlocks = blocks => {
+    const merged = [];
+    let leadingOrphans = [];
+    for (const block of blocks) {
+        if (isSpeakableTtsText(block.mergedText)) {
+            if (leadingOrphans.length > 0) {
+                block.mergedText = leadingOrphans.map(orphan => orphan.mergedText).join('') + block.mergedText;
+                block.orig_start = leadingOrphans[0].orig_start;
+                leadingOrphans = [];
+            }
+            merged.push(block);
+        } else if (merged.length > 0) {
+            const previous = merged[merged.length - 1];
+            previous.mergedText += block.mergedText;
+            previous.orig_end = block.orig_end;
+        } else {
+            leadingOrphans.push(block);
         }
     }
-    
-    if (!apiKey) {
-        throw new Error("Gemini API key is required for transcription and translation.");
+    if (leadingOrphans.length > 0) {
+        throw new Error('Narration contains no speakable text for punctuation attachment.');
     }
-    
-    console.log('[AI] Starting real Gemini-based transcription and translation...');
-    const ai = new GoogleGenAI({ apiKey });
-    
-    const fallbackModels = [
-        process.env.GEMINI_MODEL || 'gemini-3.5-flash',
-        'gemini-3.1-flash-lite',
-        'gemini-2.5-flash'
-    ];
-    
-    const maxRetries = 5;
-    let attempt = 0;
-    let currentModelIndex = 0;
-    
-    const duration = await getDuration(wavPath);
-    console.log(`[AI] Reading audio file ${wavPath} into memory (size: ${fs.statSync(wavPath).size} bytes)...`);
-    const audioData = fs.readFileSync(wavPath).toString('base64');
+    return merged;
+};
 
+export const splitTimedNarrationBlock = (block) => {
+    const maxChars = Math.max(1, Math.ceil(block.mergedText.length / 2));
+    const parts = splitNarrationText(block.mergedText, maxChars);
+    if (parts.length < 2) return [block];
+    const totalWeight = parts.reduce((sum, part) => sum + Math.max(1, part.length), 0);
+    const duration = block.orig_end - block.orig_start;
+    let elapsedWeight = 0;
+    const timedParts = parts.map(part => {
+        const start = block.orig_start + duration * (elapsedWeight / totalWeight);
+        elapsedWeight += Math.max(1, part.length);
+        const end = block.orig_start + duration * (elapsedWeight / totalWeight);
+        return { ...block, mergedText: part, orig_start: start, orig_end: end };
+    });
+    return mergeOrphanTtsBlocks(timedParts);
+};
 
-    while (attempt < maxRetries) {
-        attempt++;
-        const targetModel = fallbackModels[currentModelIndex % fallbackModels.length];
-        
-        try {
-            const translationRules = getTranslationSystemInstruction();
-            const prompt = `Listen to the audio file and provide a complete transcript. For each spoken segment, provide the start and end timestamp in seconds, the original spoken text (in English), and the 'translatedText' containing the translation into Burmese.
-This audio is exactly ${duration.toFixed(2)} seconds long — do not report any timestamp beyond this.
+const joinNarrationSegments = segments => {
+    let text = '';
+    const withOffsets = segments.map((segment, index) => {
+        const separator = index === 0 || /^[\s၊။,.;:!?]/u.test(segment.text) ? '' : ' ';
+        text += separator;
+        const text_start = text.length;
+        text += segment.text;
+        return { ...segment, text_start, text_end: text.length };
+    });
+    return { text, segments: withOffsets };
+};
+
+const createNarrationGroup = segments => {
+    const joined = joinNarrationSegments(segments);
+    return {
+        scenes: joined.segments.map(segment => segment.index),
+        segments: joined.segments,
+        mergedText: joined.text,
+        orig_start: joined.segments[0].orig_start,
+        orig_end: joined.segments.at(-1).orig_end,
+        kind: joined.segments[0].kind,
+        speaker: joined.segments[0].speaker
+    };
+};
+
+export const buildNarrationGroups = (
+    sceneNarration,
+    { maxGap = null, maxSpan = null, maxChars = 1200 } = {}
+) => {
+    if (!Array.isArray(sceneNarration) || sceneNarration.length === 0) return [];
+    const groups = [];
+    let currentSegments = [];
+
+    for (let index = 0; index < sceneNarration.length; index++) {
+        const scene = sceneNarration[index];
+        const segment = {
+            index,
+            text: scene.narration_text,
+            orig_start: scene.scene_start,
+            orig_end: scene.scene_end,
+            kind: scene.kind || 'narration',
+            speaker: scene.speaker || (scene.kind === 'narration' ? 'narrator' : null)
+        };
+        if (!['dialogue', 'narration'].includes(segment.kind) ||
+            (segment.kind === 'dialogue' && !segment.speaker) ||
+            typeof segment.text !== 'string' ||
+            !Number.isFinite(segment.orig_start) || !Number.isFinite(segment.orig_end) ||
+            segment.orig_end <= segment.orig_start) {
+            throw new Error(`Pipeline Error: Invalid narration segment ${index}.`);
+        }
+
+        if (currentSegments.length === 0) {
+            currentSegments.push(segment);
+            continue;
+        }
+
+        const first = currentSegments[0];
+        const previous = currentSegments.at(-1);
+        const candidateText = joinNarrationSegments([...currentSegments, segment]).text;
+        const gap = segment.orig_start - previous.orig_end;
+        const span = segment.orig_end - first.orig_start;
+        const groupingMaxGap = maxGap ?? (segment.kind === 'dialogue' ? 3 : 0.75);
+        const groupingMaxSpan = maxSpan ?? (segment.kind === 'dialogue' ? 60 : 12);
+        const sameSpeechContext = segment.kind === previous.kind &&
+            (segment.kind === 'narration' || segment.speaker === previous.speaker);
+        const canJoin = sameSpeechContext && gap <= groupingMaxGap && span <= groupingMaxSpan && candidateText.length <= maxChars;
+
+        if (canJoin || (!isSpeakableTtsText(segment.text) && sameSpeechContext)) {
+            currentSegments.push(segment);
+        } else {
+            groups.push(createNarrationGroup(currentSegments));
+            currentSegments = [segment];
+        }
+    }
+    if (currentSegments.length > 0) groups.push(createNarrationGroup(currentSegments));
+
+    for (let index = 0; index < groups.length; index++) {
+        if (isSpeakableTtsText(groups[index].mergedText)) continue;
+        const sameContext = candidate => candidate.kind === groups[index].kind &&
+            (candidate.kind === 'narration' || candidate.speaker === groups[index].speaker);
+        if (index > 0 && sameContext(groups[index - 1])) {
+            groups[index - 1] = createNarrationGroup([...groups[index - 1].segments, ...groups[index].segments]);
+            groups.splice(index, 1);
+            index--;
+        } else if (index + 1 < groups.length && sameContext(groups[index + 1])) {
+            groups[index + 1] = createNarrationGroup([...groups[index].segments, ...groups[index + 1].segments]);
+            groups.splice(index, 1);
+            index--;
+        } else {
+            throw new Error('Narration contains punctuation that cannot cross a speaker boundary.');
+        }
+    }
+    return groups;
+};
+
+export const assignNarrationGroupAnchors = (groups, videoDuration) => groups.map((group, index) => {
+    const previousEnd = index > 0 ? groups[index - 1].orig_end : 0;
+    const nextStart = index < groups.length - 1 ? groups[index + 1].orig_start : videoDuration;
+    const anchorStart = group.kind === 'dialogue'
+        ? Math.max(previousEnd, group.orig_start - 1)
+        : group.orig_start;
+    const anchorEnd = group.kind === 'dialogue'
+        ? Math.min(nextStart, videoDuration, group.orig_end + 1)
+        : nextStart;
+    if (!Number.isFinite(anchorStart) || !Number.isFinite(anchorEnd) || anchorEnd <= anchorStart) {
+        throw new Error(`Pipeline Error: Invalid narration group anchor ${index}: ${anchorStart} -> ${anchorEnd}.`);
+    }
+    return { ...group, anchor_start: anchorStart, anchor_end: anchorEnd };
+});
+
+export const distributeNarrationGroupAudio = (
+    group,
+    audioStart,
+    audioDuration,
+    { subtitleParts = null, spokenText = null, requireSubtitleBoundaries = false } = {}
+) => {
+    let localBoundaries = null;
+    if (Array.isArray(subtitleParts) && subtitleParts.length > 0 && typeof spokenText === 'string') {
+        const charToTime = buildSubtitleCharTimeline(spokenText, subtitleParts);
+        if (charToTime) {
+            let searchFrom = 0;
+            const textOffsets = group.segments.map((segment, index) => {
+                const normalizedSegmentText = normalizeBurmeseNumberText(segment.text);
+                const offset = spokenText.indexOf(normalizedSegmentText, searchFrom);
+                if (offset < 0) {
+                    throw new Error(`Timeline Error: Cannot locate normalized TTS text for segment ${segment.index}.`);
+                }
+                searchFrom = offset + normalizedSegmentText.length;
+                return index === 0 ? 0 : offset;
+            });
+            const starts = textOffsets.map((offset, index) => index === 0
+                ? 0
+                : findSubtitleTimeAtOrAfter(charToTime, offset));
+            if (starts.every(Number.isFinite)) {
+                localBoundaries = starts.map((segmentStart, index) => ({
+                    start: segmentStart,
+                    end: index + 1 < starts.length ? starts[index + 1] : audioDuration
+                }));
+            }
+        }
+    }
+    if (!localBoundaries && requireSubtitleBoundaries) {
+        throw new Error('Timeline Error: Edge-TTS subtitle boundaries are missing or invalid.');
+    }
+
+    if (!localBoundaries) {
+        const totalWeight = group.segments.reduce(
+            (sum, segment) => sum + Math.max(1, narrationGraphemes(segment.text).length),
+            0
+        );
+        let elapsedWeight = 0;
+        localBoundaries = group.segments.map(segment => {
+            const segmentStart = audioDuration * (elapsedWeight / totalWeight);
+            elapsedWeight += Math.max(1, narrationGraphemes(segment.text).length);
+            return { start: segmentStart, end: audioDuration * (elapsedWeight / totalWeight) };
+        });
+    }
+
+    return group.segments.map((segment, index) => {
+        const boundary = localBoundaries[index];
+        if (!Number.isFinite(boundary.start) || !Number.isFinite(boundary.end) ||
+            boundary.start < 0 || boundary.end > audioDuration + 0.05 || boundary.end <= boundary.start) {
+            throw new Error(`Timeline Error: Invalid audio boundary for segment ${segment.index}.`);
+        }
+        return {
+            index: segment.index,
+            text: segment.text,
+            kind: segment.kind,
+            speaker: segment.speaker,
+            orig_start: segment.orig_start,
+            orig_end: segment.orig_end,
+            final_audio_start: audioStart + boundary.start,
+            final_audio_end: audioStart + Math.min(audioDuration, boundary.end)
+        };
+    });
+};
+
+export const mergeNarrationGroups = (groups, index) => {
+    if (groups.length < 2 || index < 0 || index >= groups.length) {
+        throw new Error('Pipeline Error: Cannot merge narration group ' + index + '.');
+    }
+    const candidates = [index + 1, index - 1].filter(candidate => candidate >= 0 && candidate < groups.length);
+    const neighborIndex = groups[index].kind === 'narration'
+        ? candidates.find(candidate => groups[candidate].kind === 'narration')
+        : undefined;
+    if (neighborIndex === undefined) {
+        throw new Error('Pipeline Error: Dialogue group ' + index + ' cannot merge across a speaker or speech-type boundary.');
+    }
+    const leftIndex = Math.min(index, neighborIndex);
+    const merged = createNarrationGroup([
+        ...groups[leftIndex].segments,
+        ...groups[leftIndex + 1].segments
+    ]);
+    return [...groups.slice(0, leftIndex), merged, ...groups.slice(leftIndex + 2)];
+};
+
+export const buildContinuousNarrationBlocks = (sceneNarration) => {
+    if (!Array.isArray(sceneNarration) || sceneNarration.length === 0) return [];
+    const blocks = sceneNarration.flatMap((scene, index) => {
+        const parts = splitNarrationText(scene.narration_text);
+        const totalWeight = parts.reduce((sum, part) => sum + Math.max(1, part.length), 0);
+        const duration = scene.scene_end - scene.scene_start;
+        let elapsedWeight = 0;
+        return parts.map(part => {
+            const start = scene.scene_start + duration * (elapsedWeight / totalWeight);
+            elapsedWeight += Math.max(1, part.length);
+            const end = scene.scene_start + duration * (elapsedWeight / totalWeight);
+            return {
+                scenes: [index],
+                mergedText: part,
+                orig_start: start,
+                orig_end: end
+            };
+        });
+    });
+    return mergeOrphanTtsBlocks(blocks);
+};
+
+export const GEMINI_EOF_DRIFT_TOLERANCE_SECONDS = 0.3;
+
+export const validateTimestamps = (
+    transcript,
+    mediaDuration,
+    eofDriftTolerance = GEMINI_EOF_DRIFT_TOLERANCE_SECONDS
+) => {
+    if (!Array.isArray(transcript)) throw new Error('Transcript is not an array.');
+    if (!Number.isFinite(mediaDuration) || mediaDuration <= 0) {
+        throw new Error('Real media duration is invalid.');
+    }
+    let previousEnd = 0;
+
+    return transcript.map((chunk, index) => {
+        if (!chunk || !Array.isArray(chunk.timestamp) || chunk.timestamp.length !== 2) {
+            throw new Error(`Gemini timestamp at segment ${index} must contain exactly [start, end].`);
+        }
+        const [start, reportedEnd] = chunk.timestamp;
+        if (!Number.isFinite(start) || !Number.isFinite(reportedEnd)) {
+            throw new Error(`Gemini timestamp at segment ${index} contains a non-finite value.`);
+        }
+        if (start < 0 || reportedEnd <= start) {
+            throw new Error(`Gemini timestamp at segment ${index} has an invalid range ${start} -> ${reportedEnd}.`);
+        }
+        if (start >= mediaDuration) {
+            throw new Error(
+                `Gemini timestamp at segment ${index} starts outside the real media duration ` +
+                `(${start} >= ${mediaDuration}); refusing to drop or truncate speech.`
+            );
+        }
+        if (start < previousEnd) {
+            throw new Error(
+                `Gemini timestamp overlap at segment ${index}: ${start} < previous end ${previousEnd}; ` +
+                'refusing to move or overlap speech.'
+            );
+        }
+
+        let end = reportedEnd;
+        if (reportedEnd > mediaDuration) {
+            const overshoot = reportedEnd - mediaDuration;
+            const isFinalSegment = index === transcript.length - 1;
+            if (!isFinalSegment || overshoot - eofDriftTolerance > 1e-9) {
+                throw new Error(
+                    `Gemini timestamp at segment ${index} exceeds the real media duration by ` +
+                    `${overshoot.toFixed(3)}s; only final-segment drift up to ` +
+                    `${eofDriftTolerance.toFixed(3)}s can be repaired safely.`
+                );
+            }
+            end = mediaDuration;
+        }
+        if (end <= start) {
+            throw new Error(
+                `Gemini timestamp at segment ${index} cannot be repaired without truncating speech.`
+            );
+        }
+
+        previousEnd = end;
+        return end === reportedEnd ? chunk : { ...chunk, timestamp: [start, end] };
+    });
+};
+
+export const GEMINI_TRANSCRIPT_TARGET_MIN_SECONDS = 2;
+export const GEMINI_TRANSCRIPT_TARGET_MAX_SECONDS = 6;
+export const GEMINI_TRANSCRIPT_MAX_SEGMENT_SECONDS = 6.3;
+export const GEMINI_TRANSCRIPT_MAX_CONTINUOUS_SPEECH_GAP_SECONDS = 2;
+export const GEMINI_TRANSCRIPT_CACHE_VERSION = 3;
+
+export const parseGeminiTranscriptResponse = (responseText, duration) => {
+    let parsed;
+    try { parsed = JSON.parse(responseText); } catch (error) {
+        throw new Error("Gemini did not return valid JSON.");
+    }
+    if (!Array.isArray(parsed)) throw new Error("Gemini did not return a JSON array.");
+    const normalized = parsed.map((item, index) => {
+        if (!item || typeof item.text !== "string" || !item.text.trim() ||
+            typeof item.translatedText !== "string" || !item.translatedText.trim()) {
+            throw new Error("Gemini transcript segment " + index + " is missing original or translated text.");
+        }
+        const originalText = item.text.trim();
+        const translatedText = item.translatedText.trim();
+        if (!isSpeakableTtsText(originalText) || !isSpeakableTtsText(translatedText)) {
+            throw new Error("Gemini transcript segment " + index + " contains punctuation-only text.");
+        }
+        if (!Array.isArray(item.timestamp) || item.timestamp.length !== 2 ||
+            !item.timestamp.every(Number.isFinite)) {
+            throw new Error("Gemini timestamp at segment " + index + " must contain exactly [start, end].");
+        }
+        const segmentDuration = item.timestamp[1] - item.timestamp[0];
+        if (segmentDuration > GEMINI_TRANSCRIPT_MAX_SEGMENT_SECONDS + 1e-9) {
+            throw new Error(
+                "Gemini transcript segment " + index + " is " + segmentDuration.toFixed(3) +
+                "s long and exceeds the maximum natural clause duration of " +
+                GEMINI_TRANSCRIPT_MAX_SEGMENT_SECONDS.toFixed(1) + "s."
+            );
+        }
+        if (item.kind !== "dialogue" && item.kind !== "narration") {
+            throw new Error("Gemini transcript segment " + index + " has invalid speech kind.");
+        }
+        if (item.speaker !== undefined && typeof item.speaker !== "string") {
+            throw new Error("Gemini transcript segment " + index + " has an invalid speaker.");
+        }
+        if (item.kind === "dialogue" && (!item.speaker || !item.speaker.trim())) {
+            throw new Error("Gemini dialogue segment " + index + " is missing a speaker identifier.");
+        }
+        return { timestamp: item.timestamp, text: originalText, translatedText,
+            kind: item.kind, ...(item.speaker?.trim() ? { speaker: item.speaker.trim() } : {}) };
+    });
+    return validateTimestamps(normalized, duration);
+};
+
+export const buildGeminiTranscriptionPrompt = (
+    duration,
+    translationRules = getTranslationSystemInstruction()
+) => {
+    const responseExample = '[{"timestamp":[0,4.2],"text":"original clause","translatedText":"မြန်မာဘာသာပြန် စာပိုဒ်","kind":"dialogue","speaker":"speaker_1"}]';
+    return `Listen to the source audio and provide a complete chronological transcript and Burmese translation.
+
+SEGMENTATION AND TIMESTAMP RULES:
+- Emit natural sentence- or clause-level records, normally ${GEMINI_TRANSCRIPT_TARGET_MIN_SECONDS}–${GEMINI_TRANSCRIPT_TARGET_MAX_SECONDS} seconds each.
+- Derive every record's start and end timestamp independently by listening to the source audio. Timestamps must follow the actual spoken clause boundaries.
+- Never calculate sub-segment timestamps proportionally from text, character counts, or a longer parent timestamp.
+- Never combine multiple natural clauses into one long record. A short complete utterance under ${GEMINI_TRANSCRIPT_TARGET_MIN_SECONDS} seconds must remain intact.
+- When speech continues, the gap between consecutive records must not exceed ${GEMINI_TRANSCRIPT_MAX_CONTINUOUS_SPEECH_GAP_SECONDS} seconds. Preserve genuine source silence.
+- Preserve every intended word, fact, intent, question, command, reply, tone, and the exact source order.
+- Classify each record independently as kind "dialogue" or "narration". Keep stable speaker identifiers for dialogue, and never merge different speakers or dialogue with narration.
+- Preserve Burmese Unicode grapheme clusters intact. Never split a Burmese grapheme cluster between records.
+- Never emit punctuation-only, symbol-only, or whitespace-only records.
+
+This audio is exactly ${duration.toFixed(2)} seconds long. No timestamp may exceed the real media duration.
 
 CRITICAL RULES FOR TRANSLATION:
 ${translationRules}
 
-Return the result STRICTLY as a JSON array of objects, with NO markdown formatting outside the JSON. Format:
-[
-  {
-    "timestamp": [0.0, 5.5],
-    "text": "original text here",
-    "translatedText": "Burmese translation here"
-  }
-]`;
-
-            console.log(`[AI] Generating content with Gemini (Attempt ${attempt}/${maxRetries}, Model: ${targetModel})...`);
-            const response = await ai.models.generateContent({
-                model: targetModel,
-                contents: [{
-                    role: 'user',
-                    parts: [
-                        { inlineData: { data: audioData, mimeType: 'audio/wav' } },
-                        { text: prompt }
-                    ]
-                }],
-                config: {
-                    responseMimeType: "application/json"
-                }
-            });
-
-            const responseText = response.text;
-            let parsed;
-            try {
-                parsed = JSON.parse(responseText);
-            } catch (err) {
-                console.error("[AI] Failed to parse JSON from Gemini response:", responseText);
-                throw new Error("Gemini did not return valid JSON array.");
-            }
-            
-            // Map translatedText to the main translation mapping format if we need to? 
-            // Wait, validateTimestamps will ensure timestamps are fine.
-            const validated = validateTimestamps(parsed, duration);
-            
-            if (cachePath) fs.writeFileSync(cachePath, JSON.stringify(validated, null, 2));
-            
-            // No cleanup needed for inlineData
-            
-            return validated;
-        } catch(e) {
-            console.error(`[AI] Gemini transcription attempt ${attempt} failed with model ${targetModel}: ${e.message}`);
-            
-            const isRateLimitOrUnavailable = e.message.includes('503') || e.message.includes('429') || e.message.includes('UNAVAILABLE') || e.message.includes('RESOURCE_EXHAUSTED');
-            if (isRateLimitOrUnavailable) {
-                console.log(`[AI] Switching to fallback model due to high demand/quota...`);
-                currentModelIndex++;
-            }
-            
-            if (attempt === maxRetries) {
-                
-                throw new Error(`Gemini transcription failed after ${maxRetries} attempts: ${e.message}`);
-            }
-            
-            // Exponential backoff
-            const delay = isRateLimitOrUnavailable ? 5000 * attempt : 2000 * attempt;
-            console.log(`[AI] Retrying in ${delay}ms...`);
-            await new Promise(r => setTimeout(r, delay));
-        }
-    }
-    
-    return [];
+Return STRICTLY a JSON array of objects containing timestamp, original text, Burmese translatedText, kind, and speaker for dialogue, with no markdown outside the JSON. Example:
+${responseExample}`;
 };
 
-
-export const translateWithGemini = async (originalTranscript, cachePath, apiKey = null) => {
-    if (!originalTranscript || originalTranscript.length === 0) return [];
-    
-    if (cachePath && fs.existsSync(cachePath)) {
-        try {
-            const cachedData = JSON.parse(fs.readFileSync(cachePath, 'utf8'));
-            if (cachedData.length === originalTranscript.length) {
-                return cachedData;
-            }
-        } catch(e) {}
-    }
-
-    // Since we now do transcription AND translation in a single Gemini call inside transcribeWav,
-    // the originalTranscript should already contain 'translatedText'. If so, just extract it!
-    const hasTranslations = originalTranscript.every(t => typeof t.translatedText === 'string');
-    if (hasTranslations) {
-        console.log("[AI] Bypassing separate translation step because transcript already contains translatedText.");
-        const finalResult = originalTranscript.map((t, i) => ({
-            timestamp: t.timestamp,
-            text: t.translatedText
-        }));
-        if (cachePath) fs.writeFileSync(cachePath, JSON.stringify(finalResult, null, 2));
-        return finalResult;
-    }
-    
-    if (!apiKey) {
-        throw new Error("Gemini API key is required for translation.");
-    }
-    
-    if (apiKey === 'bypass') return originalTranscript;
-    
-    const modelName = process.env.GEMINI_MODEL || 'gemini-3.5-flash';
-    const url = `https://generativelanguage.googleapis.com/v1beta/models/${modelName}:generateContent?key=${apiKey}`;
-    
-    const systemInstructionText = getTranslationSystemInstruction();
-    
-    const BATCH_SIZE = 40;
-    const finalResult = [];
-    
-    for (let batchStart = 0; batchStart < originalTranscript.length; batchStart += BATCH_SIZE) {
-        const batch = originalTranscript.slice(batchStart, batchStart + BATCH_SIZE);
-        const inputPayload = batch.map((t, i) => ({
-            index: batchStart + i,
-            text: t.text
-        }));
-        
-        const maxRetries = 3;
-        let attempt = 0;
-        let delay = 1000;
-        let batchSuccess = false;
-        
-        while (attempt < maxRetries && !batchSuccess) {
-            attempt++;
-            try {
-                const response = await axios.post(url, {
-                    system_instruction: {
-                        parts: [{ text: systemInstructionText }]
-                    },
-                    contents: [{
-                        role: "user",
-                        parts: [{ text: JSON.stringify(inputPayload) }]
-                    }],
-                    generationConfig: {
-                        response_mime_type: "application/json",
-                        temperature: 0.2
-                    }
-                }, {
-                    headers: { 'Content-Type': 'application/json' },
-                    timeout: 120000
-                });
-                
-                const textResponse = response.data?.candidates?.[0]?.content?.parts?.[0]?.text;
-                if (!textResponse) throw new Error("Empty response from Gemini.");
-                
-                let parsed;
-                try {
-                    parsed = JSON.parse(textResponse);
-                } catch (e) {
-                    throw new Error("Invalid JSON response from Gemini.");
-                }
-                
-                if (!Array.isArray(parsed)) throw new Error("Gemini response is not an array.");
-                if (parsed.length !== batch.length) {
-                    throw new Error(`Gemini response length (${parsed.length}) does not match input batch length (${batch.length}).`);
-                }
-                
-                for (let i = 0; i < batch.length; i++) {
-                    const globalIndex = batchStart + i;
-                    const item = parsed.find(p => p.index === globalIndex);
-                    if (!item || typeof item.text !== 'string') {
-                        throw new Error(`Missing or invalid translation for chunk ${globalIndex}.`);
-                    }
-                    finalResult.push({
-                        timestamp: originalTranscript[globalIndex].timestamp,
-                        text: item.text
-                    });
-                }
-                batchSuccess = true;
-            } catch (err) {
-                let errorMsg = err.message;
-                if (err.response && err.response.status === 404) {
-                    errorMsg = `Model '${modelName}' not found or unsupported (HTTP 404). Please configure a valid GEMINI_MODEL.`;
-                }
-                console.error(`[AI] Gemini translation attempt ${attempt} failed for batch ${batchStart}: ${errorMsg}`);
-                
-                const isTransient = !err.response || err.response.status >= 500 || err.response.status === 429 || err.code === 'ECONNABORTED';
-                if (attempt === maxRetries || !isTransient || (err.response && err.response.status === 404)) {
-                    throw new Error(`Gemini translation failed at batch ${batchStart}. ${errorMsg}`);
-                }
-                await new Promise(resolve => setTimeout(resolve, delay));
-                delay *= 2;
-            }
-        }
-    }
-    
-    if (cachePath) {
-        fs.writeFileSync(cachePath, JSON.stringify(finalResult, null, 2));
-    }
-    
-    return finalResult;
+export const transcribeWav = async (wavPath, cachePath, _apiKey, options = {}) => {
+    const duration = await getDuration(wavPath);
+    return transcribeWithFasterWhisper({
+        wavPath, cachePath, duration,
+        signal: options.signal, timeoutMs: options.timeoutMs,
+        ...(options.invoke ? { invoke: options.invoke } : {}),
+        ...(options.sourceFingerprint ? { sourceFingerprint: options.sourceFingerprint } : {})
+    });
 };
 
-export const generateNarrationTTS = async (sceneNarration, cachePath, voiceId, _ignoredOriginalTranscript) => {
+export const translateWithGemini = async (originalTranscript, cachePath, apiKey = null, options = {}) => {
+    const sourceFingerprint = options.sourceFingerprint || crypto.createHash('sha256').update(JSON.stringify(originalTranscript)).digest('hex');
+    const colloquialValue = getSetting('COLLOQUIAL_MODE');
+    const settings = options.settings || {
+        colloquialMode: colloquialValue === 'true' || colloquialValue === '1' || colloquialValue === true,
+        instruction: getTranslationSystemInstruction()
+    };
+    return translateTranscriptWithGemini({
+        sourceRecords: originalTranscript, cachePath, apiKey, sourceFingerprint, settings,
+        model: 'gemini-3.6-flash',
+        ...(options.generateContent ? { generateContent: options.generateContent } : {}),
+        ...(options.sleep ? { sleep: options.sleep } : {}),
+        ...(options.random ? { random: options.random } : {}),
+        ...(options.onRetry ? { onRetry: options.onRetry } : {}),
+        ...(options.listModels ? { listModels: options.listModels } : {}),
+        ...(options.onModelSelected ? { onModelSelected: options.onModelSelected } : {})
+    });
+};
+
+export { fingerprintFile };
+
+export const createTtsNarrationFingerprint = ({ sceneNarration, edgeVoice, pitch, rate, videoDuration, sourceFingerprint = null }) =>
+    crypto.createHash('sha256').update(JSON.stringify({
+        workflowVersion: WORKFLOW_VERSION, algorithmVersion: 'edge-tts-grouped-v12', sourceFingerprint, voice: edgeVoice, pitch, rate, videoDuration,
+        narration: sceneNarration.map(scene => ({
+            text: scene.narration_text, start: scene.scene_start, end: scene.scene_end,
+            kind: scene.kind || 'narration', speaker: scene.speaker || null
+        }))
+    })).digest('hex');
+
+export const generateNarrationTTS = async (sceneNarration, cachePath, voiceId, _ignoredOriginalTranscript, videoDuration, { geminiApiKey, sourceFingerprint = null, rewriteSegment = rewriteBurmeseSegmentForDuration, enableLegacyDurationFit = true } = {}) => {
+    const cacheDir = path.dirname(cachePath);
+    const ttsDir = path.join(cacheDir, 'tts_chunks_scene');
     try {
-        console.log("[AI] Starting TTS Generation (Scene-based Continuous Audio)");
+        console.log('[AI] Starting grouped TTS generation');
         const cacheMetaPath = cachePath + '.meta.json';
+        const timelinePath = cachePath + '.timeline.json';
+        const timelineMetaPath = cachePath + '.timeline.meta.json';
+        const sourceVideoDuration = Number.isFinite(videoDuration)
+            ? videoDuration
+            : Math.max(...sceneNarration.map(scene => scene.scene_end));
         const voiceConfig = getVoiceConfig(voiceId);
         const edgeVoice = voiceConfig.edgeVoice;
         const pitch = voiceConfig.pitch;
         const rate = voiceConfig.rate;
-        const dialogueVal = getSetting('DIALOGUE_MODE');
-        const isDialogue = dialogueVal === 'true' || dialogueVal === '1' || dialogueVal === true;
-
-        const narrationFingerprint = crypto.createHash('sha256').update(JSON.stringify({
-            version: 2,
+        const narrationFingerprint = createTtsNarrationFingerprint({
+            sceneNarration, edgeVoice, pitch, rate, videoDuration: sourceVideoDuration, sourceFingerprint
+        });
+        const currentMeta = {
+            workflowVersion: WORKFLOW_VERSION,
+            algorithmVersion: 'edge-tts-grouped-v12',
+            sourceFingerprint,
             voice: edgeVoice,
             pitch,
             rate,
-            dialogueMode: isDialogue,
-            narration: sceneNarration.map(scene => ({
-                text: scene.narration_text,
-                start: scene.scene_start,
-                end: scene.scene_end
-            }))
-        })).digest('hex');
-        const currentMeta = { voice: edgeVoice, pitch, rate, len: sceneNarration.length, narrationFingerprint };
-        if (fs.existsSync(cachePath) && fs.existsSync(cacheMetaPath)) {
+            len: sceneNarration.length,
+            narrationFingerprint
+        };
+
+        if (fs.existsSync(cachePath) && fs.existsSync(cacheMetaPath) &&
+            fs.existsSync(timelinePath) && fs.existsSync(timelineMetaPath)) {
             try {
                 const existingMeta = JSON.parse(fs.readFileSync(cacheMetaPath, 'utf8'));
-                if (existingMeta.voice === currentMeta.voice && 
-                    existingMeta.pitch === currentMeta.pitch && 
-                    existingMeta.rate === currentMeta.rate && 
+                const existingTimelineMeta = JSON.parse(fs.readFileSync(timelineMetaPath, 'utf8'));
+                if (existingMeta.workflowVersion === currentMeta.workflowVersion &&
+                    existingMeta.algorithmVersion === currentMeta.algorithmVersion &&
+                    existingMeta.sourceFingerprint === currentMeta.sourceFingerprint &&
+                    existingMeta.voice === currentMeta.voice &&
+                    existingMeta.pitch === currentMeta.pitch &&
+                    existingMeta.rate === currentMeta.rate &&
                     existingMeta.len === currentMeta.len &&
-                    existingMeta.narrationFingerprint === currentMeta.narrationFingerprint) {
-                    console.log("[AI] Reusing cached continuous TTS audio.");
+                    existingMeta.narrationFingerprint === currentMeta.narrationFingerprint &&
+                    existingTimelineMeta.workflowVersion === currentMeta.workflowVersion &&
+                    existingTimelineMeta.algorithmVersion === currentMeta.algorithmVersion &&
+                    existingTimelineMeta.sourceFingerprint === currentMeta.sourceFingerprint &&
+                    existingTimelineMeta.narrationFingerprint === currentMeta.narrationFingerprint) {
+                    console.log('[AI] Reusing cached grouped TTS audio.');
                     return cachePath;
                 }
-            } catch (e) { }
+            } catch (error) { }
         }
 
-        const cacheDir = path.dirname(cachePath);
-        const ttsDir = path.join(cacheDir, 'tts_chunks_scene');
-        if (!fs.existsSync(ttsDir)) {
-            fs.mkdirSync(ttsDir, { recursive: true });
-        }
+        if (!fs.existsSync(ttsDir)) fs.mkdirSync(ttsDir, { recursive: true });
+        let groups = buildNarrationGroups(sceneNarration);
+        if (groups.length === 0) throw new Error('Pipeline Error: Narration contains no groups.');
 
-        const mergedBlocks = [];
-        let currentBlock = null;
-
-        const maxGap = isDialogue ? 3.0 : 0.75;
-        const maxDur = isDialogue ? 60 : 12;
-
-        for (let i = 0; i < sceneNarration.length; i++) {
-            const scene = sceneNarration[i];
-            
-            if (!currentBlock) {
-                currentBlock = {
-                    scenes: [i],
-                    mergedText: scene.narration_text,
-                    orig_start: scene.scene_start,
-                    orig_end: scene.scene_end
-                };
-            } else {
-                const gap = scene.scene_start - currentBlock.orig_end;
-                const proposedDuration = scene.scene_end - currentBlock.orig_start;
-                
-                if (gap < maxGap && proposedDuration <= maxDur) {
-                    currentBlock.scenes.push(i);
-                    currentBlock.mergedText += " " + scene.narration_text;
-                    currentBlock.orig_end = scene.scene_end;
-                } else {
-                    mergedBlocks.push(currentBlock);
-                    currentBlock = {
-                        scenes: [i],
-                        mergedText: scene.narration_text,
-                        orig_start: scene.scene_start,
-                        orig_end: scene.scene_end
-                    };
-                }
-            }
-        }
-        if (currentBlock) {
-            mergedBlocks.push(currentBlock);
-        }
-
-        const chunks = [];
-        const ttsClient = new EdgeTTS({ voice: edgeVoice, pitch, rate, saveSubtitles: true, timeout: 120000 });
-        
+        const ttsClient = new EdgeTTS({
+            voice: edgeVoice,
+            pitch,
+            rate,
+            saveSubtitles: true,
+            timeout: 120000
+        });
         let concurrencyLimit = 3;
         if (process.env.TTS_CONCURRENCY) {
             const parsed = parseInt(process.env.TTS_CONCURRENCY, 10);
-            if (Number.isFinite(parsed) && parsed >= 1) {
-                concurrencyLimit = Math.min(parsed, 20);
-            }
+            if (Number.isFinite(parsed) && parsed >= 1) concurrencyLimit = Math.min(parsed, 20);
         }
 
-        for (let i = 0; i < mergedBlocks.length; i++) {
-            const chunkFileName = `chunk_${String(i).padStart(4, '0')}.wav`;
-            chunks.push(path.join(ttsDir, chunkFileName));
-        }
-
-        let currentIndex = 0;
-        const processNext = async () => {
-            while (currentIndex < mergedBlocks.length) {
-                const bIdx = currentIndex++;
-                const chunkText = mergedBlocks[bIdx].mergedText;
-                if (!chunkText || typeof chunkText !== 'string' || chunkText.trim() === '') {
-                    throw new Error(`Merged block ${bIdx} text is empty or invalid.`);
-                }
-
-                const chunkPath = chunks[bIdx];
-                console.log(`[AI] Generating TTS chunk ${bIdx + 1} / ${mergedBlocks.length}...`);
-                
-                let success = false;
-                let lastError = null;
-                
-                for (let attempt = 1; attempt <= 3; attempt++) {
-                    try {
-                        let timeoutId;
+        let chunks = [];
+        let audioDurations = [];
+        const generateCurrentGroups = async () => {
+            chunks = groups.map((_, index) =>
+                path.join(ttsDir, `chunk_${String(index).padStart(4, '0')}.wav`)
+            );
+            let currentIndex = 0;
+            const processNext = async () => {
+                while (currentIndex < groups.length) {
+                    const groupIndex = currentIndex++;
+                    const chunkText = normalizeBurmeseNumberText(groups[groupIndex].mergedText);
+                    if (!isSpeakableTtsText(chunkText)) {
+                        throw new Error(`Narration group ${groupIndex} contains no speakable text.`);
+                    }
+                    const chunkPath = chunks[groupIndex];
+                    let success = false;
+                    let lastError = null;
+                    console.log(`[AI] Generating TTS group ${groupIndex + 1} / ${groups.length} (${groups[groupIndex].segments.length} anchors)...`);
+                    for (let attempt = 1; attempt <= 3; attempt++) {
                         try {
-                            const timeoutPromise = new Promise((_, reject) => {
-                                timeoutId = setTimeout(() => reject(new Error("Edge TTS timeout")), 120000);
-                            });
-                            await Promise.race([ttsClient.ttsPromise(chunkText, chunkPath), timeoutPromise]);
-                        } finally {
-                            if (timeoutId) clearTimeout(timeoutId);
-                        }
-                        
-                        if (fs.existsSync(chunkPath) && fs.statSync(chunkPath).size > 0) {
+                            const diagnostics = await synthesizeEdgeTts(ttsClient, chunkText, chunkPath);
+                            console.log(`[AI] TTS diagnostics ${formatEdgeTtsDiagnostics({ blockIndex: groupIndex, attempt, diagnostics })}`);
+                            if (!fs.existsSync(chunkPath) || fs.statSync(chunkPath).size === 0) {
+                                throw new Error('TTS generated empty file');
+                            }
                             success = true;
                             break;
-                        } else {
-                            throw new Error("TTS generated empty file");
+                        } catch (error) {
+                            lastError = error;
+                            console.warn(`[AI] TTS diagnostics ${formatEdgeTtsDiagnostics({ blockIndex: groupIndex, attempt, diagnostics: error.diagnostics })}`);
+                            console.warn(`[AI] TTS attempt ${attempt} failed for group ${groupIndex}:`, error);
+                            if (attempt < 3) {
+                                await new Promise(resolve => setTimeout(resolve, getTtsRetryDelayMs(attempt)));
+                            }
                         }
-                    } catch (err) {
-                        lastError = err;
-                        console.warn(`[AI] TTS attempt ${attempt} failed for block ${bIdx}:`, err);
+                    }
+                    if (!success) {
+                        throw new Error(`Failed to generate TTS for group ${groupIndex} after 3 attempts. Last error: ${lastError?.message}`);
                     }
                 }
-
-                if (!success) {
-                    throw new Error(`Failed to generate TTS for block ${bIdx} after 3 attempts. Last error: ${lastError?.message}`);
+            };
+            const workers = Array.from(
+                { length: Math.min(concurrencyLimit, groups.length) },
+                () => processNext()
+            );
+            await waitForAllTtsWorkers(workers);
+            audioDurations = await Promise.all(chunks.map(async (chunkPath, index) => {
+                const duration = parseFloat(await getDuration(chunkPath));
+                if (!Number.isFinite(duration) || duration <= 0) {
+                    throw new Error(`Timeline Error: Invalid duration for TTS group ${index}.`);
                 }
-            }
+                return duration;
+            }));
         };
 
-        const workers = [];
-        for (let i = 0; i < Math.min(concurrencyLimit, mergedBlocks.length); i++) {
-            workers.push(processNext());
-        }
-        await Promise.all(workers);
+        await generateCurrentGroups();
+        groups = assignNarrationGroupAnchors(groups, sourceVideoDuration);
+        const durationFitDiagnostics = [];
 
-        // Build Authoritative Timeline (Continuous)
+        const measureGroupSegments = groupIndex => {
+            const subtitlePath = chunks[groupIndex] + '.json';
+            if (!fs.existsSync(subtitlePath)) {
+                throw new Error(`Timeline Error: Edge-TTS subtitle sidecar is missing for group ${groupIndex}.`);
+            }
+            const subtitleParts = JSON.parse(fs.readFileSync(subtitlePath, 'utf8'));
+            return distributeNarrationGroupAudio(groups[groupIndex], 0, audioDurations[groupIndex], {
+                subtitleParts,
+                spokenText: normalizeBurmeseNumberText(groups[groupIndex].mergedText),
+                requireSubtitleBoundaries: true
+            });
+        };
+
+        const regenerateGroupSerially = async groupIndex => {
+            const chunkText = normalizeBurmeseNumberText(groups[groupIndex].mergedText);
+            const chunkPath = chunks[groupIndex];
+            let lastError = null;
+            for (let attempt = 1; attempt <= 3; attempt++) {
+                try {
+                    const diagnostics = await synthesizeEdgeTts(ttsClient, chunkText, chunkPath);
+                    console.log(`[AI] Duration-fit TTS diagnostics ${formatEdgeTtsDiagnostics({
+                        blockIndex: groupIndex, attempt, diagnostics
+                    })}`);
+                    if (!fs.existsSync(chunkPath) || fs.statSync(chunkPath).size === 0) {
+                        throw new Error('TTS generated empty file');
+                    }
+                    const duration = parseFloat(await getDuration(chunkPath));
+                    if (!Number.isFinite(duration) || duration <= 0) {
+                        throw new Error(`Timeline Error: Invalid duration for TTS group ${groupIndex}.`);
+                    }
+                    audioDurations[groupIndex] = duration;
+                    return;
+                } catch (error) {
+                    lastError = error;
+                    console.warn(`[AI] Duration-fit TTS diagnostics ${formatEdgeTtsDiagnostics({
+                        blockIndex: groupIndex, attempt, diagnostics: error.diagnostics
+                    })}`);
+                    if (attempt < 3) {
+                        await new Promise(resolve => setTimeout(resolve, getTtsRetryDelayMs(attempt)));
+                    }
+                }
+            }
+            throw new Error(
+                `Failed to regenerate duration-fit TTS for group ${groupIndex} after 3 attempts. ` +
+                `Last error: ${lastError?.message}`
+            );
+        };
+
+        while (enableLegacyDurationFit) {
+            let overflow = null;
+            for (let groupIndex = 0; groupIndex < groups.length && !overflow; groupIndex++) {
+                const measuredSegments = measureGroupSegments(groupIndex);
+                for (const measured of measuredSegments) {
+                    const generatedDuration = measured.final_audio_end - measured.final_audio_start;
+                    const targetDuration = measured.orig_end - measured.orig_start;
+                    if (generatedDuration / targetDuration > MAX_TTS_TEMPO) {
+                        overflow = { groupIndex, measured, generatedDuration };
+                        break;
+                    }
+                }
+            }
+            if (!overflow) break;
+
+            const { groupIndex, measured, generatedDuration } = overflow;
+            const group = groups[groupIndex];
+            const segmentPosition = group.segments.findIndex(item => item.index === measured.index);
+            const segment = group.segments[segmentPosition];
+            console.log(
+                `[AI] Segment ${segment.index} requires ${(generatedDuration /
+                    (segment.orig_end - segment.orig_start)).toFixed(3)}x; starting bounded serial duration fit.`
+            );
+            try {
+                const fit = await fitTtsSegmentDuration({
+                    segment,
+                    generatedDuration,
+                    rewriteText: request => rewriteSegment({ ...request, apiKey: geminiApiKey }),
+                    synthesizeAndMeasure: async ({ segment: rewritten }) => {
+                        const updatedSegments = [...groups[groupIndex].segments];
+                        updatedSegments[segmentPosition] = rewritten;
+                        groups[groupIndex] = {
+                            ...createNarrationGroup(updatedSegments),
+                            anchor_start: groups[groupIndex].anchor_start,
+                            anchor_end: groups[groupIndex].anchor_end
+                        };
+                        await regenerateGroupSerially(groupIndex);
+                        const updatedMeasurement = measureGroupSegments(groupIndex)
+                            .find(item => item.index === rewritten.index);
+                        return updatedMeasurement.final_audio_end - updatedMeasurement.final_audio_start;
+                    }
+                });
+                const updatedSegments = [...groups[groupIndex].segments];
+                updatedSegments[segmentPosition] = fit.segment;
+                groups[groupIndex] = {
+                    ...createNarrationGroup(updatedSegments),
+                    anchor_start: groups[groupIndex].anchor_start,
+                    anchor_end: groups[groupIndex].anchor_end
+                };
+                durationFitDiagnostics.push(...fit.diagnostics);
+                console.log(`[AI-DURATION-FIT] ${JSON.stringify(fit.diagnostics.at(-1))}`);
+            } catch (error) {
+                if (Array.isArray(error.diagnostics)) durationFitDiagnostics.push(...error.diagnostics);
+                fs.writeFileSync(cachePath + '.duration-fit.json', JSON.stringify(durationFitDiagnostics, null, 2));
+                throw error;
+            }
+        }
+        fs.writeFileSync(cachePath + '.duration-fit.json', JSON.stringify(durationFitDiagnostics, null, 2));
+
         const processedChunks = [];
         const authoritativeTimeline = [];
         let runningAudioTime = 0;
-        
-        for (let bIdx = 0; bIdx < mergedBlocks.length; bIdx++) {
-            const rawChunk = chunks[bIdx];
-            const block = mergedBlocks[bIdx];
-
-            let chunkDur = 0;
-            try {
-                chunkDur = parseFloat(await getDuration(rawChunk));
-            } catch(e) {
-                throw new Error(`Failed to get duration for ${rawChunk}`);
+        for (let groupIndex = 0; groupIndex < groups.length; groupIndex++) {
+            const rawChunk = chunks[groupIndex];
+            const group = groups[groupIndex];
+            const standardizedPath = path.join(
+                ttsDir,
+                `chunk_std_${String(groupIndex).padStart(4, '0')}.wav`
+            );
+            await runFFmpeg([
+                '-i', rawChunk,
+                '-acodec', 'pcm_s16le', '-ar', '24000', '-ac', '1',
+                '-y', standardizedPath
+            ], ttsDir);
+            const actualDuration = parseFloat(await getDuration(standardizedPath));
+            if (!Number.isFinite(actualDuration) || actualDuration <= 0) {
+                throw new Error(`Timeline Error: Cannot determine duration for TTS group ${groupIndex}.`);
             }
-
-            const standardizedPath = path.join(ttsDir, `chunk_std_${String(bIdx).padStart(4, '0')}.wav`);
-            await runFFmpeg(['-i', rawChunk, '-acodec', 'pcm_s16le', '-ar', '24000', '-ac', '1', '-y', standardizedPath], ttsDir);
             processedChunks.push(standardizedPath);
-            
-            let actualFinalDur = chunkDur;
-            try {
-                let actualDur = parseFloat(await getDuration(standardizedPath));
-                if (Number.isFinite(actualDur) && actualDur > 0) {
-                    actualFinalDur = actualDur;
-                } else {
-                    throw new Error(`Invalid FFprobe duration for ${standardizedPath}`);
-                }
-            } catch(e) {
-                throw new Error(`Timeline Error: Cannot determine actual duration for chunk ${bIdx}`);
+
+            const subtitlePath = rawChunk + '.json';
+            if (!fs.existsSync(subtitlePath)) {
+                throw new Error(`Timeline Error: Edge-TTS subtitle sidecar is missing for group ${groupIndex}.`);
             }
+            const subtitleParts = JSON.parse(fs.readFileSync(subtitlePath, 'utf8'));
+            const spokenText = normalizeBurmeseNumberText(group.mergedText);
+            const segments = distributeNarrationGroupAudio(
+                group,
+                runningAudioTime,
+                actualDuration,
+                { subtitleParts, spokenText, requireSubtitleBoundaries: true }
+            );
 
-            // Precise boundary mapping via EdgeTTS subtitle timing (if available)
-            const subFilePath = rawChunk + '.json';
-            let charToTime = null;
-
-            if (fs.existsSync(subFilePath)) {
-                try {
-                    const subData = JSON.parse(fs.readFileSync(subFilePath, 'utf8'));
-                    charToTime = buildSubtitleCharTimeline(block.mergedText, subData);
-                    if (!charToTime) {
-                        console.warn(`[AI] Subtitle text did not align with merged narration for chunk ${bIdx}; using proportional timing.`);
-                    }
-                } catch (e) {
-                    console.warn(`[AI] Failed to parse subtitle timing for chunk ${bIdx}`);
-                    charToTime = null;
-                }
-            }
-
-            // Calculate start character indices for each scene in the block
-            let sceneStartCharIndices = [];
-            let currentCharIndex = 0;
-            for (let i = 0; i < block.scenes.length; i++) {
-                sceneStartCharIndices.push(currentCharIndex);
-                currentCharIndex += sceneNarration[block.scenes[i]].narration_text.length;
-                if (i < block.scenes.length - 1) {
-                    currentCharIndex += 1; // space separator
-                }
-            }
-
-            let blockRunningTime = runningAudioTime;
-            const totalTextLength = block.scenes.reduce((sum, sIdx) => sum + sceneNarration[sIdx].narration_text.length, 0);
-            let sceneBoundaryTimes = null;
-            if (charToTime) {
-                const candidateBoundaries = [0];
-                for (let i = 1; i < sceneStartCharIndices.length; i++) {
-                    candidateBoundaries.push(findSubtitleTimeAtOrAfter(charToTime, sceneStartCharIndices[i]));
-                }
-                candidateBoundaries.push(actualFinalDur);
-                const validBoundaries = candidateBoundaries.every((value, index) =>
-                    Number.isFinite(value) && value >= 0 && value <= actualFinalDur &&
-                    (index === 0 || value >= candidateBoundaries[index - 1])
-                );
-                if (validBoundaries) {
-                    sceneBoundaryTimes = candidateBoundaries;
-                } else {
-                    console.warn(`[AI] Invalid subtitle boundaries for chunk ${bIdx}; using proportional timing.`);
-                }
-            }
-
-            for (let i = 0; i < block.scenes.length; i++) {
-                const sIdx = block.scenes[i];
-                const sceneItem = sceneNarration[sIdx];
-                const textLen = sceneItem.narration_text.length;
-                
-                let sceneDur = 0;
-                
-                if (sceneBoundaryTimes) {
-                    sceneDur = sceneBoundaryTimes[i + 1] - sceneBoundaryTimes[i];
-                } else {
-                    // Fallback to proportional
-                    if (totalTextLength > 0) {
-                        sceneDur = (textLen / totalTextLength) * actualFinalDur;
-                    } else {
-                        sceneDur = actualFinalDur / block.scenes.length;
-                    }
-                    if (i === block.scenes.length - 1) {
-                        sceneDur = (actualFinalDur - (blockRunningTime - runningAudioTime));
-                    }
-                }
-
-                if (sceneDur < 0) sceneDur = 0;
-
-                let orig_start = sceneItem.scene_start;
-                let orig_end = sceneItem.scene_end;
-                let orig_dur = orig_end - orig_start;
-                if (orig_dur < 0) orig_dur = 0;
-
-                authoritativeTimeline.push({
-                    chunk_index: sIdx,
-                    orig_start: orig_start,
-                    orig_end: orig_end,
-                    orig_dur: orig_dur,
-                    final_audio_start: blockRunningTime,
-                    final_audio_end: blockRunningTime + sceneDur,
-                    final_dur: sceneDur,
-                    text: sceneItem.narration_text
-                });
-
-                blockRunningTime += sceneDur;
-            }
-
-            runningAudioTime += actualFinalDur;
+            authoritativeTimeline.push({
+                group_index: groupIndex,
+                orig_start: group.orig_start,
+                orig_end: group.orig_end,
+                anchor_start: group.anchor_start,
+                anchor_end: group.anchor_end,
+                final_audio_start: runningAudioTime,
+                final_audio_end: runningAudioTime + actualDuration,
+                final_dur: actualDuration,
+                generated_duration: actualDuration,
+                text: group.mergedText,
+                kind: group.kind,
+                speaker: group.speaker,
+                segments
+            });
+            runningAudioTime += actualDuration;
         }
 
         const concatListPath = path.join(ttsDir, 'concat.txt');
-        let concatLines = processedChunks.map(c => `file '${path.basename(c)}'`).join('\n');
-
-        if (processedChunks.length === 0) {
-            console.warn("[WARNING] No audio chunks to concatenate. Generating 100ms silent audio...");
-            const gapPath = path.join(ttsDir, 'gap_empty.wav');
-            await runFFmpeg(['-f', 'lavfi', '-i', `anullsrc=r=24000:cl=mono`, '-t', '0.1', '-acodec', 'pcm_s16le', '-y', gapPath], ttsDir);
-            concatLines = `file 'gap_empty.wav'`;
-            processedChunks.push(gapPath);
-        }
-
-        fs.writeFileSync(concatListPath, concatLines);
-        
-        const args = [
+        fs.writeFileSync(
+            concatListPath,
+            processedChunks.map(chunkPath => `file '${path.basename(chunkPath)}'`).join('\n')
+        );
+        await runFFmpeg([
             '-y', '-f', 'concat', '-safe', '0', '-i', 'concat.txt',
             '-acodec', 'pcm_s16le', '-ac', '1', '-ar', '24000', cachePath
-        ];
-        
-        await runFFmpeg(args, ttsDir);
-        
+        ], ttsDir);
+
         if (!fs.existsSync(cachePath) || fs.statSync(cachePath).size === 0) {
-            throw new Error("Final TTS audio generation failed or is 0 bytes.");
+            throw new Error('Final TTS audio generation failed or is 0 bytes.');
         }
-        
-        const duration = await getDuration(cachePath);
-        if (!Number.isFinite(duration) || duration <= 0) {
-            throw new Error(`Final TTS audio has invalid duration: ${duration}`);
-        }
-        
-        let numChunks = processedChunks.length;
-        const absDiff = Math.abs(runningAudioTime - duration);
-        let status = absDiff <= 0.05 ? 'PASS' : 'FAIL';
-        
-        if (numChunks === 0 && duration <= 0.15) { 
-             status = 'PASS';
-             runningAudioTime = duration;
+        const finalDuration = parseFloat(await getDuration(cachePath));
+        const difference = Math.abs(runningAudioTime - finalDuration);
+        if (!Number.isFinite(finalDuration) || difference > 0.05) {
+            throw new Error(`Pipeline Error: Final grouped TTS duration difference (${difference.toFixed(3)}s) exceeds 0.05s tolerance.`);
         }
 
-        console.log(`[FINAL-TIMELINE-VALIDATION]`);
-        console.log(`timeline_duration: ${runningAudioTime.toFixed(3)}`);
-        console.log(`final_audio_duration: ${duration.toFixed(3)}`);
-        console.log(`absolute_difference: ${absDiff.toFixed(3)}`);
-        console.log(`chunk_count: ${numChunks}`);
-        console.log(`gap_count: 0`);
-        console.log(`status: ${status}`);
-
-        if (status === 'FAIL') {
-            throw new Error(`Pipeline Error: Final TTS audio duration difference (${absDiff.toFixed(3)}s) exceeds 0.05s tolerance!`);
-        }
-
-        console.log(`[AI-DIAGNOSTIC] FINAL ASSEMBLY: Expected duration=${runningAudioTime.toFixed(2)}s | Actual duration=${duration}s | Audio chunks=${numChunks} | Silence gaps=0`);
-        console.log(`[AI-TIMELINE-SUMMARY] chunks=${numChunks} | gaps=0 | authoritative_timeline_duration=${runningAudioTime.toFixed(3)}s`);
-        
         fs.writeFileSync(cacheMetaPath, JSON.stringify(currentMeta));
-        const authoritativeTimelinePath = cachePath + '.timeline.json';
-        fs.writeFileSync(authoritativeTimelinePath, JSON.stringify(authoritativeTimeline, null, 2));
-        
-        try {
-            if (fs.existsSync(ttsDir)) {
-                fs.rmSync(ttsDir, { recursive: true, force: true });
-            }
-        } catch (cleanupErr) { }
-        
+        fs.writeFileSync(timelinePath, JSON.stringify(authoritativeTimeline, null, 2));
+        fs.writeFileSync(timelineMetaPath, JSON.stringify({
+            workflowVersion: currentMeta.workflowVersion,
+            algorithmVersion: currentMeta.algorithmVersion,
+            sourceFingerprint: currentMeta.sourceFingerprint,
+            narrationFingerprint: currentMeta.narrationFingerprint
+        }, null, 2));
+        if (fs.existsSync(ttsDir)) fs.rmSync(ttsDir, { recursive: true, force: true });
+        console.log(`[AI-TIMELINE-SUMMARY] groups=${groups.length} anchors=${sceneNarration.length} audio=${finalDuration.toFixed(3)}s`);
         return cachePath;
-
-    } catch (err) {
-        console.error("[AI] Error generating TTS:", err);
-        const cacheDir = path.dirname(cachePath);
-        const ttsDir = path.join(cacheDir, 'tts_chunks_scene');
+    } catch (error) {
+        console.error('[AI] Error generating grouped TTS:', error);
         try {
-            if (fs.existsSync(ttsDir)) {
-                fs.rmSync(ttsDir, { recursive: true, force: true });
-            }
-        } catch (cleanupErr) { }
-        if (fs.existsSync(cachePath)) {
-            fs.unlinkSync(cachePath);
-        }
-        throw err;
+            if (fs.existsSync(ttsDir)) fs.rmSync(ttsDir, { recursive: true, force: true });
+        } catch (cleanupError) { }
+        if (fs.existsSync(cachePath)) fs.unlinkSync(cachePath);
+        throw error;
     }
 };

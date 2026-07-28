@@ -1,13 +1,11 @@
 import crypto from 'crypto';
 import fs from 'fs';
 import path from 'path';
+import { ensureStoragePaths, getStoragePaths } from '../config/runtime.js';
 
 const settingsStore = new Map();
 
-const dataDir = path.join(process.cwd(), 'data');
-if (!fs.existsSync(dataDir)) {
-    fs.mkdirSync(dataDir, { recursive: true });
-}
+const dataDir = ensureStoragePaths(getStoragePaths()).settings;
 const keyPath = path.join(dataDir, 'encryption.key');
 
 let encryptionKey;
@@ -52,18 +50,6 @@ export const getSetting = (key) => {
         }
     };
 
-    if (key === 'DIALOGUE_MODE') {
-        let val = _getRaw('DIALOGUE_MODE');
-        if (val !== null) return val;
-        
-        let oldNarration = _getRaw('NARRATION_MODE');
-        if (oldNarration === 'dialogue') return 'true';
-        if (oldNarration === 'colloquial' || oldNarration === 'normal') return 'false';
-        
-        let oldTranslation = _getRaw('TRANSLATION_STYLE');
-        if (oldTranslation === 'dialogue') return 'true';
-        return 'false';
-    }
     
     if (key === 'COLLOQUIAL_MODE') {
         let val = _getRaw('COLLOQUIAL_MODE');
@@ -95,7 +81,7 @@ export const deleteSetting = (key) => {
 };
 
 export const getAllSettingsMasked = () => {
-    const keys = ['EDGE_TTS_VOICE', 'DIALOGUE_MODE', 'COLLOQUIAL_MODE', 'VOICE_SPEED', 'VOICE_PITCH', 'AUDIO_LOUDNESS', 'SYNC_MODE', 'OUTPUT_SPEED_MULTIPLIER'];
+    const keys = ['EDGE_TTS_VOICE', 'COLLOQUIAL_MODE', 'VOICE_SPEED', 'VOICE_PITCH', 'AUDIO_LOUDNESS', 'SYNC_MODE', 'OUTPUT_SPEED_MULTIPLIER'];
     const result = {
         GEMINI_API_KEY: { configured: false }
     };

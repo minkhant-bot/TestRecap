@@ -17,6 +17,7 @@ const queue = new PQueue({ concurrency: concurrencyLimit });
 export const addJobToQueue = (jobId) => {
     queue.add(async () => {
         try {
+            updateJob(jobId, { status: 'processing' });
             await processRecapPipeline(jobId);
         } catch (error) {
             console.error(`[Queue] Job ${jobId} failed:`, error);

@@ -1,3 +1,5 @@
+import { WORKFLOW_VERSION, isJobStatus, isLegacyJob, isWorkflowStageId } from '../domain/workflow.js';
+
 const jobsStore = new Map();
 const jobKeys = new Map();
 
@@ -18,12 +20,16 @@ export const createJob = (id, data) => {
         id,
         videoPath: data.videoPath,
         audioPath: data.audioPath,
-        status: 'uploading',
+        status: 'queued',
         progress: 0,
-        currentStep: 'Upload',
+        stageId: 'upload',
+        stageOutcome: null,
+        workflowVersion: WORKFLOW_VERSION,
         created_at: Date.now(),
         originalFilename: data.originalFilename || null
+
     };
+    if (data.mode !== undefined) job.mode = data.mode;
     jobsStore.set(id, job);
     return getJob(id);
 };
@@ -42,6 +48,12 @@ export const updateJob = (id, updates) => {
     const existing = jobsStore.get(id);
     if (!existing) return;
     
+    if (updates.status !== undefined && !isJobStatus(updates.status)) {
+        throw new Error('Invalid job lifecycle status: ' + updates.status);
+    }
+    if (updates.stageId !== undefined && !isWorkflowStageId(updates.stageId)) {
+        throw new Error('Invalid workflow stage ID: ' + updates.stageId);
+    }
     const updated = { ...existing };
     for (const [k, v] of Object.entries(updates)) {
         if (k === 'result' && typeof v !== 'string') {
@@ -69,7 +81,11 @@ export const deleteJob = (id) => {
 
 export const recoverStuckJobs = () => {
     for (const [id, job] of jobsStore.entries()) {
-        if (['processing', 'pending', 'uploading'].includes(job.status)) {
+        if (isLegacyJob(job)) {
+            job.status = 'error';
+            job.error = 'Legacy workflow job cannot resume under workflow version ' + WORKFLOW_VERSION + '. Start a new job.';
+            jobsStore.set(id, job);
+        } else if (['processing', 'queued'].includes(job.status)) {
             job.status = 'error';
             job.error = 'Job interrupted due to server restart.';
             jobsStore.set(id, job);

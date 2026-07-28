@@ -1,47 +1,42 @@
-# Use an official lightweight Node.js 20 Debian image
 FROM node:20-bookworm-slim
 
-# Set production environment variables
-ENV NODE_ENV=production
-ENV PATH="/opt/venv/bin:$PATH"
+ENV NODE_ENV=production \
+    PATH=/opt/venv/bin:$PATH \
+    PYTHON_PATH=/opt/venv/bin/python3 \
+    HF_HOME=/opt/models/huggingface \
+    WHISPER_MODEL=small \
+    WHISPER_DEVICE=cpu \
+    WHISPER_COMPUTE_TYPE=int8 \
+    WHISPER_NUM_WORKERS=1 \
+    WHISPER_BEAM_SIZE=3 \
+    DATA_DIR=/data \
+    PIP_NO_CACHE_DIR=1
 
-# Install system dependencies: Python 3, venv, development tools, and ffmpeg
-RUN apt-get update && apt-get install -y --no-install-recommends \
-    python3 \
-    python3-pip \
-    python3-venv \
-    ffmpeg \
-    gcc \
-    g++ \
-    make \
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends python3 python3-pip python3-venv ffmpeg ca-certificates \
     && rm -rf /var/lib/apt/lists/*
 
-# Set up the working directory inside the container
 WORKDIR /app
 
-# Copy python package requirements first for efficient layer caching
 COPY requirements.txt ./
-
-# Create a virtual environment and install faster-whisper and python dependencies
 RUN python3 -m venv /opt/venv \
-    && /opt/venv/bin/pip install --no-cache-dir -r requirements.txt
+    && pip install --upgrade pip==25.1.1 \
+    && pip install -r requirements.txt
 
-# Copy package configurations
-COPY package*.json ./
+COPY package.json package-lock.json ./
+RUN npm ci --include=dev
 
-# Install npm dependencies (including devDependencies required to build the Vite client)
-RUN npm install --include=dev
-
-# Copy the rest of the application files
 COPY . .
 
-# Pre-download and cache the faster-whisper model during the build stage
-# This ensures zero runtime downloads and complete offline execution
-RUN /opt/venv/bin/python3 src/ai/download_model.py
+RUN mkdir -p "$HF_HOME" /data/uploads /data/cache /data/output \
+    && python3 src/ai/download_model.py \
+    && npm run build \
+    && npm prune --omit=dev \
+    && chown -R node:node /app /data /opt/models
 
-# Build the client-side React code with Vite
-RUN npm run build
+USER node
 
+HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
+    CMD node -e "const p=process.env.PORT||3000;fetch('http://127.0.0.1:'+p+'/api/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"
 
-# Start the full-stack server
 CMD ["node", "server.js"]

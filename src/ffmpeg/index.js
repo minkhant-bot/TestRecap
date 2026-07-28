@@ -7,9 +7,12 @@ import { execSync } from 'child_process';
 let ffmpegPath = _ffmpegPath;
 try { execSync('ffmpeg -version'); ffmpegPath = 'ffmpeg'; } catch (e) {}
 import ffprobePath from 'ffprobe-static';
+import { resolveFfprobePath } from './resolveFfprobe.js';
+import { WORKFLOW_VERSION } from '../domain/workflow.js';
 
 ffmpeg.setFfmpegPath(ffmpegPath);
-ffmpeg.setFfprobePath(ffprobePath.path);
+const resolvedFfprobePath = resolveFfprobePath(ffprobePath.path);
+ffmpeg.setFfprobePath(resolvedFfprobePath);
 
 
 const safeWriteCache = (cachePath, data) => {
@@ -108,10 +111,22 @@ export const extractWav = (inputPath, outputPath) => {
   });
 };
 
-export const detectScenes = async (videoPath, cachePath) => {
+export const detectScenes = async (videoPath, cachePath, options = {}) => {
+    const algorithmVersion = 'ffmpeg-scene-detection-v1';
     if (cachePath && fs.existsSync(cachePath)) {
-        console.log('Loading scenes from cache:', cachePath);
-        return JSON.parse(fs.readFileSync(cachePath, 'utf8'));
+        try {
+            const cached = JSON.parse(fs.readFileSync(cachePath, 'utf8'));
+            if (cached.workflowVersion !== WORKFLOW_VERSION ||
+                cached.algorithmVersion !== algorithmVersion ||
+                cached.sourceFingerprint !== options.sourceFingerprint ||
+                !Array.isArray(cached.boundaries)) {
+                throw new Error('scene cache identity mismatch');
+            }
+            console.log('Loading verified scenes from cache:', cachePath);
+            return cached.boundaries;
+        } catch (error) {
+            console.warn('[FFmpeg] Scene cache rejected:', error.message);
+        }
     }
 
     const scenes = [];
@@ -166,18 +181,35 @@ export const detectScenes = async (videoPath, cachePath) => {
     }
     
     if (cachePath) {
-        fs.writeFileSync(cachePath, JSON.stringify(scenes));
+        fs.writeFileSync(cachePath, JSON.stringify({
+            workflowVersion: WORKFLOW_VERSION,
+            algorithmVersion,
+            sourceFingerprint: options.sourceFingerprint,
+            boundaries: scenes
+        }, null, 2));
     }
     return scenes;
 };
 
-export const runFFmpeg = (args, cwd, onProgress, timeoutMs = 600000) => {
+export const terminateFFmpegProcess = child => {
+    if (!child || child.killed) return;
+    try {
+        if (process.platform !== 'win32' && child.pid) process.kill(-child.pid, 'SIGTERM');
+        else child.kill('SIGTERM');
+    } catch {
+        try { child.kill('SIGTERM'); } catch { }
+    }
+};
+
+export const runFFmpeg = (args, cwd, onProgress, timeoutMs = 600000, options = {}) => {
     return new Promise((resolve, reject) => {
         if (!fs.existsSync(cwd)) {
             return reject(new Error(`CWD does not exist: ${cwd}`));
         }
         console.log(`[FFmpeg] Running (cwd=${cwd}): ${args[0]} ... (${args.length} args)`);
-        const child = spawn(ffmpegPath, args, { cwd });
+        const spawnImpl = options.spawnImpl || spawn;
+        const child = spawnImpl(ffmpegPath, args, { cwd, detached: process.platform !== 'win32' });
+        const signal = options.signal;
         
         let timeoutTimer = null;
         let isDone = false;
@@ -187,6 +219,7 @@ export const runFFmpeg = (args, cwd, onProgress, timeoutMs = 600000) => {
                 clearTimeout(timeoutTimer);
                 timeoutTimer = null;
             }
+            signal?.removeEventListener('abort', onAbort);
         };
 
         const safeResolve = () => {
@@ -203,10 +236,20 @@ export const runFFmpeg = (args, cwd, onProgress, timeoutMs = 600000) => {
             reject(err);
         };
         
+        const onAbort = () => {
+            terminateFFmpegProcess(child);
+            safeReject(Object.assign(new Error('FFmpeg operation cancelled.'), { code: 'ABORT_ERR' }));
+        };
+        if (signal?.aborted) {
+            onAbort();
+            return;
+        }
+        signal?.addEventListener('abort', onAbort, { once: true });
+
         if (timeoutMs) {
             timeoutTimer = setTimeout(() => {
                 console.error(`[FFmpeg] Timeout reached (${timeoutMs}ms), killing process...`);
-                child.kill('SIGKILL');
+                terminateFFmpegProcess(child);
                 safeReject(new Error(`FFmpeg timed out after ${timeoutMs}ms.`));
             }, timeoutMs);
         }

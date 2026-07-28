@@ -3,17 +3,21 @@ import multer from 'multer';
 import { v4 as uuidv4 } from 'uuid';
 import fs from 'fs';
 import path from 'path';
-import { createJob, getJob, updateJob, setJobKeys } from '../services/jobManager.js';
+import { clearJobKeys, createJob, deleteJob, getJob, getJobKeys, updateJob, setJobKeys } from '../services/jobManager.js';
+import { COMPLETED_JOB_ID_PATTERN, deleteCompletedJobAndRecord, resolveCompletedJobForDeletion } from '../services/completedOutputDeletion.js';
 import { addJobToQueue } from '../services/queue.js';
 import { getSetting, setSetting, deleteSetting, getAllSettingsMasked } from '../services/settings.js';
 import { VOICES, getVoiceConfig } from '../ai/voices.js';
 import { EdgeTTS } from '@seepine/edge-tts';
+import { WORKFLOW_VERSION, isLegacyJob } from '../domain/workflow.js';
+import { getRetryStartStage } from '../services/geminiRetryPolicy.js';
+import { ensureStoragePaths, getStoragePaths } from '../config/runtime.js';
 
 
 const router = express.Router();
 
-const tmpDir = path.join(process.cwd(), 'src', 'tmp');
-if (!fs.existsSync(tmpDir)) fs.mkdirSync(tmpDir, { recursive: true });
+const storagePaths = ensureStoragePaths(getStoragePaths());
+const tmpDir = storagePaths.uploads;
 
 let maxUploadSize = 500 * 1024 * 1024; // 500 MB default
 if (process.env.MAX_UPLOAD_SIZE_MB) {
@@ -49,7 +53,7 @@ router.get('/health', (req, res) => res.json({ status: 'ok' }));
 router.get('/diagnostic', async (req, res) => {
     const key = (getSetting('GEMINI_API_KEY') || process.env.GEMINI_API_KEY) || '';
     const maskedKey = key.length > 8 ? `${key.substring(0, 4)}...${key.substring(key.length - 4)}` : (key ? 'too-short' : 'missing');
-    const model = process.env.GEMINI_MODEL || 'gemini-3.5-flash';
+    const model = process.env.GEMINI_MODEL || 'gemini-3.6-flash';
     
     const diagData = {
         model,
@@ -173,19 +177,14 @@ router.post('/settings', (req, res) => {
 });
 
 
-router.post('/process-recap', handleUpload, (req, res) => {
+const createProcessingJob = (req, res) => {
     const videoFile = req.file;
-
-    if (!videoFile) {
-        return res.status(400).json({ error: 'Video file is required' });
-    }
+    if (!videoFile) return res.status(400).json({ error: 'Video file is required' });
 
     const geminiApiKey = req.body.geminiApiKey || req.headers['x-gemini-api-key'] || process.env.GEMINI_API_KEY;
-    
     if (!geminiApiKey) {
-        const missing = [];
-                if (!geminiApiKey) missing.push('GEMINI_API_KEY');
-        return res.status(400).json({ error: 'Please configure your API Keys before starting processing. Missing: ' + missing.join(', ') });
+        if (fs.existsSync(videoFile.path)) fs.unlinkSync(videoFile.path);
+        return res.status(400).json({ error: 'Please configure your API Keys before starting processing. Missing: GEMINI_API_KEY' });
     }
 
     const jobId = uuidv4();
@@ -195,19 +194,32 @@ router.post('/process-recap', handleUpload, (req, res) => {
         originalFilename: videoFile.originalname
     });
     setJobKeys(jobId, { geminiApiKey });
-    
     res.json({ jobId });
-
     addJobToQueue(jobId);
-});
+};
+
+router.post(['/jobs', '/process-recap'], handleUpload, createProcessingJob);
 
 router.post('/retry/:jobId', (req, res) => {
     const job = getJob(req.params.jobId);
     if (!job) return res.status(404).json({ error: 'Job not found' });
     if (job.status !== 'error') return res.status(400).json({ error: 'Job is not in error state' });
+    if (isLegacyJob(job)) {
+        return res.status(409).json({ error: 'Legacy workflow jobs cannot be resumed under workflow version ' + WORKFLOW_VERSION + '. Start a new job.' });
+    }
     
-    updateJob(req.params.jobId, { status: 'queued', error: null });
-    res.json({ message: 'Retrying job', jobId: req.params.jobId });
+    const geminiApiKey = req.body?.geminiApiKey || req.headers['x-gemini-api-key'] || getJobKeys(req.params.jobId).geminiApiKey || process.env.GEMINI_API_KEY;
+    if (!geminiApiKey) {
+        return res.status(400).json({ error: 'A Gemini API key is required to resume this workflow-v2 job.' });
+    }
+    setJobKeys(req.params.jobId, { geminiApiKey });
+    const retryStage = getRetryStartStage(job);
+    updateJob(req.params.jobId, {
+        status: 'queued', error: null, stageId: retryStage, stageOutcome: null,
+        stageMessage: retryStage === 'translate_burmese' ? 'Retrying Burmese translation…' : null,
+        progress: retryStage === 'translate_burmese' ? 30 : 0
+    });
+    res.json({ message: 'Retrying job from ' + retryStage, jobId: req.params.jobId, stageId: retryStage });
     addJobToQueue(req.params.jobId);
 });
 
@@ -215,6 +227,33 @@ router.get('/status/:jobId', (req, res) => {
     const job = getJob(req.params.jobId);
     if (!job) return res.status(404).json({ error: 'Job not found' });
     res.json(job);
+});
+
+router.delete('/jobs/:jobId', (req, res) => {
+    const { jobId } = req.params;
+    if (!COMPLETED_JOB_ID_PATTERN.test(jobId)) {
+        return res.status(400).json({ error: 'Invalid job ID.' });
+    }
+    const storedJob = getJob(jobId);
+    if (storedJob && storedJob.status !== 'complete') {
+        return res.status(409).json({ error: 'Only completed jobs can be deleted.' });
+    }
+
+    try {
+        const job = resolveCompletedJobForDeletion({ jobId, job: storedJob });
+        if (!job) return res.status(404).json({ error: 'Completed output not found.' });
+        deleteCompletedJobAndRecord({
+            job,
+            clearCredentials: clearJobKeys,
+            deleteRecord: deleteJob
+        });
+        return res.json({ deleted: true, jobId });
+    } catch (error) {
+        console.error(`[API] Failed to delete completed job ${jobId}:`, error);
+        return res.status(500).json({
+            error: `Completed output could not be deleted: ${error.message}`
+        });
+    }
 });
 
 // Adding compatibility routes based on instructions
@@ -270,7 +309,7 @@ router.all('/completed-jobs', (req, res) => {
     
     const validJobs = [];
     for (const row of rows) {
-        const outputPath = path.join(process.cwd(), 'public', 'output', `${row.id}.mp4`);
+        const outputPath = path.join(storagePaths.output, `${row.id}.mp4`);
         if (fs.existsSync(outputPath)) {
             const stat = fs.statSync(outputPath);
             validJobs.push({
@@ -284,6 +323,27 @@ router.all('/completed-jobs', (req, res) => {
         }
     }
     
+    const includedIds = new Set(validJobs.map(job => job.jobId));
+    for (const id of ids) {
+        if (includedIds.has(id) || !COMPLETED_JOB_ID_PATTERN.test(id)) continue;
+        const liveJob = getJob(id);
+        if (liveJob && liveJob.status !== 'complete') continue;
+        const outputPath = path.join(storagePaths.output, `${id}.mp4`);
+        if (!fs.existsSync(outputPath)) continue;
+        const stat = fs.lstatSync(outputPath);
+        if (!stat.isFile() || stat.isSymbolicLink()) continue;
+        const completedAt = liveJob?.completed_at || stat.mtimeMs;
+        if (completedAt <= timeLimit) continue;
+        validJobs.push({
+            jobId: id,
+            originalFilename: liveJob?.originalFilename || 'Completed video',
+            completedAt,
+            sizeBytes: stat.size,
+            videoUrl: `/output/${id}.mp4`,
+            expiresAt: completedAt + 24 * 60 * 60 * 1000
+        });
+    }
+
     res.json(validJobs);
 });
 

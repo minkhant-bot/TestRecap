@@ -4,6 +4,7 @@ import os from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
 import {
+    FFMPEG_VIDEO_THREADS,
     MAX_VISUAL_PLAYBACK_RATE,
     buildAtempoFilter,
     buildConcatManifest,
@@ -71,6 +72,8 @@ test('segment generation command performs accurate trim and visual timing adjust
     const args = buildSegmentFFmpegArgs('/input/source.mp4', '/job/segment.mp4', segment);
     assert.deepEqual(args.slice(0, 6), ['-ss', '0.500000', '-t', '2.000000', '-i', '/input/source.mp4']);
     assert.match(args[args.indexOf('-vf') + 1], /setpts=PTS\/2\.00000000/);
+    assert.equal(args[args.indexOf('-threads') + 1], String(FFMPEG_VIDEO_THREADS));
+    assert.equal(args.some(value => /^(scale|crop)=/.test(value)), false);
     assert.equal(args[args.length - 1], '/job/segment.mp4');
 });
 

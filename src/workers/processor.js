@@ -11,6 +11,7 @@ import {
     buildConcatManifest,
     buildSegmentFFmpegArgs,
     buildTimelineManifest,
+    FFMPEG_VIDEO_THREADS,
     getJobOutputPaths,
     getSegmentPath,
     mapRecordsChronologically,
@@ -319,7 +320,7 @@ export const processRecapPipeline = async (jobId) => {
                 '-f', 'concat', '-safe', '0', '-i', state.concatFile,
                 '-i', path.resolve(state.ttsAudioPath),
                 '-map', '0:v:0', '-map', '1:a:0',
-                '-c:v', 'libx264', '-preset', 'fast', '-crf', '20',
+                '-c:v', 'libx264', '-threads', String(FFMPEG_VIDEO_THREADS), '-preset', 'fast', '-crf', '20',
                 '-c:a', 'aac', '-b:a', '128k',
                 '-t', state.audioDuration.toFixed(6),
                 '-movflags', '+faststart', '-y', finalFileTmp
@@ -355,7 +356,7 @@ export const processRecapPipeline = async (jobId) => {
                     '-filter_complex',
                     `[0:v]setpts=PTS/${finalSpeed.toFixed(8)}[v];[0:a]${buildAtempoFilter(finalSpeed)}[a]`,
                     '-map', '[v]', '-map', '[a]',
-                    '-c:v', 'libx264', '-preset', 'fast', '-crf', '20',
+                    '-c:v', 'libx264', '-threads', String(FFMPEG_VIDEO_THREADS), '-preset', 'fast', '-crf', '20',
                     '-c:a', 'aac', '-b:a', '128k', '-movflags', '+faststart',
                     '-y', adjustedTmp
                 ], jobTmpDir);

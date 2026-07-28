@@ -6,6 +6,7 @@ export const TIMELINE_ALGORITHM_VERSION = 'chronological-scene-timeline-v1';
 export const MIN_VISUAL_PLAYBACK_RATE = 0.25;
 export const MAX_VISUAL_PLAYBACK_RATE = 4;
 export const MAX_AV_DRIFT_SECONDS = 0.3;
+export const FFMPEG_VIDEO_THREADS = 2;
 
 const finite = (value, label) => {
     const number = Number(value);
@@ -173,6 +174,7 @@ export const buildSegmentFFmpegArgs = (sourceVideo, outputPath, segment) => [
     '-vf', `setpts=PTS/${segment.playback_rate.toFixed(8)},fps=30,setsar=1,format=yuv420p`,
     '-t', segment.target_output_duration.toFixed(6),
     '-c:v', 'libx264',
+    '-threads', String(FFMPEG_VIDEO_THREADS),
     '-preset', 'fast',
     '-crf', '20',
     '-movflags', '+faststart',

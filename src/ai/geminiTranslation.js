@@ -4,6 +4,7 @@ import { GoogleGenAI, Type } from '@google/genai';
 import { WORKFLOW_VERSION } from '../domain/workflow.js';
 import { getTranslationSystemInstruction } from './translation.js';
 import { getModelCandidates, rememberSuccessfulGeminiModel } from './geminiModelSelection.js';
+import { createAbortError, isAbortError, throwIfAborted } from '../services/cancellation.js';
 
 export const GEMINI_TRANSLATION_ALGORITHM_VERSION = 'burmese-translation-v2';
 export const GEMINI_TRANSLATION_MAX_RETRIES = 3;
@@ -133,8 +134,10 @@ const translateTranscriptWithSingleGeminiModel = async ({
     generateContent,
     sleep = ms => new Promise(resolve => setTimeout(resolve, ms)),
     random = Math.random,
-    onRetry = () => {}
+    onRetry = () => {},
+    signal
 }) => {
+    throwIfAborted(signal);
     if (!Array.isArray(sourceRecords) || sourceRecords.length === 0) return [];
     if (!apiKey) throw new Error('Gemini API key is required for translation.');
 
@@ -177,6 +180,7 @@ const translateTranscriptWithSingleGeminiModel = async ({
         let translated;
         let lastError;
         for (let attempt = 1; attempt <= GEMINI_TRANSLATION_MAX_RETRIES; attempt++) {
+            throwIfAborted(signal);
             try {
                 const response = await callGenerateContent({
                     model,
@@ -188,12 +192,15 @@ const translateTranscriptWithSingleGeminiModel = async ({
                         responseMimeType: 'application/json',
                         responseSchema: TRANSLATION_RESPONSE_SCHEMA,
                         temperature: 0.2,
-                        httpOptions: { timeout: 120000 }
+                        httpOptions: { timeout: 120000 },
+                        abortSignal: signal
                     }
                 });
                 translated = parseStructuredTranslation(response.text, batch, batchStart);
                 break;
             } catch (error) {
+                if (signal?.aborted) throw createAbortError('Gemini translation interrupted.');
+                if (isAbortError(error)) throw error;
                 lastError = error;
                 if (getGeminiErrorStatus(error) === 404) throw error;
                 const retryableAvailability = isRetryableGeminiError(error);
@@ -207,6 +214,7 @@ const translateTranscriptWithSingleGeminiModel = async ({
                     await sleep(retryableAvailability
                         ? getGeminiRetryDelayMs(attempt, random)
                         : 500 * (2 ** (attempt - 1)));
+                    throwIfAborted(signal);
                 }
             }
         }

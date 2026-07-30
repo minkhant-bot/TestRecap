@@ -14,6 +14,7 @@ import { fileURLToPath } from 'url';
 import { WORKFLOW_VERSION } from '../domain/workflow.js';
 import { transcribeWithFasterWhisper, fingerprintFile } from './fasterWhisper.js';
 import { translateTranscriptWithGemini } from './geminiTranslation.js';
+import { isAbortError, throwIfAborted, waitWithSignal } from '../services/cancellation.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -516,7 +517,8 @@ export const translateWithGemini = async (originalTranscript, cachePath, apiKey 
         ...(options.random ? { random: options.random } : {}),
         ...(options.onRetry ? { onRetry: options.onRetry } : {}),
         ...(options.listModels ? { listModels: options.listModels } : {}),
-        ...(options.onModelSelected ? { onModelSelected: options.onModelSelected } : {})
+        ...(options.onModelSelected ? { onModelSelected: options.onModelSelected } : {}),
+        signal: options.signal
     });
 };
 
@@ -531,7 +533,8 @@ export const createTtsNarrationFingerprint = ({ sceneNarration, edgeVoice, pitch
         }))
     })).digest('hex');
 
-export const generateNarrationTTS = async (sceneNarration, cachePath, voiceId, _ignoredOriginalTranscript, videoDuration, { geminiApiKey, sourceFingerprint = null, rewriteSegment = rewriteBurmeseSegmentForDuration, enableLegacyDurationFit = true } = {}) => {
+export const generateNarrationTTS = async (sceneNarration, cachePath, voiceId, _ignoredOriginalTranscript, videoDuration, { geminiApiKey, sourceFingerprint = null, rewriteSegment = rewriteBurmeseSegmentForDuration, enableLegacyDurationFit = true, signal } = {}) => {
+    throwIfAborted(signal);
     const cacheDir = path.dirname(cachePath);
     const ttsDir = path.join(cacheDir, 'tts_chunks_scene');
     try {
@@ -609,6 +612,7 @@ export const generateNarrationTTS = async (sceneNarration, cachePath, voiceId, _
             let currentIndex = 0;
             const processNext = async () => {
                 while (currentIndex < groups.length) {
+                    throwIfAborted(signal);
                     const groupIndex = currentIndex++;
                     const chunkText = normalizeBurmeseNumberText(groups[groupIndex].mergedText);
                     if (!isSpeakableTtsText(chunkText)) {
@@ -620,7 +624,7 @@ export const generateNarrationTTS = async (sceneNarration, cachePath, voiceId, _
                     console.log(`[AI] Generating TTS group ${groupIndex + 1} / ${groups.length} (${groups[groupIndex].segments.length} anchors)...`);
                     for (let attempt = 1; attempt <= 3; attempt++) {
                         try {
-                            const diagnostics = await synthesizeEdgeTts(ttsClient, chunkText, chunkPath);
+                            const diagnostics = await synthesizeEdgeTts(ttsClient, chunkText, chunkPath, { signal });
                             console.log(`[AI] TTS diagnostics ${formatEdgeTtsDiagnostics({ blockIndex: groupIndex, attempt, diagnostics })}`);
                             if (!fs.existsSync(chunkPath) || fs.statSync(chunkPath).size === 0) {
                                 throw new Error('TTS generated empty file');
@@ -628,11 +632,12 @@ export const generateNarrationTTS = async (sceneNarration, cachePath, voiceId, _
                             success = true;
                             break;
                         } catch (error) {
+                            if (isAbortError(error)) throw error;
                             lastError = error;
                             console.warn(`[AI] TTS diagnostics ${formatEdgeTtsDiagnostics({ blockIndex: groupIndex, attempt, diagnostics: error.diagnostics })}`);
                             console.warn(`[AI] TTS attempt ${attempt} failed for group ${groupIndex}:`, error);
                             if (attempt < 3) {
-                                await new Promise(resolve => setTimeout(resolve, getTtsRetryDelayMs(attempt)));
+                                await waitWithSignal(getTtsRetryDelayMs(attempt), signal);
                             }
                         }
                     }
@@ -678,7 +683,7 @@ export const generateNarrationTTS = async (sceneNarration, cachePath, voiceId, _
             let lastError = null;
             for (let attempt = 1; attempt <= 3; attempt++) {
                 try {
-                    const diagnostics = await synthesizeEdgeTts(ttsClient, chunkText, chunkPath);
+                    const diagnostics = await synthesizeEdgeTts(ttsClient, chunkText, chunkPath, { signal });
                     console.log(`[AI] Duration-fit TTS diagnostics ${formatEdgeTtsDiagnostics({
                         blockIndex: groupIndex, attempt, diagnostics
                     })}`);
@@ -692,12 +697,13 @@ export const generateNarrationTTS = async (sceneNarration, cachePath, voiceId, _
                     audioDurations[groupIndex] = duration;
                     return;
                 } catch (error) {
+                    if (isAbortError(error)) throw error;
                     lastError = error;
                     console.warn(`[AI] Duration-fit TTS diagnostics ${formatEdgeTtsDiagnostics({
                         blockIndex: groupIndex, attempt, diagnostics: error.diagnostics
                     })}`);
                     if (attempt < 3) {
-                        await new Promise(resolve => setTimeout(resolve, getTtsRetryDelayMs(attempt)));
+                        await waitWithSignal(getTtsRetryDelayMs(attempt), signal);
                     }
                 }
             }
@@ -780,7 +786,7 @@ export const generateNarrationTTS = async (sceneNarration, cachePath, voiceId, _
                 '-i', rawChunk,
                 '-acodec', 'pcm_s16le', '-ar', '24000', '-ac', '1',
                 '-y', standardizedPath
-            ], ttsDir);
+            ], ttsDir, null, 600000, { signal });
             const actualDuration = parseFloat(await getDuration(standardizedPath));
             if (!Number.isFinite(actualDuration) || actualDuration <= 0) {
                 throw new Error(`Timeline Error: Cannot determine duration for TTS group ${groupIndex}.`);
@@ -826,7 +832,7 @@ export const generateNarrationTTS = async (sceneNarration, cachePath, voiceId, _
         await runFFmpeg([
             '-y', '-f', 'concat', '-safe', '0', '-i', 'concat.txt',
             '-acodec', 'pcm_s16le', '-ac', '1', '-ar', '24000', cachePath
-        ], ttsDir);
+        ], ttsDir, null, 600000, { signal });
 
         if (!fs.existsSync(cachePath) || fs.statSync(cachePath).size === 0) {
             throw new Error('Final TTS audio generation failed or is 0 bytes.');

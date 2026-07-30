@@ -13,17 +13,19 @@ Describe the currently mounted HTTP contract, authorization boundaries, request 
 - Workspace job creation, queueing, status, SSE, cancellation, deletion, source preview, and Gemini-key management.
 - Protected output delivery under `/output`.
 - Legacy workflow, settings, voice, retry, project, and compatibility routes remain mounted.
+- Legacy global settings and diagnostic routes require an administrator role.
+- Legacy job-creation compatibility routes require an administrator role.
 - Admin foundation endpoints are mounted behind `requireAdmin`.
+- Authenticated processing starts and selected mutation endpoints enforce durable per-user admission limits.
 
 ### Planned or Placeholder
 
 - No approved API expansion plan is recorded in the repository.
-- Versioning, pagination, idempotency keys, rate limits, OpenAPI, and credits endpoints are absent; they are recommendations rather than implemented placeholders.
+- Versioning, pagination, client idempotency keys, OpenAPI, and credits endpoints are absent; they are recommendations rather than implemented placeholders.
 
 ### Known Issues
 
 - Legacy and workspace APIs overlap.
-- Global settings routes are available to every authenticated user.
 - Some errors are generic or not handled by a final structured API error middleware.
 - Admin APIs are not used by the current admin UI.
 
@@ -68,7 +70,7 @@ All paths below are prefixed with `/api` unless shown otherwise.
 | GET | `/workspace/jobs/{jobId}/status` | Job plus queue position |
 | GET | `/workspace/jobs/{jobId}/events` | SSE snapshot/progress events |
 | POST | `/workspace/jobs/{jobId}/cancel` | Explicit cancellation request |
-| DELETE | `/workspace/jobs/{jobId}` | Delete non-active workspace job |
+| DELETE | `/workspace/jobs/{jobId}` | Delete a non-active workspace/core job and linked artifacts |
 | GET | `/workspace/queue` | Current user’s queue view and worker snapshot |
 
 Queue request:
@@ -93,6 +95,35 @@ Queue request:
 ```
 
 Successful queueing returns HTTP 202 with a workspace job and `queuePosition`.
+
+Workspace upload admission permits at most two active jobs per user, where active means `pending`, `queued`, or `processing`. An exhausted quota returns HTTP 429:
+
+```json
+{
+  "error": "You can have at most 2 active recap projects.",
+  "code": "ACTIVE_JOB_QUOTA_EXCEEDED",
+  "activeJobCount": 2,
+  "activeJobLimit": 2
+}
+```
+
+Independently, each user may make 30 protected mutation attempts per rolling five minutes and may start six processing jobs per rolling 24 hours by default. Processing usage is consumed once per accepted job ID. Workspace queueing and administrator-only legacy creation routes share the processing limit. Admission failures return HTTP 429 with `Retry-After`:
+
+```json
+{
+  "error": "Processing usage limit exceeded",
+  "code": "PROCESSING_USAGE_LIMIT_EXCEEDED",
+  "limit": 6,
+  "remaining": 0,
+  "windowSeconds": 86400,
+  "retryAfterSeconds": 120,
+  "requestId": "..."
+}
+```
+
+Mutation-rate failures use the same shape with `REQUEST_RATE_LIMIT_EXCEEDED`.
+
+Workspace deletion returns HTTP 409 if either the workspace job or its linked core job is still active, or if their recorded owners do not match. Filesystem safety failures return structured HTTP 500 without deleting either record during preflight.
 
 ### SSE events
 
@@ -126,7 +157,7 @@ SSE event IDs are process-local and reset on restart. A fresh connection always 
 
 ### Mounted legacy routes
 
-`/diagnostic`, `/voices`, `/preview-voice`, `/settings`, `/jobs`, `/process-recap`, `/process`, `/retry/{jobId}`, `/status/{jobId}`, `/projects`, `/play/{jobId}`, `/completed-jobs`, and legacy job deletion/cancellation routes remain active.
+`/diagnostic`, `/voices`, `/preview-voice`, `/settings`, `/jobs`, `/process-recap`, `/process`, `/retry/{jobId}`, `/status/{jobId}`, `/projects`, `/play/{jobId}`, `/completed-jobs`, and legacy job deletion/cancellation routes remain active. `/diagnostic`, both `/settings` operations, and the `/jobs`, `/process-recap`, and `/process` creation routes additionally require `requireAdmin`.
 
 ## File References
 
@@ -153,5 +184,5 @@ The following are unapproved API recommendations:
 
 - Publish an OpenAPI contract after choosing the canonical job model.
 - Remove or version deprecated routes after consumer verification.
-- Add idempotency, pagination, rate limiting, and credits admission.
+- Add client idempotency and pagination; credits admission requires separate product approval.
 - Standardize all API errors around request IDs and machine-readable codes.

@@ -13,7 +13,8 @@ ENV NODE_ENV=production \
     PIP_NO_CACHE_DIR=1
 
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends python3 python3-pip python3-venv ffmpeg ca-certificates \
+    && apt-get install -y --no-install-recommends python3 python3-pip python3-venv ffmpeg ca-certificates fonts-unifont fonts-sil-padauk fontconfig \
+    && fc-cache -f \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app

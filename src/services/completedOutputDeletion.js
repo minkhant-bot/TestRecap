@@ -4,6 +4,7 @@ import { getStoragePaths } from '../config/runtime.js';
 
 export const COMPLETED_JOB_ID_PATTERN =
     /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+const TERMINAL_JOB_STATUSES = new Set(['complete', 'error', 'cancelled']);
 
 const resolveInside = (root, target, label) => {
     const resolvedRoot = path.resolve(root);
@@ -27,16 +28,21 @@ export const resolveCompletedJobForDeletion = ({ jobId, job, projectRoot = proce
     return { id: jobId, status: 'complete', videoPath: null, audioPath: null };
 };
 
-export const collectCompletedJobArtifactPaths = ({
+const collectJobArtifactPaths = ({
     job,
+    allowedStatuses,
+    statusError,
+    statusErrorCode,
     projectRoot = process.cwd(),
     fsImpl = fs
 }) => {
     if (!job || !COMPLETED_JOB_ID_PATTERN.test(job.id)) {
         throw new Error('Invalid job ID.');
     }
-    if (job.status !== 'complete') {
-        throw new Error('Only completed jobs can be deleted.');
+    if (!allowedStatuses.has(job.status)) {
+        const error = new Error(statusError);
+        if (statusErrorCode) error.code = statusErrorCode;
+        throw error;
     }
 
     const storagePaths = getStoragePaths(process.env, projectRoot);
@@ -73,25 +79,36 @@ export const collectCompletedJobArtifactPaths = ({
     };
 };
 
-export const deleteCompletedJobArtifacts = options => {
-    const fsImpl = options.fsImpl || fs;
-    const targets = collectCompletedJobArtifactPaths({ ...options, fsImpl });
-
-    for (const target of [...targets.files, ...targets.directories]) {
+const validateJobArtifactTargets = (targets, fsImpl) => {
+    for (const target of targets.files) {
         if (!fsImpl.existsSync(target)) continue;
         const stat = fsImpl.lstatSync(target);
-        if (targets.directories.includes(target) && stat.isSymbolicLink()) {
-            throw new Error('Unsafe cache path is a symbolic link.');
+        if (stat.isSymbolicLink() || !stat.isFile()) {
+            throw new Error(`Unsafe file artifact: ${path.basename(target)}`);
         }
     }
+    for (const target of targets.directories) {
+        if (!fsImpl.existsSync(target)) continue;
+        const stat = fsImpl.lstatSync(target);
+        if (stat.isSymbolicLink() || !stat.isDirectory()) {
+            throw new Error('Unsafe cache directory.');
+        }
+    }
+    return targets;
+};
+
+const validateJobArtifacts = (options, collectPaths) => {
+    const fsImpl = options.fsImpl || fs;
+    return validateJobArtifactTargets(collectPaths({ ...options, fsImpl }), fsImpl);
+};
+
+const deleteJobArtifacts = (options, collectPaths) => {
+    const fsImpl = options.fsImpl || fs;
+    const targets = validateJobArtifacts(options, collectPaths);
 
     const deleted = [];
     for (const target of targets.files) {
         if (!fsImpl.existsSync(target)) continue;
-        const stat = fsImpl.lstatSync(target);
-        if (stat.isDirectory() && !stat.isSymbolicLink()) {
-            throw new Error(`Expected a file but found a directory: ${path.basename(target)}`);
-        }
         fsImpl.unlinkSync(target);
         deleted.push(target);
     }
@@ -102,6 +119,30 @@ export const deleteCompletedJobArtifacts = options => {
     }
     return deleted;
 };
+
+export const collectCompletedJobArtifactPaths = options => collectJobArtifactPaths({
+    ...options,
+    allowedStatuses: new Set(['complete']),
+    statusError: 'Only completed jobs can be deleted.',
+    statusErrorCode: null
+});
+
+export const collectTerminalJobArtifactPaths = options => collectJobArtifactPaths({
+    ...options,
+    allowedStatuses: TERMINAL_JOB_STATUSES,
+    statusError: 'Active core jobs cannot be deleted.',
+    statusErrorCode: 'ACTIVE_CORE_JOB'
+});
+
+export const deleteCompletedJobArtifacts = options =>
+    deleteJobArtifacts(options, collectCompletedJobArtifactPaths);
+
+export const validateTerminalJobArtifacts = options =>
+    validateJobArtifacts(options, collectTerminalJobArtifactPaths);
+
+export const deleteTerminalJobArtifacts = options =>
+    deleteJobArtifacts(options, collectTerminalJobArtifactPaths);
+
 export const deleteCompletedJobAndRecord = ({ job, deleteRecord, clearCredentials, ...artifactOptions }) => {
     if (typeof deleteRecord !== 'function' || typeof clearCredentials !== 'function') {
         throw new Error('Completed-job record deletion callbacks are required.');

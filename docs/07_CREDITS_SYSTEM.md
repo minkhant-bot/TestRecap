@@ -12,6 +12,8 @@ State exactly what exists today concerning credits and prevent future developers
 - The application shell displays a numeric credit indicator.
 - The Buy Credits page renders a “coming soon” empty state.
 - The dashboard says credits are not yet available.
+- Workspace upload admission enforces a non-financial limit of two active jobs per user.
+- Server admission enforces configurable non-financial rolling mutation and processing-start limits per user.
 
 ### Planned or Placeholder
 
@@ -21,8 +23,8 @@ The Credits page is an explicit UI placeholder. The repository contains no credi
 
 - `AppShell` casts the current profile to possible `creditBalance` or `credits` fields that are absent from the actual profile contract.
 - Missing fields display as zero.
-- Queue admission and upload are not protected by credits or backend quotas.
-- A user can bypass the frontend active-job restriction.
+- There is no credit-based admission; current cumulative and request-rate limits do not represent balances or billing.
+- The two-active-job limit is a fixed product quota, not a credit balance.
 
 ## Architecture/Flow
 
@@ -33,7 +35,9 @@ User profile
   → no credit fields returned
   → UI fallback to 0
   → Credits page says coming soon
-  → processing remains unrestricted by credits
+  → workspace upload rejects a third active job with HTTP 429
+  → admission may reject excessive mutations or processing starts with HTTP 429
+  → no credit debit occurs
 ```
 
 There is no database table or API route for credits.
@@ -44,7 +48,8 @@ There is no database table or API route for credits.
 - Placeholder purchase page: `src/ui/pages/BuyCreditsPage.tsx`
 - Dashboard placeholder: `src/ui/pages/DashboardPage.tsx`
 - Actual user profile type: `src/auth/AuthProvider.tsx`
-- Unrestricted queue admission: `src/routes/workspace.js`, `src/services/workspaceJobs.js`
+- Active-job admission quota: `src/routes/workspace.js`, `src/services/workspaceJobs.js`
+- Rolling admission limits: `src/config/admission.js`, `src/services/admissionControl.js`
 
 ## Important Decisions
 

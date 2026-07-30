@@ -14,23 +14,27 @@ This document is the entry point for developers and AI assistants. It describes 
 - Google sign-in through Firebase and an HTTP-only backend session cookie.
 - Per-user Gemini API-key storage encrypted at rest.
 - Pending-job editor and explicit Start Processing action.
+- Server-enforced limit of two active workspace jobs per user.
 - Durable, single-concurrency workspace queue.
 - Audio extraction, Gemini audio transcription/translation, workflow-v2 TTS, timeline construction, scene rebuild, MP4/MP3 export, and final effects.
-- History, authenticated preview/download, cancellation, deletion, and restart recovery foundations.
+- History, authenticated preview/download, coordinated workspace/core deletion, cancellation, and restart recovery foundations.
+- Coordinated 24-hour retention for completed workspace/core records and linked artifacts.
 - Super-admin API/UI foundations and a credits UI placeholder; neither is complete.
 
 ### Planned or Placeholder
 
 - The Credits page explicitly presents purchasing as “coming soon.”
 - The admin shell contains placeholder navigation labels, but its operational screens are not connected to the admin APIs.
-- No approved implementation plan for credits, database replacement, pagination, quotas, or rate limiting is recorded in the repository.
+- The approved future product direction replaces mandatory BYOK with hosted credits: users purchase credits, and platform-owned AI and TTS credentials are used server-side for processing.
+- Future voice support will provide a server-validated catalog, previews, and selectable voices whose availability may depend on plan, credit cost, or provider.
+- These directions are not implemented and do not constitute an approved implementation plan. Database replacement and pagination also remain undefined.
 
 ### Known Issues
 
 - The running architecture is mostly present as uncommitted or untracked work. A clean checkout of `main` does not reproduce it.
 - Two job stores and two lifecycle vocabularies coexist.
-- Credits and server-side quotas are not enforced.
-- Role mapping, coordinated deletion, retention, and deep cancellation have known defects.
+- Credits, cumulative usage quotas, and request-rate limits are not enforced.
+- Role mapping and deep cancellation have known defects.
 - See `12_KNOWN_ISSUES.md` for the prioritized list.
 
 ## Architecture/Flow
@@ -79,4 +83,4 @@ The workspace layer owns user-facing state in `workspace-jobs.json`. The older c
 
 ## Future Work
 
-Unapproved architectural recommendations are recorded in `12_KNOWN_ISSUES.md` and `14_ROADMAP.md`. The highest-risk recommendations are to establish a reproducible tracked baseline, add server-side resource controls, and remove ordinary-user access to global pipeline settings. Any implementation requires separate approval and should preserve workflow-v2 output behavior unless that behavior is explicitly placed in scope.
+The approved future product direction and its dependency order are recorded in `14_ROADMAP.md`. It requires durable credit accounting, platform-owned secret architecture, job settlement, payment confirmation, safe BYOK migration or removal, and then multiple-voice support. These are future roadmap items, not implemented features or approved implementation scope. Any implementation requires separate approval and must preserve workflow-v2 output behavior and the current single-voice contract until explicitly placed in scope.

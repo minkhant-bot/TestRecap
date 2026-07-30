@@ -16,7 +16,9 @@ Define the behavior the current product actually implements, while separating pl
 - The UI reports seven user-facing workflow stages: Upload, Audio Extraction, Gemini Transcript, Voice Generation, Timeline Verification, Scene Rebuild, and Final Export.
 - Completed recaps appear in History and can be previewed or downloaded.
 - Pending, queued, processing, completed, failed, and cancelled states are displayed.
-- A user can explicitly cancel an active workspace job and delete a non-active workspace record.
+- A user can explicitly cancel an active workspace job and delete a non-active workspace record together with its linked core record, credentials, source, cache, and canonical outputs.
+- The backend permits at most two `pending`, `queued`, or `processing` workspace jobs per user.
+- Completed workspace/core records and linked artifacts expire together after the existing 24-hour retention window.
 
 ### Planned or Placeholder
 
@@ -26,8 +28,6 @@ Define the behavior the current product actually implements, while separating pl
 
 ### Known Issues
 
-- The frontend two-active-job rule is not enforced by the API.
-- Deleted and expired output can diverge from the workspace History record.
 - Cancellation does not interrupt every deep pipeline operation.
 - Admin and credit behavior is incomplete.
 
@@ -93,6 +93,6 @@ Define the behavior the current product actually implements, while separating pl
 The following are unapproved requirements recommendations derived from current gaps:
 
 - Define measurable product limits and enforce them server-side.
-- Define retention and deletion expectations.
+- Confirm the existing 24-hour retention expectation as an explicit product policy before changing it.
 - Decide whether failed jobs are retryable in the workspace product.
 - Specify credits only after ledger semantics and failure compensation are approved.

@@ -1,0 +1,137 @@
+:root {
+  color-scheme: dark;
+
+  --ds-neutral-0: #ffffff;
+  --ds-neutral-50: #f7f8fa;
+  --ds-neutral-100: #eef0f4;
+  --ds-neutral-200: #d9dce4;
+  --ds-neutral-300: #bdc2ce;
+  --ds-neutral-400: #979eae;
+  --ds-neutral-500: #737b8d;
+  --ds-neutral-600: #555d70;
+  --ds-neutral-700: #3b4252;
+  --ds-neutral-800: #272d3a;
+  --ds-neutral-850: #1d222d;
+  --ds-neutral-900: #151922;
+  --ds-neutral-925: #10131a;
+  --ds-neutral-950: #0a0c11;
+  --ds-neutral-1000: #050608;
+
+  --ds-violet-300: #b9b2ff;
+  --ds-violet-400: #9d91ff;
+  --ds-violet-500: #8575f6;
+  --ds-violet-600: #705ee2;
+  --ds-cyan-400: #55d8f6;
+  --ds-green-400: #46d39a;
+  --ds-amber-400: #f2bc5b;
+  --ds-red-400: #ff7185;
+  --ds-blue-400: #72a8ff;
+
+  --ds-surface-canvas: var(--ds-neutral-950);
+  --ds-surface-base: var(--ds-neutral-925);
+  --ds-surface-raised: var(--ds-neutral-900);
+  --ds-surface-elevated: var(--ds-neutral-850);
+  --ds-surface-hover: var(--ds-neutral-800);
+  --ds-surface-selected: color-mix(in srgb, var(--ds-violet-500) 13%, var(--ds-surface-raised));
+  --ds-surface-overlay: rgb(5 6 8 / 78%);
+
+  --ds-text-primary: var(--ds-neutral-50);
+  --ds-text-secondary: var(--ds-neutral-300);
+  --ds-text-muted: var(--ds-neutral-500);
+  --ds-text-disabled: var(--ds-neutral-600);
+  --ds-text-inverse: var(--ds-neutral-1000);
+
+  --ds-border-subtle: rgb(255 255 255 / 6%);
+  --ds-border-default: rgb(255 255 255 / 10%);
+  --ds-border-strong: rgb(255 255 255 / 17%);
+  --ds-focus: var(--ds-violet-300);
+
+  --ds-action-primary: var(--ds-violet-400);
+  --ds-action-primary-hover: var(--ds-violet-300);
+  --ds-action-primary-pressed: var(--ds-violet-500);
+  --ds-action-danger: var(--ds-red-400);
+
+  --ds-status-info: var(--ds-blue-400);
+  --ds-status-processing: var(--ds-cyan-400);
+  --ds-status-success: var(--ds-green-400);
+  --ds-status-warning: var(--ds-amber-400);
+  --ds-status-danger: var(--ds-red-400);
+
+  --ds-font-ui: Inter, "Noto Sans Myanmar", ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  --ds-font-mono: "SFMono-Regular", Consolas, "Liberation Mono", monospace;
+  --ds-type-xs: 0.75rem;
+  --ds-type-sm: 0.8125rem;
+  --ds-type-md: 0.9375rem;
+  --ds-type-lg: 1.0625rem;
+  --ds-type-xl: 1.25rem;
+  --ds-type-2xl: 1.625rem;
+  --ds-type-3xl: clamp(2rem, 4vw, 2.75rem);
+
+  --ds-space-1: 0.25rem;
+  --ds-space-2: 0.5rem;
+  --ds-space-3: 0.75rem;
+  --ds-space-4: 1rem;
+  --ds-space-5: 1.25rem;
+  --ds-space-6: 1.5rem;
+  --ds-space-8: 2rem;
+  --ds-space-10: 2.5rem;
+  --ds-space-12: 3rem;
+  --ds-space-16: 4rem;
+
+  --ds-radius-sm: 0.5rem;
+  --ds-radius-control: 0.75rem;
+  --ds-radius-card: 1rem;
+  --ds-radius-hero: 1.5rem;
+  --ds-radius-pill: 999px;
+
+  --ds-shadow-card: 0 1px 0 rgb(255 255 255 / 3%), 0 12px 36px rgb(0 0 0 / 13%);
+  --ds-shadow-floating: 0 18px 50px rgb(0 0 0 / 28%);
+  --ds-shadow-modal: 0 30px 100px rgb(0 0 0 / 48%);
+
+  --ds-motion-fast: 120ms;
+  --ds-motion-normal: 180ms;
+  --ds-motion-slow: 260ms;
+  --ds-ease-standard: cubic-bezier(0.2, 0, 0, 1);
+  --ds-ease-enter: cubic-bezier(0, 0, 0, 1);
+  --ds-ease-exit: cubic-bezier(0.3, 0, 1, 1);
+
+  --ds-z-base: 0;
+  --ds-z-sticky: 20;
+  --ds-z-navigation: 30;
+  --ds-z-dropdown: 50;
+  --ds-z-modal-backdrop: 80;
+  --ds-z-modal: 90;
+  --ds-z-toast: 100;
+
+  --ds-sidebar-width: 16rem;
+  --ds-sidebar-collapsed: 5.25rem;
+  --ds-topbar-height: 3.5rem;
+  --ds-bottom-nav-height: 4.75rem;
+  --ds-content-max: 88rem;
+}
+
+:root[data-theme="light"] {
+  color-scheme: light;
+  --ds-surface-canvas: #f5f6f9;
+  --ds-surface-base: #ffffff;
+  --ds-surface-raised: #ffffff;
+  --ds-surface-elevated: #f1f2f6;
+  --ds-surface-hover: #e8eaf0;
+  --ds-surface-selected: #eeebff;
+  --ds-surface-overlay: rgb(18 20 29 / 55%);
+  --ds-text-primary: #171923;
+  --ds-text-secondary: #484e5e;
+  --ds-text-muted: #6f7789;
+  --ds-text-disabled: #9ca2af;
+  --ds-text-inverse: #ffffff;
+  --ds-border-subtle: rgb(17 24 39 / 6%);
+  --ds-border-default: rgb(17 24 39 / 10%);
+  --ds-border-strong: rgb(17 24 39 / 18%);
+  --ds-action-primary: #705ee2;
+  --ds-action-primary-hover: #5d4bc8;
+  --ds-action-primary-pressed: #4e3db8;
+  --ds-focus: #5d4bc8;
+  --ds-shadow-card: 0 1px 2px rgb(22 26 36 / 5%), 0 12px 36px rgb(22 26 36 / 7%);
+  --ds-shadow-floating: 0 18px 50px rgb(22 26 36 / 15%);
+  --ds-shadow-modal: 0 30px 100px rgb(22 26 36 / 22%);
+}

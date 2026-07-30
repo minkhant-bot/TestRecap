@@ -7,7 +7,9 @@ import {
     collectCompletedJobArtifactPaths,
     deleteCompletedJobAndRecord,
     deleteCompletedJobArtifacts,
-    resolveCompletedJobForDeletion
+    deleteTerminalJobArtifacts,
+    resolveCompletedJobForDeletion,
+    validateTerminalJobArtifacts
 } from './completedOutputDeletion.js';
 
 const JOB_ID = '11111111-1111-4111-8111-111111111111';
@@ -158,5 +160,45 @@ test('preserves an active in-memory job even when an output path exists', () => 
         }), /Only completed jobs/);
     } finally {
         fs.rmSync(fixture.root, { recursive: true, force: true });
+    }
+});
+
+test('terminal deletion preflight rejects symlinked output before record mutation', () => {
+    const fixture = makeFixture();
+    const outputPath = path.join(fixture.root, 'public', 'output', `${JOB_ID}.mp4`);
+    const outside = path.join(fixture.root, 'outside-output');
+    fs.writeFileSync(outside, 'must remain');
+    fs.unlinkSync(outputPath);
+    fs.symlinkSync(outside, outputPath);
+    try {
+        assert.throws(
+            () => validateTerminalJobArtifacts({ job: fixture.job, projectRoot: fixture.root }),
+            /Unsafe file artifact/
+        );
+        assert.equal(fs.readFileSync(outside, 'utf8'), 'must remain');
+    } finally {
+        fs.rmSync(fixture.root, { recursive: true, force: true });
+    }
+});
+
+test('terminal artifact cleanup supports failed and cancelled core jobs', () => {
+    for (const status of ['error', 'cancelled']) {
+        const fixture = makeFixture();
+        try {
+            deleteTerminalJobArtifacts({
+                job: { ...fixture.job, status },
+                projectRoot: fixture.root
+            });
+            assert.equal(
+                fs.existsSync(path.join(fixture.root, 'public', 'output', `${JOB_ID}.mp4`)),
+                false
+            );
+            assert.equal(
+                fs.existsSync(path.join(fixture.root, 'data', 'cache', JOB_ID)),
+                false
+            );
+        } finally {
+            fs.rmSync(fixture.root, { recursive: true, force: true });
+        }
     }
 });

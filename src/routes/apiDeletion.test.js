@@ -6,6 +6,19 @@ import { randomUUID } from 'node:crypto';
 import express from 'express';
 import apiRoutes from './api.js';
 import { createJob, deleteJob, updateJob } from '../services/jobManager.js';
+import { setAuthVerifierForTests } from '../middleware/auth.js';
+
+const OWNER_UID = 'route-test-owner';
+const authHeaders = { Cookie: '__session=route-test-session' };
+setAuthVerifierForTests(async () => ({
+    uid: OWNER_UID,
+    displayName: 'Route Test',
+    email: 'route@example.com',
+    role: 'user',
+    status: 'active',
+    createdAt: null,
+    lastLogin: null
+}));
 
 const startTestServer = async () => {
     const app = express();
@@ -47,17 +60,23 @@ test('DELETE removes a durable completed output after restart and reload keeps o
         otherPaths[0],
         path.join(otherPaths[1], 'state.json')
     ]) fs.writeFileSync(file, 'test artifact');
+    createJob(selectedId, { ownerUid: OWNER_UID, videoPath: null, audioPath: null, originalFilename: 'selected.mp4' });
+    updateJob(selectedId, { status: 'complete', completed_at: Date.now() });
+    createJob(otherId, { ownerUid: OWNER_UID, videoPath: null, audioPath: null, originalFilename: 'other.mp4' });
+    updateJob(otherId, { status: 'complete', completed_at: Date.now() });
 
     const { server, baseUrl } = await startTestServer();
     try {
-        const deletion = await fetch(`${baseUrl}/api/jobs/${selectedId}`, { method: 'DELETE' });
+        const deletion = await fetch(`${baseUrl}/api/jobs/${selectedId}`, {
+            method: 'DELETE', headers: authHeaders
+        });
         assert.equal(deletion.status, 200);
         assert.deepEqual(await deletion.json(), { deleted: true, jobId: selectedId });
         assert.ok(selectedPaths.every(target => !fs.existsSync(target)));
 
         const reload = await fetch(`${baseUrl}/api/completed-jobs`, {
             method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
+            headers: { ...authHeaders, 'Content-Type': 'application/json' },
             body: JSON.stringify({ ids: [selectedId, otherId] })
         });
         assert.equal(reload.status, 200);
@@ -68,6 +87,7 @@ test('DELETE removes a durable completed output after restart and reload keeps o
         for (const target of otherPaths) {
             if (fs.existsSync(target)) fs.rmSync(target, { recursive: true, force: true });
         }
+        deleteJob(otherId);
     }
 });
 
@@ -76,11 +96,13 @@ test('DELETE route blocks an active job even if an output file exists', async ()
     const outputPath = path.join(process.cwd(), 'public', 'output', `${jobId}.mp4`);
     fs.mkdirSync(path.dirname(outputPath), { recursive: true });
     fs.writeFileSync(outputPath, 'active output');
-    createJob(jobId, { videoPath: null, audioPath: null, originalFilename: 'active.mp4' });
+    createJob(jobId, { ownerUid: OWNER_UID, videoPath: null, audioPath: null, originalFilename: 'active.mp4' });
     updateJob(jobId, { status: 'processing' });
     const { server, baseUrl } = await startTestServer();
     try {
-        const response = await fetch(`${baseUrl}/api/jobs/${jobId}`, { method: 'DELETE' });
+        const response = await fetch(`${baseUrl}/api/jobs/${jobId}`, {
+            method: 'DELETE', headers: authHeaders
+        });
         assert.equal(response.status, 409);
         assert.match((await response.json()).error, /Only completed jobs/);
         assert.equal(fs.existsSync(outputPath), true);

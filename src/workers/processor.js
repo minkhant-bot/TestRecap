@@ -28,6 +28,16 @@ import {
     readCompatibleWorkflowState
 } from '../domain/workflow.js';
 import { ensureStoragePaths, getStoragePaths } from '../config/runtime.js';
+import { createAbortError, isAbortError, throwIfAborted } from '../services/cancellation.js';
+
+const formatTime = seconds => {
+    const date = new Date(seconds * 1000);
+    const hours = String(date.getUTCHours()).padStart(2, "0");
+    const minutes = String(date.getUTCMinutes()).padStart(2, "0");
+    const secs = String(date.getUTCSeconds()).padStart(2, "0");
+    const milliseconds = String(date.getUTCMilliseconds()).padStart(3, "0");
+    return `${hours}:${minutes}:${secs},${milliseconds}`;
+};
 
 const STAGES = WORKFLOW_STAGE;
 const storagePaths = ensureStoragePaths(getStoragePaths());
@@ -58,7 +68,11 @@ const assertSafeUpload = uploadPath => {
     return candidate;
 };
 
-export const processRecapPipeline = async (jobId) => {
+export const processRecapPipeline = async (jobId, {
+    signal,
+    isCancellationRequested = () => false
+} = {}) => {
+    throwIfAborted(signal);
     let job = getJob(jobId);
     if (!job || !job.videoPath) throw new Error("Invalid job data: missing videoPath");
     job.videoPath = assertSafeUpload(job.videoPath);
@@ -88,6 +102,7 @@ export const processRecapPipeline = async (jobId) => {
     const saveState = () => fs.writeFileSync(statePath, JSON.stringify(state, null, 2));
 
     const advanceStage = (stageId, progress, stageOutcome = null) => {
+        throwIfAborted(signal);
         state.workflowVersion = WORKFLOW_VERSION;
         state.stageId = stageId;
         state.stageOutcome = stageOutcome;
@@ -108,7 +123,7 @@ export const processRecapPipeline = async (jobId) => {
                 const wavStat = fs.lstatSync(videoWavPath);
                 if (wavStat.isSymbolicLink() || !wavStat.isFile() || wavStat.size === 0) fs.unlinkSync(videoWavPath);
             }
-            if (!fs.existsSync(videoWavPath)) await extractWav(job.videoPath, videoWavPath);
+            if (!fs.existsSync(videoWavPath)) await extractWav(job.videoPath, videoWavPath, { signal });
             state.originalVideoDuration = await getDuration(job.videoPath);
             saveState();
         }
@@ -118,7 +133,7 @@ export const processRecapPipeline = async (jobId) => {
         if (!hasCompletedStage(job.stageId, STAGES.EXTRACT_AUDIO)) {
             advanceStage(STAGES.EXTRACT_AUDIO, 10);
             if (job.audioPath && !fs.existsSync(audioWavPath)) {
-                await extractWav(job.audioPath, audioWavPath);
+                await extractWav(job.audioPath, audioWavPath, { signal });
             }
             if (fs.existsSync(audioWavPath)) {
                 state.audioDuration = await getDuration(audioWavPath);
@@ -130,7 +145,10 @@ export const processRecapPipeline = async (jobId) => {
         const sceneCache = path.join(cacheDir, 'scenes.json');
         if (!hasCompletedStage(job.stageId, STAGES.DETECT_SCENES)) {
             advanceStage(STAGES.DETECT_SCENES, 15);
-            state.scenes = await detectScenes(job.videoPath, sceneCache, { sourceFingerprint: state.sourceVideoFingerprint });
+            state.scenes = await detectScenes(job.videoPath, sceneCache, {
+                sourceFingerprint: state.sourceVideoFingerprint,
+                signal
+            });
             saveState();
         }
 
@@ -140,7 +158,8 @@ export const processRecapPipeline = async (jobId) => {
             advanceStage(STAGES.TRANSCRIBE_SOURCE, 25);
             state.sourceFingerprint = fingerprintFile(videoWavPath);
             state.originalTranscript = await transcribeWav(videoWavPath, vidTranscriptCache, null, {
-                sourceFingerprint: state.sourceFingerprint
+                sourceFingerprint: state.sourceFingerprint,
+                signal
             });
             saveState();
         }
@@ -155,6 +174,7 @@ export const processRecapPipeline = async (jobId) => {
                 state.originalTranscript, translatedTranscriptCache, geminiApiKey,
                 {
                     sourceFingerprint: state.sourceFingerprint,
+                    signal,
                     onRetry: retry => updateJob(jobId, {
                         stageId: STAGES.TRANSLATE_BURMESE,
                         stageMessage: retry.message || GEMINI_RETRY_STAGE_MESSAGE
@@ -187,7 +207,7 @@ export const processRecapPipeline = async (jobId) => {
                 voiceId,
                 state.originalTranscript,
                 state.originalVideoDuration,
-                { geminiApiKey, sourceFingerprint: state.sourceFingerprint, enableLegacyDurationFit: false }
+                { geminiApiKey, sourceFingerprint: state.sourceFingerprint, enableLegacyDurationFit: false, signal }
             );
             saveState();
         }
@@ -240,6 +260,16 @@ export const processRecapPipeline = async (jobId) => {
                 text: segment.text,
                 timestamp: [segment.final_audio_start, segment.final_audio_end]
             }));
+            let srt = '';
+            state.narrationTranscript.forEach((chunk, index) => {
+                const start = chunk.timestamp[0];
+                const end = chunk.timestamp[1] || start + 2;
+                srt += `${index + 1}\n`;
+                srt += `${formatTime(start)} --> ${formatTime(end)}\n`;
+                srt += `${chunk.text.trim()}\n\n`;
+            });
+            state.srtFile = path.join(cacheDir, 'subs.srt');
+            fs.writeFileSync(state.srtFile, srt);
             saveState();
             advanceStage(STAGES.BUILD_TIMELINE, 70, 'completed');
         } else {
@@ -254,6 +284,10 @@ export const processRecapPipeline = async (jobId) => {
             });
             state.timeline = state.timelineManifest.segments;
         }
+        state.srtFile = path.join(cacheDir, 'subs.srt');
+        if (!fs.existsSync(state.srtFile) || fs.statSync(state.srtFile).size === 0) {
+            throw new Error('Completed timeline stage has no authoritative SRT artifact.');
+        }
 
         // 8. REAL SCENE REBUILD
         if (!hasCompletedStage(job.stageId, STAGES.REBUILD_SCENES)) {
@@ -267,7 +301,10 @@ export const processRecapPipeline = async (jobId) => {
                 if (fs.existsSync(segmentPath) && !fs.lstatSync(segmentPath).isSymbolicLink() &&
                     fs.statSync(segmentPath).size > 0 && artifactMetadataMatches(metadataPath, expectedMetadata)) continue;
                 if (fs.existsSync(temporaryPath)) fs.unlinkSync(temporaryPath);
-                await runFFmpeg(buildSegmentFFmpegArgs(job.videoPath, temporaryPath, segment), jobTmpDir);
+                await runFFmpeg(
+                    buildSegmentFFmpegArgs(job.videoPath, temporaryPath, segment),
+                    jobTmpDir, null, 600000, { signal }
+                );
                 if (!fs.existsSync(temporaryPath) || fs.lstatSync(temporaryPath).isSymbolicLink() ||
                     fs.statSync(temporaryPath).size === 0) {
                     throw new Error(`Segment ${segment.output_order} generation produced no usable file.`);
@@ -324,7 +361,8 @@ export const processRecapPipeline = async (jobId) => {
                 '-c:a', 'aac', '-b:a', '128k',
                 '-t', state.audioDuration.toFixed(6),
                 '-movflags', '+faststart', '-y', finalFileTmp
-            ], jobTmpDir, pct => updateJob(jobId, { progress: 94 + (pct * 0.05) }));
+            ], jobTmpDir, pct => updateJob(jobId, { progress: 94 + (pct * 0.05) }),
+            600000, { signal });
             validateFinalMedia(
                 await getStreamsDuration(finalFileTmp),
                 fs.existsSync(finalFileTmp) ? fs.statSync(finalFileTmp).size : 0,
@@ -359,7 +397,7 @@ export const processRecapPipeline = async (jobId) => {
                     '-c:v', 'libx264', '-threads', String(FFMPEG_VIDEO_THREADS), '-preset', 'fast', '-crf', '20',
                     '-c:a', 'aac', '-b:a', '128k', '-movflags', '+faststart',
                     '-y', adjustedTmp
-                ], jobTmpDir);
+                ], jobTmpDir, null, 600000, { signal });
                 validateFinalMedia(
                     await getStreamsDuration(adjustedTmp),
                     fs.existsSync(adjustedTmp) ? fs.statSync(adjustedTmp).size : 0,
@@ -379,7 +417,7 @@ export const processRecapPipeline = async (jobId) => {
         await runFFmpeg([
             '-i', outputPaths.mp4, '-map', '0:a:0', '-vn',
             '-c:a', 'libmp3lame', '-b:a', '128k', '-y', outputPaths.mp3
-        ], outDir);
+        ], outDir, null, 600000, { signal });
         if (!fs.existsSync(outputPaths.mp3) || fs.statSync(outputPaths.mp3).size === 0) {
             throw new Error('Pipeline Error: MP3 export is missing or empty.');
         }
@@ -396,6 +434,7 @@ export const processRecapPipeline = async (jobId) => {
                 scenes: state.scenes,
                 originalTranscript: state.originalTranscript,
                 narrationTranscript: state.narrationTranscript,
+                srtPath: state.srtFile,
                 mapping: state.mapping,
                 timeline: state.timeline,
                 videoUrl: `/output/${jobId}.mp4`,
@@ -407,6 +446,15 @@ export const processRecapPipeline = async (jobId) => {
 
     } catch (err) {
         console.error(`[Job ${jobId}] Error:`, err);
+        if (isAbortError(err)) {
+            const explicitlyCancelled = isCancellationRequested() === true;
+            updateJob(jobId, explicitlyCancelled
+                ? { status: 'cancelled', error: null, retryable: false }
+                : { status: 'queued', error: null, retryable: true });
+            throw createAbortError(explicitlyCancelled
+                ? 'Processing cancelled by the user.'
+                : 'Processing interrupted for recovery.');
+        }
         const safeErrorMsg = err.message ? err.message.replace(/key=[A-Za-z0-9_\-]+/gi, 'key=HIDDEN') : 'Unknown error';
         const geminiFailureUpdate = getGeminiFailureJobUpdate(err);
         updateJob(jobId, geminiFailureUpdate || { status: 'error', error: safeErrorMsg, retryable: false });

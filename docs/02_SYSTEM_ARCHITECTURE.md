@@ -46,6 +46,7 @@ WorkspaceWorker
   └── videoEffects
 
 Persistent DATA_DIR
+  ├── admission-state.json
   ├── workspace-jobs.json
   ├── saas-state.json
   ├── user-gemini-credentials.json
@@ -61,10 +62,11 @@ Persistent DATA_DIR
 1. Resolve and create storage paths.
 2. Recover stuck core jobs.
 3. Restore the core queue.
-4. Start and recover the workspace worker.
-5. Start the 24-hour core-output cleanup sweep.
-6. Mount Vite middleware in development or serve `dist` in production.
-7. Listen on the configured host/port.
+4. Reconcile rolling processing-start usage from durable core and workspace jobs.
+5. Start and recover the workspace worker.
+6. Start the 24-hour coordinated workspace/core retention sweep.
+7. Mount Vite middleware in development or serve `dist` in production.
+8. Listen on the configured host/port.
 
 ### Development restart model
 
@@ -77,6 +79,7 @@ Persistent DATA_DIR
 - Development watcher: `scripts/dev-server.mjs`, `scripts/dev-watch-policy.mjs`
 - Workspace store/worker: `src/services/workspaceJobs.js`, `src/services/workspaceWorker.js`
 - Core store/queue: `src/services/jobManager.js`, `src/services/queue.js`
+- Admission policy/store: `src/config/admission.js`, `src/services/admissionControl.js`
 - Bridge: `src/services/corePipelineBridge.js`
 - Core processor: `src/workers/processor.js`
 
@@ -87,6 +90,7 @@ Persistent DATA_DIR
 - Core workflow-v2 is preserved rather than reimplemented.
 - Filesystem paths are rooted beneath a configured storage root.
 - JSON writes generally use temporary-file plus rename semantics.
+- Admission state is durable and single-writer; policy is user-scoped and independent of billing.
 
 ## Future Work
 
@@ -94,5 +98,5 @@ The following are unapproved architectural recommendations:
 
 - Consolidate the two job aggregates and queues.
 - Introduce transactional persistence and migrations.
-- Make worker ownership and cancellation explicit.
+- Consolidate lifecycle ownership further; explicit workspace cancellation is propagated through the bridged core workflow, but workspace and core records remain separate.
 - Separate web and media-worker processes only after durable coordination exists.

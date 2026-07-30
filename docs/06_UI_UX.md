@@ -15,6 +15,7 @@ Describe the current routes, navigation, screens, interaction rules, responsiven
 - History and workspace job rows.
 - Settings for the user’s Gemini key.
 - Completed media preview and download.
+- Completed History records expire with their media after the current 24-hour retention window.
 - Burmese-first interface with some remaining English status/error text.
 
 ### Planned or Placeholder

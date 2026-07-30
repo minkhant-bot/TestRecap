@@ -12,7 +12,7 @@ The committed Git history contains eight commits through `b70e294`. The current 
 
 ### Planned or Placeholder
 
-Future entries should be added only when behavior actually changes. Unapproved remediation proposals belong in `14_ROADMAP.md`, not in the implemented changelog.
+Future implementation entries should be added only when behavior actually changes. Approved future product direction and unapproved remediation proposals belong in `14_ROADMAP.md`, not in the implemented changelog.
 
 ### Known Issues
 
@@ -45,10 +45,25 @@ The working tree currently adds or changes:
 - Workspace SSE, History, cancellation, and restart recovery.
 - Admin API/UI foundations and a credits UI placeholder.
 - Scoped development watcher and structured diagnostics.
+- Administrator-only authorization for global legacy settings and diagnostic routes.
+- Atomic two-active-workspace-job quota with structured HTTP 429 responses and admin-only legacy creation routes.
+- Coordinated workspace/core deletion with ownership checks, active-core protection, and safe linked-artifact cleanup.
+- Coordinated 24-hour retention for linked and orphaned workspace/core state while preserving active or mismatched jobs.
+- Durable per-user rolling mutation and processing-start admission, including legacy-route protection and structured HTTP 429 responses.
+- Validated Firebase custom-claim role authority, protected UID bootstrap, serialized privilege hierarchy, immediate actor revalidation, and last-super-admin protection.
 
 ### Documentation entry
 
 - **2026-07-29 — Documentation only:** Added the `/docs` current-state project documentation set. No application code changed.
+- **2026-07-30 — Authorization hardening:** Removed hard-coded email authority; added validated Firebase role claims, protected super-admin bootstrap, hierarchy/lockout controls, concurrent mutation protection, and consistent legacy admin checks. Live authenticated staging smoke testing remains a pre-beta requirement.
+- **2026-07-30 — Future product direction, documentation only:** Approved a future move from mandatory BYOK to hosted credits using server-side platform AI/TTS credentials, durable and auditable credit accounting, payment-confirmed issuance, explicit BYOK migration or removal, and later server-validated selectable voices. No product behavior or Core AI Pipeline code changed. Authenticated staging smoke testing remains a separate pre-beta requirement.
+- **2026-07-30 — Edge TTS WebSocket security remediation:** Overrode the Edge TTS dependency paths from vulnerable `ws@8.13.0` to patched `ws@8.21.1`. The production audit no longer reports `ws` or Edge TTS advisories. Focused tests, the complete automated suite, TypeScript, production build, and an isolated replay of a previously accepted real fixture passed without changing pipeline behavior or output-quality settings.
+- **2026-07-30 — React Router risk acceptance, documentation only:** Accepted the unresolved RSC-mode CSRF advisory for beta under Blink’s current Vite SPA and declarative `BrowserRouter` architecture because the affected RSC/framework/data-action path is not reachable. This is not a vulnerability remediation. Keep `react-router` and `react-router-dom` at `7.18.1`; do not downgrade to `7.11.0` or migrate to version 8 without separate architectural approval. Re-review when a compatible patched 7.x release or supported DOM migration path exists.
+- **2026-07-30 — uuid advisory review, documentation only:** Confirmed that the installed `uuid@9.0.1` is reported for GHSA-w5hq-g745-h8pq, but the defect is limited to buffered `v3()`, `v5()`, and `v6()` calls. Blink and the reviewed installed Google transitive call sites use only `v4()` without caller-provided buffers, while the loaded `gaxios@7.3.0` uses `randomUUID()`, while audited but unloaded `gaxios@6.7.1` uses unaffected `v4()`. Accepted this unreachable-path risk for beta without changing dependencies; re-review before introducing affected APIs or during the next compatible dependency upgrade.
+- **2026-07-30 — Firebase Admin advisory review, documentation only:** Confirmed that Blink uses only modular Firebase Admin App and Auth functionality. Firestore, Cloud Storage, and their audited Google transitive chains are installed but not loaded or reachable; the aggregate moderate findings propagate from the separately reviewed `uuid` advisory. Accepted the Auth-only configuration for beta with explicit service, import-style, and dependency-change re-review triggers.
+- **2026-07-30 — Final P1 security and dependency review, documentation only:** Confirmed `ws@8.21.1` across production Edge TTS paths, re-ran the production audit, verified complete evidence and re-review triggers for all remaining advisory entries, and passed 232/232 automated tests. P1 security work did not change the Core AI Pipeline contract, workflow, prompts, TTS behavior, timeline, FFmpeg composition, export, or accepted output quality. Authenticated staging smoke testing remains a separate pre-beta release requirement.
+- **2026-07-30 — Authenticated staging smoke-test plan, documentation only:** Defined the mandatory real-Railway pre-beta checks for authentication, role enforcement, admission controls, restart and volume persistence, protected jobs/outputs, deployment configuration, evidence, blocking failures, and cleanup. No smoke test was executed and no application or deployment behavior changed.
+- **2026-07-30 — Railway evidence correction, documentation only:** Rejected previously shown screenshots because they belonged to another person's Railway project. Blink's deployment target, staging URL, replica count, volume, effective `DATA_DIR`, and production-variable presence remain unverified; deployment preflight is blocked and authenticated staging smoke testing has not started.
 
 ## File References
 

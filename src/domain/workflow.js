@@ -1,6 +1,6 @@
 export const WORKFLOW_VERSION = 2;
 
-export const JOB_STATUSES = Object.freeze(['queued', 'processing', 'complete', 'error']);
+export const JOB_STATUSES = Object.freeze(['queued', 'processing', 'complete', 'error', 'cancelled']);
 export const isJobStatus = status => JOB_STATUSES.includes(status);
 
 export const WORKFLOW_STAGES = Object.freeze([

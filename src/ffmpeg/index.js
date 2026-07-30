@@ -9,6 +9,7 @@ try { execSync('ffmpeg -version'); ffmpegPath = 'ffmpeg'; } catch (e) {}
 import ffprobePath from 'ffprobe-static';
 import { resolveFfprobePath } from './resolveFfprobe.js';
 import { WORKFLOW_VERSION } from '../domain/workflow.js';
+import { createAbortError, throwIfAborted } from '../services/cancellation.js';
 
 ffmpeg.setFfmpegPath(ffmpegPath);
 const resolvedFfprobePath = resolveFfprobePath(ffprobePath.path);
@@ -98,20 +99,42 @@ export const getStreamsDuration = (file) => new Promise((resolve, reject) => {
     });
 });
 
-export const extractWav = (inputPath, outputPath) => {
+export const extractWav = (inputPath, outputPath, options = {}) => {
   return new Promise((resolve, reject) => {
-    ffmpeg(inputPath)
+    throwIfAborted(options.signal);
+    let settled = false;
+    const command = ffmpeg(inputPath)
       .noVideo()
       .audioCodec('pcm_s16le')
       .audioChannels(1)
       .audioFrequency(16000)
-      .on('end', () => resolve(outputPath))
-      .on('error', err => reject(err))
+      .on('end', () => {
+          if (settled) return;
+          settled = true;
+          options.signal?.removeEventListener('abort', onAbort);
+          resolve(outputPath);
+      })
+      .on('error', err => {
+          if (settled) return;
+          settled = true;
+          options.signal?.removeEventListener('abort', onAbort);
+          reject(options.signal?.aborted ? createAbortError() : err);
+      });
+    const onAbort = () => {
+        if (settled) return;
+        try { command.kill('SIGTERM'); } catch { }
+        settled = true;
+        options.signal?.removeEventListener('abort', onAbort);
+        reject(createAbortError('Audio extraction interrupted.'));
+    };
+    options.signal?.addEventListener('abort', onAbort, { once: true });
+    command
       .save(outputPath);
   });
 };
 
 export const detectScenes = async (videoPath, cachePath, options = {}) => {
+    throwIfAborted(options.signal);
     const algorithmVersion = 'ffmpeg-scene-detection-v1';
     if (cachePath && fs.existsSync(cachePath)) {
         try {
@@ -140,8 +163,21 @@ export const detectScenes = async (videoPath, cachePath, options = {}) => {
           '-f', 'null',
           nullDevice
         ], {
-          stdio: ['ignore', 'ignore', 'pipe']
+          stdio: ['ignore', 'ignore', 'pipe'],
+          detached: process.platform !== 'win32'
         });
+        let settled = false;
+        const finish = (error) => {
+            if (settled) return;
+            settled = true;
+            options.signal?.removeEventListener('abort', onAbort);
+            error ? reject(error) : resolve();
+        };
+        const onAbort = () => {
+            terminateFFmpegProcess(child);
+            finish(createAbortError('Scene detection interrupted.'));
+        };
+        options.signal?.addEventListener('abort', onAbort, { once: true });
 
         let buffer = '';
         child.stderr.on('data', (data) => {
@@ -167,14 +203,15 @@ export const detectScenes = async (videoPath, cachePath, options = {}) => {
             }
           }
           if (code === 0) {
-            resolve();
+            finish();
           } else {
-            reject(new Error(`FFmpeg scene detection exited with code ${code}`));
+            finish(new Error(`FFmpeg scene detection exited with code ${code}`));
           }
         });
 
-        child.on('error', reject);
+        child.on('error', finish);
     });
+    throwIfAborted(options.signal);
     
     if (scenes.length === 0 || scenes[0] !== 0) {
         scenes.unshift(0);
@@ -238,7 +275,7 @@ export const runFFmpeg = (args, cwd, onProgress, timeoutMs = 600000, options = {
         
         const onAbort = () => {
             terminateFFmpegProcess(child);
-            safeReject(Object.assign(new Error('FFmpeg operation cancelled.'), { code: 'ABORT_ERR' }));
+            safeReject(createAbortError('FFmpeg operation interrupted.'));
         };
         if (signal?.aborted) {
             onAbort();

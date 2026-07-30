@@ -20,6 +20,7 @@ Describe the current automated tests, safe verification levels, important regres
 
 - No approved test-program expansion is recorded in the repository.
 - There is no `npm test` script, single CI test command, maintained authenticated-workspace browser E2E suite, or production load/soak/security/backup/restore/migration suite.
+- The mandatory manual Railway staging plan is defined in `16_STAGING_SMOKE_TEST.md`; it has not yet been executed.
 
 ### Known Issues
 
@@ -41,6 +42,7 @@ Describe the current automated tests, safe verification levels, important regres
 2. **Service tests**
    - Workspace persistence and worker lifecycle.
    - Restart recovery and explicit cancellation.
+   - Abort-signal propagation into the bridged core pipeline, FFmpeg, Edge TTS, and final effects.
    - Gemini response validation using mocks.
    - Credential encryption/restart.
    - Core bridge state preparation.
@@ -73,8 +75,10 @@ Describe the current automated tests, safe verification levels, important regres
 - Authentication and owner isolation.
 - Credential encryption and non-disclosure.
 - Download authorization.
-- Coordinated deletion and retention once fixed.
-- Quota/credits concurrency once implemented.
+- Coordinated workspace/core deletion, owner mismatch, active-core blocking, orphan cleanup, and unsafe-artifact preflight.
+- Active-job quota concurrency, per-user isolation, terminal release, and legacy-route bypass prevention.
+- Rolling admission isolation, concurrency, restart recovery, expiry, compensation, legacy-route protection, and HTTP 429 contract.
+- Retention across linked records, legacy-only records, orphan workspace records, active-state preservation, and owner mismatches.
 
 ### Constrained-device rule
 
@@ -89,6 +93,7 @@ Do not run real full exports, Scene Rebuild, Final Export, or full E2E on a cons
 - Workspace routes: `src/routes/workspace.test.js`
 - Workflow-v2 tests: `src/domain/workflow.test.js`, `src/workers/*.test.js`
 - UI source-contract tests: `src/ui/newRecapFlow.test.js`
+- Manual authenticated staging plan: `docs/16_STAGING_SMOKE_TEST.md`
 
 ## Important Decisions
 
@@ -104,4 +109,4 @@ The following are unapproved test recommendations:
 - Add one documented `npm test` entry point and CI matrix.
 - Add component tests for active UI behavior.
 - Add authenticated browser tests against isolated temporary data.
-- Add deletion/retention, quotas/credits, admin hierarchy, range downloads, and fatal-shutdown tests.
+- Add future credits, admin hierarchy, range downloads, and fatal-shutdown tests.

@@ -10,27 +10,27 @@ Describe the current administrative authorization, backend endpoints, UI exposur
 
 - Role strings: `super_admin`, `admin`, `user`.
 - Backend `requireAdmin` accepts admin and super-admin.
+- Validated Firebase custom claims are the authoritative role source.
+- `FIREBASE_SUPER_ADMIN_UIDS` provides server-side initial super-admin bootstrap.
 - Admin endpoints can list Firebase users, update role/status, inspect the core queue/jobs, view in-memory logs, and return process/system metrics.
 - Super-admin receives Dashboard and Projects navigation in the current UI.
-- An administrator cannot disable their own account through the update route.
+- Role and status mutations enforce `user < admin < super_admin`, revalidate the actor, and serialize concurrent changes.
+- Administrators cannot change roles, modify peers/higher roles, or change their own role/status.
+- Bootstrap and last-active-super-admin protections prevent administrative lockout.
 
 ### Planned or Placeholder
 
 - The shell contains admin-oriented navigation labels, but dedicated Users, Queue, Jobs, System Status, and Logs screens are not implemented.
-- Durable administrative audit history and custom-claim-based role authority are absent.
+- Durable administrative audit history is absent.
 - No approved admin-completion plan is recorded in the repository.
 
 ### Known Issues
 
-- Role mapping currently ignores custom claims.
-- One hard-coded email becomes super-admin; everyone else becomes user.
-- Documented `FIREBASE_ADMIN_UIDS` bootstrap is absent.
 - The current dashboard and projects pages call user workspace APIs, not admin APIs.
-- An admin update endpoint accepts promotion to super-admin without a privilege hierarchy.
 
 ## Architecture/Flow
 
-Current intended backend flow:
+Current backend flow:
 
 ```text
 Session cookie
@@ -40,21 +40,28 @@ Session cookie
   → /api/admin/*
 ```
 
-Current actual role derivation:
+Role derivation:
 
 ```text
-Firebase user email == hard-coded email
+Configured bootstrap UID
   → super_admin
-otherwise
+otherwise validated Firebase custom role claim
+  → user | admin | super_admin
+missing claim
   → user
+malformed or unsupported claim
+  → authentication rejected
 ```
 
-Although `PATCH /api/admin/users/{uid}` writes Firebase custom claims, later profile mapping does not read those claims.
+Every authenticated request reads the current Firebase user record rather than
+trusting role data from the browser or session token. Administrative mutations
+re-read the actor inside the serialized mutation boundary so a concurrently
+demoted or disabled administrator cannot continue with stale authority.
 
 ### Admin endpoints
 
 - Users: Firebase `listUsers`.
-- User update: custom role claim plus Firebase disabled status.
+- User update: hierarchy-checked custom role claim plus Firebase disabled status.
 - Queue and jobs: legacy/core `p-queue` and `saas-state.json`, not the workspace queue/store.
 - Logs: last 500 in-memory audit events.
 - System: uptime, Node/platform/CPU/memory, and core queue snapshot.
@@ -73,14 +80,14 @@ Although `PATCH /api/admin/users/{uid}` writes Firebase custom claims, later pro
 - Client-provided roles are never trusted.
 - Account-disabled state is checked by Firebase Admin.
 - Backend authorization, not hidden navigation, must protect admin operations.
+- Only super-admins may change roles.
+- Configured bootstrap super-admins cannot be demoted or disabled through the API.
+- At least one active super-admin must always remain.
 - The current admin foundation is not production-complete.
 
 ## Future Work
 
 The following are unapproved admin-system recommendations:
 
-- Select and implement one authoritative role source.
-- Remove the hard-coded super-admin identity.
-- Add privilege hierarchy, self-elevation prevention, and last-super-admin protection.
 - Connect an approved admin UI to the admin API.
 - Include workspace jobs/queue or consolidate the two job systems first.

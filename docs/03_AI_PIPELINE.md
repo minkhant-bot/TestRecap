@@ -98,9 +98,11 @@ The workspace path begins the core bridge at `generate_tts` because its Gemini a
 - Final output uses H.264 video and AAC audio; MP3 is also produced.
 - Final effects modify the canonical MP4 path in place.
 - Gemini transcript temperature is zero.
+- The workspace worker propagates one abort signal through the bridged core pipeline, Gemini translation, Edge TTS, FFmpeg work, and final effects.
+- An abort becomes `cancelled` only when the persisted workspace job has an explicit user cancellation request; shutdown interruption requeues the same job ID.
 
 ## Future Work
 
-- Propagate cancellation through every AI and media stage.
+- Make FFprobe metadata probes directly interruptible; current cancellation is checked before and after probes.
 - Bound FFmpeg stderr memory.
 - Consider a single composed effects graph only after correctness tests protect ordering, coordinates, timing, and subtitles.

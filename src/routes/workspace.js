@@ -1,0 +1,389 @@
+import express from 'express';
+import fs from 'node:fs';
+import path from 'node:path';
+import multer from 'multer';
+import { randomUUID } from 'node:crypto';
+import { ensureStoragePaths, getStoragePaths } from '../config/runtime.js';
+import { getUploadConfiguration } from '../config/upload.js';
+import {
+    createWorkspaceJob,
+    getWorkspaceJob,
+    getWorkspaceJobQuota,
+    getWorkspaceJobInternal,
+    getWorkspaceQueue,
+    listWorkspaceJobs,
+    queueWorkspaceJob,
+    requestWorkspaceJobCancellation,
+    updateWorkspaceJobEffects
+} from '../services/workspaceJobs.js';
+import { deleteWorkspaceJobEverywhere } from '../services/workspaceJobDeletion.js';
+import { publishWorkspaceEvent, subscribeToWorkspaceJob } from '../services/workspaceEvents.js';
+import { publishQueuePositions, workspaceWorker } from '../services/workspaceWorker.js';
+import { setJobKeys } from '../services/jobManager.js';
+import { verifyGeminiApiKey } from '../services/geminiKeyVerification.js';
+import {
+    deleteUserGeminiApiKey,
+    getUserGeminiApiKey,
+    hasUserGeminiApiKey,
+    setUserGeminiApiKey
+} from '../services/userGeminiKeys.js';
+import {
+    admissionService,
+    createMutationAdmissionMiddleware,
+    sendAdmissionError
+} from '../services/admissionControl.js';
+
+const storagePaths = ensureStoragePaths(getStoragePaths());
+const incomingDirectory = path.join(storagePaths.uploads, '.incoming');
+fs.mkdirSync(incomingDirectory, { recursive: true });
+
+const removeIfPresent = target => {
+    if (target && fs.existsSync(target)) fs.unlinkSync(target);
+};
+
+const removeDirectoryIfEmpty = target => {
+    if (target && fs.existsSync(target) && fs.readdirSync(target).length === 0) {
+        fs.rmdirSync(target);
+    }
+};
+
+const isSupportedVideo = file => {
+    const extension = path.extname(file.originalname).slice(1).toLowerCase();
+    const type = String(file.mimetype || '').toLowerCase();
+    const validType = type.startsWith('video/') ||
+        ['application/octet-stream', 'application/x-matroska'].includes(type);
+    return validType && getUploadConfiguration().supportedExtensions.includes(extension);
+};
+
+const parseDuration = raw => {
+    if (raw === undefined || raw === null || raw === '') return null;
+    const duration = Number(raw);
+    return Number.isFinite(duration) && duration > 0 ? duration : null;
+};
+
+const sendQuotaExceeded = (res, quota) => res.status(429).json({
+    error: `You can have at most ${quota.activeJobLimit} active recap projects.`,
+    code: 'ACTIVE_JOB_QUOTA_EXCEEDED',
+    activeJobCount: quota.activeJobCount,
+    activeJobLimit: quota.activeJobLimit
+});
+
+export const createWorkspaceRouter = ({
+    verifyKey = verifyGeminiApiKey,
+    admission = admissionService
+} = {}) => {
+    const router = express.Router();
+    const admitMutation = endpoint => createMutationAdmissionMiddleware(admission, endpoint);
+
+    router.get('/config', (req, res) => {
+        const config = getUploadConfiguration();
+        if (!config.configured) {
+            return res.status(503).json({ error: 'Upload size configuration is unavailable.' });
+        }
+        return res.json({
+            configured: true,
+            maxUploadSizeMb: config.maxMegabytes,
+            maxUploadSizeBytes: config.maxBytes,
+            supportedExtensions: config.supportedExtensions
+        });
+    });
+
+    router.post('/gemini-key/verify', admitMutation('workspace.gemini-key.verify'), async (req, res) => {
+        const result = await verifyKey(req.body?.geminiApiKey);
+        if (result.valid) return res.json({ valid: true, model: result.model });
+        const providerMessage = result.providerError?.body?.error?.message || result.error;
+        if (result.retryable) {
+            return res.status(503).json({
+                error: providerMessage || 'Gemini API key verification is temporarily unavailable.',
+                providerError: result.providerError
+            });
+        }
+        return res.status(400).json({
+            error: providerMessage || 'The Gemini API key is invalid or has no compatible stable Flash model.',
+            providerError: result.providerError
+        });
+    });
+
+    router.get('/gemini-key', (req, res) => {
+        return res.json({ hasApiKey: hasUserGeminiApiKey(req.user.uid) });
+    });
+
+    router.put('/gemini-key', admitMutation('workspace.gemini-key.save'), async (req, res) => {
+        const apiKey = String(req.body?.geminiApiKey || '').trim();
+        const verification = await verifyKey(apiKey);
+        if (!verification.valid) {
+            const status = verification.retryable ? 503 : 400;
+            return res.status(status).json({
+                error: verification.providerError?.body?.error?.message ||
+                    verification.error ||
+                    'The Gemini API key could not be verified.'
+            });
+        }
+        setUserGeminiApiKey(req.user.uid, apiKey);
+        return res.json({ hasApiKey: true });
+    });
+
+    router.delete('/gemini-key', admitMutation('workspace.gemini-key.delete'), (req, res) => {
+        deleteUserGeminiApiKey(req.user.uid);
+        return res.json({ hasApiKey: false });
+    });
+
+    router.get('/jobs', (req, res) => {
+        res.json(listWorkspaceJobs(req.user.uid));
+    });
+
+    router.get('/jobs/:jobId', (req, res) => {
+        const job = getWorkspaceJob(req.params.jobId, req.user.uid);
+        if (!job) return res.status(404).json({ error: 'Project not found.' });
+        return res.json(job);
+    });
+
+    router.get('/jobs/:jobId/source', (req, res) => {
+        const job = getWorkspaceJob(req.params.jobId, req.user.uid);
+        if (!job) return res.status(404).json({ error: 'Project not found.' });
+        const internal = getWorkspaceJobInternal(req.params.jobId);
+        return res.sendFile(internal.storedPath);
+    });
+
+    router.get('/queue', (req, res) => {
+        const worker = workspaceWorker.snapshot();
+        res.json({
+            concurrency: 1,
+            worker: {
+                ...worker,
+                activeJobId: worker.activeJobId &&
+                    getWorkspaceJob(worker.activeJobId, req.user.uid)
+                    ? worker.activeJobId
+                    : null
+            },
+            jobs: getWorkspaceQueue(req.user.uid)
+        });
+    });
+
+    router.get('/jobs/:jobId/status', (req, res) => {
+        const job = getWorkspaceJob(req.params.jobId, req.user.uid);
+        if (!job) return res.status(404).json({ error: 'Project not found.' });
+        const queued = getWorkspaceQueue(req.user.uid).find(item => item.id === job.id);
+        return res.json({ ...job, queuePosition: queued?.position ?? null });
+    });
+
+    router.post('/jobs/:jobId/queue', admitMutation('workspace.jobs.queue'), (req, res) => {
+        try {
+            console.info('[Blink effects]', JSON.stringify({
+                boundary: 'queue.received',
+                jobId: req.params.jobId,
+                effects: req.body?.effects || null
+            }));
+            const geminiApiKey = req.body?.geminiApiKey ||
+                req.headers['x-gemini-api-key'] ||
+                getUserGeminiApiKey(req.user.uid) ||
+                process.env.GEMINI_API_KEY;
+            if (!geminiApiKey) {
+                return res.status(400).json({ error: 'Enter a Gemini API key before processing.' });
+            }
+            const configured = updateWorkspaceJobEffects(req.params.jobId, req.user.uid, req.body?.effects);
+            if (!configured) return res.status(404).json({ error: 'Project not found.' });
+            console.info('[Blink effects]', JSON.stringify({
+                boundary: 'queue.persisted',
+                jobId: req.params.jobId,
+                effects: configured.effects
+            }));
+            const job = admission.withProcessingAdmission(
+                req.user.uid,
+                req.params.jobId,
+                () => queueWorkspaceJob(req.params.jobId, req.user.uid)
+            );
+            if (!job) return res.status(404).json({ error: 'Project not found.' });
+            setJobKeys(job.id, { geminiApiKey });
+            publishWorkspaceEvent(job.id, 'job.queued', job);
+            publishQueuePositions();
+            workspaceWorker.wake();
+            const queued = getWorkspaceQueue(req.user.uid).find(item => item.id === job.id);
+            return res.status(202).json({ ...job, queuePosition: queued?.position ?? null });
+        } catch (error) {
+            if (sendAdmissionError(res, error, req.requestId)) return;
+            console.error('[Workspace queue] request failed', {
+                requestId: req.requestId,
+                jobId: req.params.jobId,
+                message: error?.message,
+                stack: error?.stack
+            });
+            if (error?.code === 'INVALID_JOB_STATE') {
+                return res.status(409).json({ error: error.message });
+            }
+            return res.status(500).json({ error: 'Project could not enter the queue.' });
+        }
+    });
+
+    router.post('/jobs/:jobId/cancel', admitMutation('workspace.jobs.cancel'), (req, res) => {
+        try {
+            const result = requestWorkspaceJobCancellation(req.params.jobId, req.user.uid);
+            if (!result) return res.status(404).json({ error: 'Project not found.' });
+            if (result.interruptWorker) workspaceWorker.cancel(req.params.jobId);
+            publishWorkspaceEvent(
+                req.params.jobId,
+                result.interruptWorker ? 'job.cancellation_requested' : 'job.cancelled',
+                result.job
+            );
+            publishQueuePositions();
+            return res.status(202).json(result.job);
+        } catch (error) {
+            if (error?.code === 'INVALID_JOB_STATE') {
+                return res.status(409).json({ error: error.message });
+            }
+            return res.status(500).json({ error: 'Cancellation could not be requested.' });
+        }
+    });
+
+    router.get('/jobs/:jobId/events', (req, res) => {
+        const job = getWorkspaceJob(req.params.jobId, req.user.uid);
+        if (!job) return res.status(404).json({ error: 'Project not found.' });
+
+        res.set({
+            'Content-Type': 'text/event-stream',
+            'Cache-Control': 'no-cache, no-transform',
+            Connection: 'keep-alive'
+        });
+        res.flushHeaders();
+        const send = event => {
+            res.write(`id: ${event.eventId}\n`);
+            res.write(`event: ${event.eventType}\n`);
+            res.write(`data: ${JSON.stringify(event)}\n\n`);
+        };
+        res.write(`event: job.snapshot\n`);
+        res.write(`data: ${JSON.stringify({
+            eventType: 'job.snapshot',
+            jobId: job.id,
+            occurredAt: new Date().toISOString(),
+            payload: {
+                ...job,
+                queuePosition: getWorkspaceQueue(req.user.uid).find(item => item.id === job.id)?.position ?? null
+            }
+        })}\n\n`);
+
+        const unsubscribe = subscribeToWorkspaceJob(job.id, send);
+        const heartbeat = setInterval(() => {
+            res.write(`event: heartbeat\ndata: ${JSON.stringify({ occurredAt: new Date().toISOString() })}\n\n`);
+        }, 15000);
+        heartbeat.unref?.();
+        req.on('close', () => {
+            clearInterval(heartbeat);
+            unsubscribe();
+        });
+    });
+
+    router.delete('/jobs/:jobId', admitMutation('workspace.jobs.delete'), (req, res) => {
+        try {
+            const deleted = deleteWorkspaceJobEverywhere(req.params.jobId, req.user.uid);
+            if (!deleted) return res.status(404).json({ error: 'Project not found.' });
+            return res.json({ deleted: true, jobId: req.params.jobId });
+        } catch (error) {
+            if (['ACTIVE_JOB', 'ACTIVE_CORE_JOB', 'JOB_OWNERSHIP_MISMATCH'].includes(error?.code)) {
+                if (error.code === 'JOB_OWNERSHIP_MISMATCH') {
+                    console.warn('[Workspace delete] ownership mismatch', {
+                        requestId: req.requestId || null,
+                        jobId: req.params.jobId,
+                        ownerUid: req.user.uid
+                    });
+                }
+                return res.status(409).json({ error: error.message });
+            }
+            console.error('[Workspace delete] request failed', {
+                requestId: req.requestId || null,
+                jobId: req.params.jobId,
+                code: error?.code,
+                message: error?.message,
+                stack: error?.stack
+            });
+            return res.status(500).json({ error: 'Project files could not be removed safely.' });
+        }
+    });
+
+    router.post('/jobs', admitMutation('workspace.jobs.upload'), (req, res) => {
+        const config = getUploadConfiguration();
+        if (!config.configured) {
+            return res.status(503).json({ error: 'Upload size configuration is unavailable.' });
+        }
+        const initialQuota = getWorkspaceJobQuota(req.user.uid);
+        if (!initialQuota.available) return sendQuotaExceeded(res, initialQuota);
+
+        const upload = multer({
+            storage: multer.diskStorage({
+                destination: incomingDirectory,
+                filename: (request, file, callback) => {
+                    const temporaryName = `${randomUUID()}.upload`;
+                    request.workspaceTempPath = path.join(incomingDirectory, temporaryName);
+                    callback(null, temporaryName);
+                }
+            }),
+            limits: { fileSize: config.maxBytes, files: 1 }
+        }).single('video');
+
+        let completed = false;
+        req.once('aborted', () => {
+            if (!completed) removeIfPresent(req.workspaceTempPath);
+        });
+
+        upload(req, res, async error => {
+            completed = true;
+            if (error) {
+                removeIfPresent(req.workspaceTempPath);
+                if (error instanceof multer.MulterError && error.code === 'LIMIT_FILE_SIZE') {
+                    return res.status(413).json({ error: 'The selected video exceeds the configured upload limit.' });
+                }
+                return res.status(400).json({ error: 'The video could not be uploaded.' });
+            }
+
+            const file = req.file;
+            if (!file) return res.status(400).json({ error: 'Select a video to upload.' });
+            if (!isSupportedVideo(file)) {
+                removeIfPresent(file.path);
+                return res.status(415).json({ error: 'This video format is not supported.' });
+            }
+
+            const geminiApiKey = req.body?.geminiApiKey ||
+                getUserGeminiApiKey(req.user.uid) ||
+                process.env.GEMINI_API_KEY;
+            const verification = await verifyKey(geminiApiKey);
+            if (!verification.valid) {
+                removeIfPresent(file.path);
+                const status = verification.retryable ? 503 : 400;
+                const message = verification.retryable
+                    ? 'Gemini API key verification is temporarily unavailable.'
+                    : 'Verify a valid Gemini API key before creating a recap.';
+                return res.status(status).json({ error: message });
+            }
+
+            const jobId = randomUUID();
+            const extension = path.extname(file.originalname).slice(1).toLowerCase();
+            const jobDirectory = path.join(storagePaths.uploads, 'workspace', jobId);
+            const storedPath = path.join(jobDirectory, `source.${extension}`);
+            try {
+                fs.mkdirSync(jobDirectory, { recursive: true });
+                fs.renameSync(file.path, storedPath);
+                const job = createWorkspaceJob({
+                    id: jobId,
+                    ownerUid: req.user.uid,
+                    filename: file.originalname,
+                    fileSize: file.size,
+                    duration: parseDuration(req.body.duration),
+                    storedPath
+                });
+                setJobKeys(job.id, { geminiApiKey });
+                return res.status(201).json(job);
+            } catch (error) {
+                removeIfPresent(file.path);
+                removeIfPresent(storedPath);
+                removeDirectoryIfEmpty(jobDirectory);
+                if (error?.code === 'ACTIVE_JOB_QUOTA_EXCEEDED') {
+                    return sendQuotaExceeded(res, error.quota);
+                }
+                return res.status(500).json({ error: 'The uploaded project could not be saved.' });
+            }
+        });
+    });
+
+    return router;
+};
+
+export default createWorkspaceRouter();

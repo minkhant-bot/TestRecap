@@ -1,5 +1,6 @@
 import crypto from 'crypto';
 import fs from 'fs';
+import { createAbortError, throwIfAborted } from '../services/cancellation.js';
 
 const escapeXml = (text) => text.replace(/[<>&"']/g, char => ({
     '<': '&lt;', '>': '&gt;', '&': '&amp;', '"': '&quot;', "'": '&apos;'
@@ -13,8 +14,13 @@ export class EdgeTtsEmptyAudioError extends Error {
     }
 }
 
-export const synthesizeEdgeTts = async (client, text, audioPath) => {
+export const synthesizeEdgeTts = async (client, text, audioPath, { signal } = {}) => {
+    throwIfAborted(signal);
     const socket = await client._connectWebSocket();
+    if (signal?.aborted) {
+        try { socket.terminate(); } catch { }
+        throw createAbortError('Text-to-speech interrupted.');
+    }
     return new Promise((resolve, reject) => {
         const audioStream = fs.createWriteStream(audioPath);
         const subtitles = [];
@@ -35,6 +41,7 @@ export const synthesizeEdgeTts = async (client, text, audioPath) => {
             if (settled || !streamFinished || !socketClosed) return;
             settled = true;
             clearTimeout(timeout);
+            signal?.removeEventListener('abort', onAbort);
             if (pendingError) {
                 pendingError.diagnostics ||= diagnostics;
                 reject(pendingError);
@@ -52,6 +59,12 @@ export const synthesizeEdgeTts = async (client, text, audioPath) => {
                 socketClosed = true;
             }
         };
+        const onAbort = () => {
+            pendingError ||= createAbortError('Text-to-speech interrupted.');
+            if (!streamFinished) audioStream.end();
+            try { socket.terminate(); } catch (_) { closeSocket(); }
+        };
+        signal?.addEventListener('abort', onAbort, { once: true });
 
         audioStream.on('error', error => {
             pendingError ||= error;

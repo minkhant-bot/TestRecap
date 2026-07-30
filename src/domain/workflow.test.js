@@ -8,6 +8,7 @@ import {
     WORKFLOW_VERSION,
     getFinalSpeedStageOutcome,
     hasCompletedStage,
+    isJobStatus,
     readCompatibleWorkflowState
 } from './workflow.js';
 
@@ -29,7 +30,7 @@ test('workflow v2 has stable stage ordering and exact frontend labels', () => {
     assert.equal(WORKFLOW_VERSION, 2);
     assert.deepEqual(WORKFLOW_STAGE_IDS, EXPECTED_STAGES);
     assert.deepEqual(EXPECTED_STAGES.map(id => WORKFLOW_STAGE_LABELS[id]), EXPECTED_LABELS);
-    assert.deepEqual(JOB_STATUSES, ['queued', 'processing', 'complete', 'error']);
+    assert.deepEqual(JOB_STATUSES, ['queued', 'processing', 'complete', 'error', 'cancelled']);
 });
 
 test('stage control flow accepts IDs and rejects old display strings', () => {
@@ -49,6 +50,11 @@ test('active contract excludes blur, visible subtitle, SRT, and font stages', ()
     for (const forbidden of ['blur', 'subtitle', 'srt', 'font', 'semantic']) {
         assert.equal(contract.includes(forbidden), false, `active contract must exclude ${forbidden}`);
     }
+});
+
+test('SaaS lifecycle supports cancellation without changing workflow stages', () => {
+    assert.equal(isJobStatus('cancelled'), true);
+    assert.equal(WORKFLOW_STAGE_IDS.includes('cancelled'), false);
 });
 
 test('frontend imports the shared stage contract rather than display-string mappings', () => {

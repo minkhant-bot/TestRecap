@@ -79,3 +79,23 @@ test('accepts a turn only after receiving a non-empty audio payload', async () =
         fs.rmSync(dir, { recursive: true, force: true });
     }
 });
+
+test('explicit abort terminates an in-flight Edge TTS request', async () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'edge-abort-'));
+    const output = path.join(dir, 'audio.wav');
+    const socket = new FakeSocket([]);
+    const controller = new AbortController();
+    try {
+        const pending = synthesizeEdgeTts({
+            ...clientFor([]),
+            _connectWebSocket: async () => socket
+        }, 'စာသား', output, { signal: controller.signal });
+        await new Promise(resolve => setImmediate(resolve));
+        controller.abort();
+        await assert.rejects(pending, error =>
+            error.name === 'AbortError' && error.code === 'ABORT_ERR');
+        assert.equal(socket.readyState, 3);
+    } finally {
+        fs.rmSync(dir, { recursive: true, force: true });
+    }
+});

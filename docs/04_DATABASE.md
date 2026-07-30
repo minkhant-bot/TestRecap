@@ -23,7 +23,6 @@ Document all current durable stores, schemas, ownership, and limitations. The pr
 - Two independent job records describe the same processing job.
 - Every progress update synchronously rewrites the complete relevant store.
 - No transaction spans workspace state, core state, files, and credentials.
-- Deletion and retention are not coordinated between the stores.
 
 ## Architecture/Flow
 
@@ -96,6 +95,8 @@ Without `DATA_DIR`, local paths are repository-relative under `src/tmp`, `data/c
 - Sensitive credential files are created with mode `0600` where implemented.
 - Only one process/replica may safely write these files.
 - Internal filesystem paths are not returned in public workspace job objects.
+- Workspace deletion validates both ownership domains and linked paths, revokes the core record/credentials, deletes linked artifacts, and then removes the workspace record.
+- The 24-hour sweep removes linked terminal workspace/core records and artifacts together; it also discovers expired orphan workspace records.
 
 ## Future Work
 
@@ -103,4 +104,4 @@ The following are unapproved persistence recommendations:
 
 - Select one canonical job schema.
 - Move lifecycle, users, audit events, and future credits into transactions.
-- Add migration, backup, integrity-check, retention, and recovery procedures.
+- Add migration, backup, integrity-check, configurable-retention, and recovery procedures.

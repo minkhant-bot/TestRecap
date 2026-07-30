@@ -1,6 +1,6 @@
 export const WORKFLOW_VERSION: 2;
 
-export type JobStatus = 'queued' | 'processing' | 'complete' | 'error';
+export type JobStatus = 'queued' | 'processing' | 'complete' | 'error' | 'cancelled';
 export type WorkflowStageId =
     | 'upload'
     | 'extract_audio'

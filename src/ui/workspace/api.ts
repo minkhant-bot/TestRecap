@@ -1,0 +1,166 @@
+import type { UploadConfiguration, VideoEffects, WorkspaceJob, WorkspaceJobStatus, WorkspaceQueue } from './types';
+
+const parseResponse = async <T>(response: Response): Promise<T> => {
+  if (response.status === 401) {
+    window.dispatchEvent(new CustomEvent('testrecap:session-expired'));
+    throw new Error('Session သက်တမ်းကုန်သွားပါပြီ။ ဆက်လုပ်ရန် ပြန်ဝင်ပါ။');
+  }
+  const payload = await response.json().catch(() => ({}));
+  if (!response.ok) throw new Error(payload.error || 'တောင်းဆိုမှုကို မလုပ်ဆောင်နိုင်ပါ။');
+  return payload as T;
+};
+
+export const getUploadConfiguration = async () =>
+  parseResponse<UploadConfiguration>(await fetch('/api/workspace/config', { credentials: 'include' }));
+
+interface GeminiProviderError {
+  httpStatus: number;
+  httpStatusText?: string;
+  body: {
+    error?: {
+      code?: number | string;
+      status?: string;
+      message?: string;
+    };
+  } | string | null;
+  rawBody: string;
+}
+
+export const verifyGeminiApiKey = async (geminiApiKey: string) => {
+  const response = await fetch('/api/workspace/gemini-key/verify', {
+    method: 'POST',
+    credentials: 'include',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ geminiApiKey }),
+  });
+  const payload = await response.json().catch(() => ({})) as {
+    valid?: true;
+    model?: string;
+    error?: string;
+    providerError?: GeminiProviderError;
+  };
+  if (response.ok) return payload as { valid: true; model: string };
+
+  const provider = payload.providerError;
+  if (provider) {
+    const googleError = typeof provider.body === 'object' && provider.body
+      ? provider.body.error
+      : undefined;
+    throw new Error([
+      `HTTP status: ${provider.httpStatus}${provider.httpStatusText ? ` ${provider.httpStatusText}` : ''}`,
+      `Error code: ${googleError?.code ?? 'not provided'}`,
+      `Provider status: ${googleError?.status ?? 'not provided'}`,
+      `Message: ${googleError?.message ?? payload.error ?? 'not provided'}`,
+      `Complete Google response: ${provider.rawBody}`,
+    ].join('\n'));
+  }
+  throw new Error(payload.error || `Verification endpoint returned HTTP ${response.status}.`);
+};
+
+export const getGeminiApiKeyAvailability = async () =>
+  parseResponse<{ hasApiKey: boolean }>(await fetch('/api/workspace/gemini-key', {
+    credentials: 'include',
+  }));
+
+export const saveGeminiApiKey = async (geminiApiKey: string) =>
+  parseResponse<{ hasApiKey: true }>(await fetch('/api/workspace/gemini-key', {
+    method: 'PUT',
+    credentials: 'include',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ geminiApiKey }),
+  }));
+
+export const deleteGeminiApiKey = async () =>
+  parseResponse<{ hasApiKey: false }>(await fetch('/api/workspace/gemini-key', {
+    method: 'DELETE',
+    credentials: 'include',
+  }));
+
+export const listWorkspaceJobs = async () =>
+  parseResponse<WorkspaceJob[]>(await fetch('/api/workspace/jobs', { credentials: 'include' }));
+
+export const getWorkspaceJob = async (jobId: string) =>
+  parseResponse<WorkspaceJob>(await fetch(`/api/workspace/jobs/${encodeURIComponent(jobId)}`, {
+    credentials: 'include',
+  }));
+
+export const getWorkspaceJobStatus = async (jobId: string) =>
+  parseResponse<WorkspaceJobStatus>(await fetch(`/api/workspace/jobs/${encodeURIComponent(jobId)}/status`, {
+    credentials: 'include',
+  }));
+
+export const getWorkspaceQueue = async () =>
+  parseResponse<WorkspaceQueue>(await fetch('/api/workspace/queue', { credentials: 'include' }));
+
+export const queueWorkspaceJob = async (jobId: string, geminiApiKey: string, effects?: VideoEffects) => {
+  const body = { geminiApiKey, effects };
+  const url = `/api/workspace/jobs/${encodeURIComponent(jobId)}/queue`;
+  console.info('[Blink effects]', { boundary: 'queue.request', url, method: 'POST', body });
+  try {
+    return parseResponse<WorkspaceJobStatus>(await fetch(url, {
+      method: 'POST',
+      credentials: 'include',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+    }));
+  } catch (error) {
+    if (error instanceof TypeError) {
+      throw new Error('ဆာဗာနှင့် ချိတ်ဆက်၍ မရပါ။ လက်ရှိရွေးချယ်မှုများကို မပျောက်စေဘဲ ထပ်စမ်းနိုင်ပါသည်။');
+    }
+    throw error;
+  }
+};
+
+export const cancelWorkspaceJob = async (jobId: string) =>
+  parseResponse<WorkspaceJob>(await fetch(`/api/workspace/jobs/${encodeURIComponent(jobId)}/cancel`, {
+    method: 'POST',
+    credentials: 'include',
+  }));
+
+export const deleteWorkspaceJob = async (jobId: string) =>
+  parseResponse<{ deleted: true; jobId: string }>(await fetch(`/api/workspace/jobs/${encodeURIComponent(jobId)}`, {
+    method: 'DELETE',
+    credentials: 'include',
+  }));
+
+interface UploadCallbacks {
+  onProgress: (percentage: number) => void;
+  onComplete: (job: WorkspaceJob) => void;
+  onError: (message: string) => void;
+}
+
+export const uploadWorkspaceJob = (
+  file: File,
+  duration: number | null,
+  geminiApiKey: string,
+  callbacks: UploadCallbacks,
+) => {
+  const request = new XMLHttpRequest();
+  request.open('POST', '/api/workspace/jobs');
+  request.withCredentials = true;
+  request.responseType = 'json';
+  request.upload.addEventListener('progress', event => {
+    if (event.lengthComputable) callbacks.onProgress(Math.round((event.loaded / event.total) * 100));
+  });
+  request.addEventListener('load', () => {
+    const payload = request.response as WorkspaceJob | { error?: string } | null;
+    if (request.status >= 200 && request.status < 300) {
+      callbacks.onComplete(payload as WorkspaceJob);
+      return;
+    }
+    callbacks.onError(
+      payload && 'error' in payload && payload.error
+        ? payload.error
+        : 'ဗီဒီယိုကို တင်၍မရပါ။',
+    );
+  });
+  request.addEventListener('error', () => callbacks.onError('ကွန်ရက်ပြတ်တောက်၍ ဗီဒီယိုတင်ခြင်း ရပ်သွားပါသည်။'));
+  request.addEventListener('abort', () => callbacks.onError('ဗီဒီယိုတင်ခြင်း ပယ်ဖျက်ပြီး။'));
+
+  const body = new FormData();
+  body.append('video', file);
+  body.append('geminiApiKey', geminiApiKey);
+  if (duration !== null) body.append('duration', String(duration));
+  request.send(body);
+  return () => request.abort();
+};

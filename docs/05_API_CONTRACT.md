@@ -17,11 +17,15 @@ Describe the currently mounted HTTP contract, authorization boundaries, request 
 - Legacy job-creation compatibility routes require an administrator role.
 - Admin foundation endpoints are mounted behind `requireAdmin`.
 - Authenticated processing starts and selected mutation endpoints enforce durable per-user admission limits.
+- Explicitly gated PostgreSQL billing APIs for plans, Trial eligibility/grants,
+  estimates, balances/ledger, credit packages/banks, private screenshot
+  metadata, purchase requests, and PostgreSQL-Super-Admin financial operations.
 
 ### Planned or Placeholder
 
-- No approved API expansion plan is recorded in the repository.
-- Versioning, pagination, client idempotency keys, OpenAPI, and credits endpoints are absent; they are recommendations rather than implemented placeholders.
+- Private object upload/download APIs, UI activation, and production billing
+  activation remain pending.
+- P2 financial mutations require idempotency keys, PostgreSQL transaction boundaries, structured errors, and durable audit events.
 
 ### Known Issues
 
@@ -77,6 +81,8 @@ Queue request:
 
 ```json
 {
+  "planCode": "normal",
+  "billingMode": "byok",
   "geminiApiKey": "",
   "effects": {
     "colorGrading": "cinematic",
@@ -94,7 +100,12 @@ Queue request:
 }
 ```
 
-Successful queueing returns HTTP 202 with a workspace job and `queuePosition`.
+`planCode`, `billingMode`, and `Idempotency-Key` are required only when the
+separate live-job billing gate is enabled. Trial/Normal accept only `byok`; Pro
+accepts only `blink_funded`. Successful queueing returns HTTP 202 with a
+workspace job, immutable safe billing snapshot, and `queuePosition`. BYOK
+credential/quota failures use structured `BYOK_*` codes and never fall back to
+Blink-funded mode.
 
 Workspace upload admission permits at most two active jobs per user, where active means `pending`, `queued`, or `processing`. An exhausted quota returns HTTP 429:
 
@@ -155,6 +166,32 @@ SSE event IDs are process-local and reset on restart. A fresh connection always 
 - `GET /admin/logs`
 - `GET /admin/system`
 
+### PostgreSQL billing foundation
+
+These routes return `BILLING_NOT_ENABLED` unless `P2_BILLING_ENABLED=true` with
+PostgreSQL configured. Mutations require `Idempotency-Key`.
+
+User routes:
+
+- `GET /plans`, `GET /plans/me`, `POST /plans/me/select`
+- `GET /trial/eligibility`, `POST /trial/grant`
+- `POST /jobs/estimate` (non-authoritative estimate only; no reservation)
+- `GET /credits/balance`, `GET /credits/ledger`
+- `GET /credit-plans`, `GET /credit-plans/{id}/bank-accounts`
+- `POST /uploads/payment-screenshots/intents`
+- `POST/GET /credit-purchase-requests`, `GET /credit-purchase-requests/{id}`
+
+PostgreSQL-Super-Admin routes under `/admin/billing`:
+
+- catalog, purchase list/approve/reject, plan and immutable policy creation;
+- credit-package, bank, package-bank-link, and promotion configuration;
+- Trial eligibility assessment and manual credit grant/deduction;
+- screenshot metadata read/verification, per-user balance/ledger, and audit reads.
+
+Screenshot intents create private object metadata and a server-generated object
+key only. They return no public or upload URL. A purchase requires a verified
+owned metadata record.
+
 ### Mounted legacy routes
 
 `/diagnostic`, `/voices`, `/preview-voice`, `/settings`, `/jobs`, `/process-recap`, `/process`, `/retry/{jobId}`, `/status/{jobId}`, `/projects`, `/play/{jobId}`, `/completed-jobs`, and legacy job deletion/cancellation routes remain active. `/diagnostic`, both `/settings` operations, and the `/jobs`, `/process-recap`, and `/process` creation routes additionally require `requireAdmin`.
@@ -180,9 +217,10 @@ SSE event IDs are process-local and reset on restart. A fresh connection always 
 
 ## Future Work
 
-The following are unapproved API recommendations:
+The following remain unimplemented:
 
 - Publish an OpenAPI contract after choosing the canonical job model.
 - Remove or version deprecated routes after consumer verification.
-- Add client idempotency and pagination; credits admission requires separate product approval.
+- Add the P2 APIs and cursor pagination defined in `17_P2_FOUNDATION_ARCHITECTURE.md`.
+- Preserve explicit BYOK versus Blink-funded mode; never silently fall back between them.
 - Standardize all API errors around request IDs and machine-readable codes.

@@ -17,8 +17,10 @@ Explain the current runtime components and ownership boundaries without requirin
 
 ### Planned or Placeholder
 
-- No approved replacement architecture is recorded in the repository.
-- A transactional database, distributed workers, multi-replica coordination, and object storage/CDN are recommendations only; none is implemented or an explicit product placeholder.
+- Managed PostgreSQL is implemented as the opt-in authority for the billing API
+  domain. Operational jobs remain JSON-authoritative, and the private payment
+  screenshot object-storage adapter remains unimplemented.
+- The complete P2 target architecture is `17_P2_FOUNDATION_ARCHITECTURE.md`.
 
 ### Known Issues
 
@@ -91,12 +93,15 @@ Persistent DATA_DIR
 - Filesystem paths are rooted beneath a configured storage root.
 - JSON writes generally use temporary-file plus rename semantics.
 - Admission state is durable and single-writer; policy is user-scoped and independent of billing.
+- P2 billing wraps job admission and completion outside the Core AI Pipeline: reserve before paid processing and settle only after the existing valid-output milestone.
 
 ## Future Work
 
-The following are unapproved architectural recommendations:
+The following remain implementation or activation work:
 
 - Consolidate the two job aggregates and queues.
-- Introduce transactional persistence and migrations.
+- Verify and activate the approved PostgreSQL schema/transactions in an isolated
+  environment; add private object storage, backup/restore, reconciliation, and
+  production authority cutover from `17_P2_FOUNDATION_ARCHITECTURE.md`.
 - Consolidate lifecycle ownership further; explicit workspace cancellation is propagated through the bridged core workflow, but workspace and core records remain separate.
 - Separate web and media-worker processes only after durable coordination exists.

@@ -23,12 +23,16 @@ Describe the current routes, navigation, screens, interaction rules, responsiven
 - Credits purchase page currently shows “coming soon.”
 - Admin navigation labels and pages do not expose the backend admin capabilities.
 - No approved notification-center or offline-experience plan is recorded.
+- P2 will present Trial, Normal, and Pro as commercial plans rather than roles.
+- The UI may show plan, 30-second rate, entitlements, and estimated credits unobtrusively near submission or billing information; it must not require an intrusive confirmation popup for every job.
+- Trial and Normal must not offer Blur or Flip; Pro may offer both. Backend entitlement enforcement remains authoritative.
+- A failed BYOK job remains BYOK and shows a structured key/provider error; the UI must not silently switch it to Pro.
 
 ### Known Issues
 
 - Large MP4s are fetched fully into browser memory.
 - History polls every three seconds even when no jobs are active.
-- Normal users and super-admins receive different navigation, but the role model is currently defective.
+- Normal users and super-admins receive different navigation. Current Firebase-claim roles are hardened; approved P2 migration to PostgreSQL role authority remains unimplemented.
 - Some duplicate loading/error patterns exist across pages.
 
 ## Architecture/Flow

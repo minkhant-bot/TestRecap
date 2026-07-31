@@ -73,6 +73,7 @@ const publicJob = job => ({
     videoUrl: job.videoUrl,
     audioUrl: job.audioUrl,
     effects: normalizeVideoEffects(job.effects),
+    billing: job.billing || null,
     cancellationRequested: Boolean(job.cancellationRequested)
 });
 
@@ -150,6 +151,7 @@ export const createWorkspaceJob = data => {
         videoUrl: null,
         audioUrl: null,
         effects: normalizeVideoEffects(null),
+        billing: null,
         cancellationRequested: false,
         storedPath: assertOwnedStoragePath(data.storedPath)
     };
@@ -251,6 +253,12 @@ export const claimNextWorkspaceJob = workerId => {
 
 export const updateWorkspaceJobInternal = (id, updates) => updateInternal(id, updates);
 
+export const updateWorkspaceJobBilling = (id, ownerUid, billing) => {
+    const job = jobs.get(id);
+    if (!job || job.ownerUid !== ownerUid) return null;
+    return updateInternal(id, { billing });
+};
+
 export const updateWorkspaceJobEffects = (id, ownerUid, effects) => {
     const job = jobs.get(id);
     if (!job || job.ownerUid !== ownerUid) return null;
@@ -311,18 +319,10 @@ export const recoverWorkspaceJobs = () => {
         updateInternal(job.id, {
             status: 'queued',
             stage: 'queued',
-            progress: 0,
+            progress: job.transcriptPath ? 30 : job.audioPath ? 20 : 0,
             startedAt: null,
             workerId: null,
             error: null,
-            audioPath: null,
-            audioDuration: null,
-            extractionStartedAt: null,
-            extractionCompletedAt: null,
-            transcriptPath: null,
-            transcriptSegmentCount: null,
-            transcriptionStartedAt: null,
-            transcriptionCompletedAt: null,
             cancellationRequested: false,
             recoveryCount: (job.recoveryCount || 0) + 1
         });

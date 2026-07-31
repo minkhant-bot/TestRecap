@@ -42,10 +42,8 @@ test('FFmpeg is available and extracts validated audio from MP4, MKV, MOV, AVI, 
     await runFFmpeg(['-version'], temporaryRoot, null, 30000);
     for (const format of formats) {
         const sourcePath = await generateVideo(format);
-        const progress = [];
         const result = await extractWorkspaceAudio({
-            sourcePath,
-            onProgress: value => progress.push(value)
+            sourcePath
         });
         assert.equal(result.audioPath, getWorkspaceAudioPaths(sourcePath).audioPath);
         assert.ok(fs.existsSync(result.audioPath), `${format.extension} audio output is missing`);
@@ -55,8 +53,28 @@ test('FFmpeg is available and extracts validated audio from MP4, MKV, MOV, AVI, 
         assert.equal(details.codec, 'pcm_s16le');
         assert.equal(Number(details.sampleRate), 16000);
         assert.equal(details.channels, 1);
-        assert.ok(progress.length > 0, `${format.extension} emitted no FFmpeg progress`);
     }
+});
+
+test('forwards extraction progress from the FFmpeg runner', async () => {
+    const directory = fs.mkdtempSync(path.join(temporaryRoot, 'progress-'));
+    const sourcePath = path.join(directory, 'source.mp4');
+    fs.writeFileSync(sourcePath, 'source');
+    const progress = [];
+    const result = await extractWorkspaceAudio({
+        sourcePath,
+        onProgress: value => progress.push(value),
+        run: async (args, cwd, onProgress) => {
+            if (args[0] === '-version') return;
+            assert.equal(cwd, directory);
+            onProgress(42);
+            fs.writeFileSync(getWorkspaceAudioPaths(sourcePath).partialPath, 'audio');
+        },
+        validate: async () => 1
+    });
+    assert.deepEqual(progress, [42]);
+    assert.equal(result.audioDuration, 1);
+    assert.ok(fs.existsSync(result.audioPath));
 });
 
 test('large valid source extracts without loading the source into memory', async () => {

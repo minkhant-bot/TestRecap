@@ -2,21 +2,41 @@
 
 ## Purpose
 
-Document all current durable stores, schemas, ownership, and limitations. The project does not currently use a relational database.
+Document all current durable stores, schemas, ownership, and limitations.
 
 ## Current Status
 
 ### Implemented
 
+- P2.1 PostgreSQL configuration, shared pool, transaction helpers, deterministic
+  checksummed migrations, readiness checks, and graceful shutdown.
+- The initial P2 schema and repository/service boundaries. They are scaffolded,
+  not authoritative for live application domains.
+- An explicitly activated PostgreSQL billing foundation for plans/policies,
+  entitlements, trial assessment/grants, credit balances and immutable ledger,
+  purchase catalog/banks, private screenshot metadata, manual purchase review,
+  one-time first-purchase bonuses, adjustments, and financial audit reads.
 - Atomic-style JSON persistence using write-to-temporary-file then rename.
 - AES-GCM encryption for job and user Gemini credentials.
 - Filesystem persistence for uploads, caches, transcripts, media, and outputs.
 - Restart loading and recovery for workspace and core jobs.
 
-### Planned or Placeholder
+### Controlled activation
 
-- No database replacement or migration is approved or represented as an implementation placeholder.
-- SQLite or another transactional store, migrations, backups, pagination, locking, a credits ledger, and durable auditing are recommendations only.
+- `0001_p2_foundation.sql` creates the approved tables, constraints, indexes,
+  append-only ledger/audit triggers, retained-financial deletion guards, and
+  protected bootstrap Super Admin guard.
+- `P2_BILLING_ENABLED=true` activates only the billing APIs and requires
+  `DATABASE_URL`. Billing requests synchronize the authenticated Firebase
+  identity into PostgreSQL. Financial mutations require PostgreSQL
+  `super_admin`; other application role checks remain Firebase-authoritative.
+- Existing JSON job stores, encrypted BYOK files, and workspace/core pipeline
+  stage state remain authoritative.
+- `P2_LIVE_JOB_BILLING_ENABLED=true` separately enables PostgreSQL job billing
+  snapshots, reservations, ledger settlement/refund, and worker leases without
+  replacing the JSON lifecycle store. It is disabled by default. Global role
+  cutover, object upload/download integration, backups, legacy backfill, and
+  production activation remain pending.
 
 ### Known Issues
 
@@ -90,6 +110,14 @@ Without `DATA_DIR`, local paths are repository-relative under `src/tmp`, `data/c
 
 ## Important Decisions
 
+- PostgreSQL is opt-in when `DATABASE_URL` is present. `DATABASE_REQUIRED=true`
+  makes missing/invalid configuration and failed readiness blocking.
+- Migrations run only with `npm run db:migrate`; startup never auto-migrates.
+  Applied checksums are immutable and there is no ordinary rollback command.
+- JSON/file persistence remains authoritative until an explicitly tested domain
+  cutover. The billing domain fails closed when disabled or unavailable and has
+  no JSON dual-write or silent fallback.
+
 - Persistent files use schema version 1.
 - Corrupt or incompatible stores fail during module loading rather than being silently replaced.
 - Sensitive credential files are created with mode `0600` where implemented.
@@ -100,8 +128,10 @@ Without `DATA_DIR`, local paths are repository-relative under `src/tmp`, `data/c
 
 ## Future Work
 
-The following are unapproved persistence recommendations:
+The following remain incomplete or gated after the P2.1–P2.3 implementation:
 
-- Select one canonical job schema.
-- Move lifecycle, users, audit events, and future credits into transactions.
-- Add migration, backup, integrity-check, configurable-retention, and recovery procedures.
+- Keep Firebase as identity authority while PostgreSQL becomes authoritative for roles and permissions.
+- Keep roles separate from Trial/Normal/Pro plan assignments and entitlements.
+- Production-enable immutable job pricing/entitlement snapshots and transactionally linked reservations only after isolated verification.
+- Complete global role/authority cutover for users, roles, settings, and audit; billing-domain PostgreSQL authority is already gated.
+- Add backup/restore, integrity reconciliation, retention, private object storage, and recovery procedures.

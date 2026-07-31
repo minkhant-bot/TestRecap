@@ -345,6 +345,61 @@ test('startup recovers a persistently locked job after a crash', async () => {
     assert.equal(getWorkspaceJob(job.id, ownerUid).workerId, null);
 });
 
+test('live worker requires a lease, resumes validated checkpoints, and settles after output validation', async () => {
+    clearWorkspaceJobsForTests();
+    const job = createPending('live-recovery.mp4');
+    const internal = getWorkspaceJobInternal(job.id);
+    internal.billing = { billingStatus: 'reserved', billingMode: 'byok' };
+    internal.audioPath = path.join(path.dirname(internal.storedPath), 'audio.wav');
+    internal.transcriptPath = path.join(path.dirname(internal.storedPath), 'transcript.json');
+    fs.writeFileSync(internal.audioPath, 'validated audio');
+    fs.writeFileSync(internal.transcriptPath, '{"segments":[{}]}');
+    queueWorkspaceJob(job.id, ownerUid);
+    const calls = [];
+    const worker = new WorkspaceWorker({
+        workerId: 'live-recovery-worker',
+        pollIntervalMs: 5,
+        liveBillingEnabled: () => true,
+        billing: {
+            acquireLease: async () => {
+                calls.push('lease');
+                return {
+                    jobId: job.id, workerId: 'live-recovery-worker', leaseToken: randomUUID()
+                };
+            },
+            heartbeatLease: async () => true,
+            releaseLease: async () => calls.push('lease-release'),
+            markStarted: async () => calls.push('reservation-committed'),
+            settle: async () => {
+                calls.push('settle');
+                return { ...internal.billing, billingStatus: 'settled' };
+            },
+            fail: async () => calls.push('failure'),
+            review: async () => calls.push('review')
+        },
+        executeStage: async () => {
+            throw new Error('validated audio checkpoint should be reused');
+        },
+        translateStage: async () => {
+            throw new Error('validated transcript checkpoint should be reused');
+        },
+        coreStage: async () => ({
+            videoUrl: `/output/${job.id}.mp4`
+        }),
+        finalEffectsStage: async () => {
+            fs.mkdirSync(path.join(temporaryRoot, 'output'), { recursive: true });
+            fs.writeFileSync(path.join(temporaryRoot, 'output', `${job.id}.mp4`), 'valid output');
+        }
+    });
+    worker.start();
+    await waitFor(() => getWorkspaceJob(job.id, ownerUid)?.status === 'completed');
+    await worker.stop();
+    assert.deepEqual(calls, [
+        'lease', 'reservation-committed', 'settle', 'lease-release'
+    ]);
+    assert.equal(getWorkspaceJob(job.id, ownerUid).billing.billingStatus, 'settled');
+});
+
 test('worker records a safe terminal failure and no automatic retry', async () => {
     clearWorkspaceJobsForTests();
     const job = createPending('failed.mp4');

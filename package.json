@@ -6,7 +6,9 @@
     "dev": "node scripts/dev-server.mjs",
     "start": "node server.js",
     "build": "vite build",
-    "lint": "tsc --noEmit"
+    "lint": "tsc --noEmit",
+    "db:status": "node scripts/db-migrate.mjs status",
+    "db:migrate": "node scripts/db-migrate.mjs up"
   },
   "dependencies": {
     "@google/genai": "^2.13.0",
@@ -25,6 +27,7 @@
     "multer": "^1.4.5-lts.1",
     "node-edge-tts": "^1.1.2",
     "p-queue": "^8.0.1",
+    "pg": "^8.22.0",
     "playwright": "^1.62.0",
     "react": "^18.2.0",
     "react-dom": "^18.2.0",

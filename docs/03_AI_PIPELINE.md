@@ -96,6 +96,7 @@ The workspace path begins the core bridge at `generate_tts` because its Gemini a
 - AI artifacts are fingerprinted or versioned before cache reuse.
 - Source chronology and authoritative TTS timing are preserved.
 - Final output uses H.264 video and AAC audio; MP3 is also produced.
+- Approved P2 billing remains outside this pipeline. It reserves before paid admission and settles only after this pipeline and existing output validation deliver a valid usable artifact; billing must not alter prompts, stages, TTS, timing, FFmpeg, or export quality.
 - Final effects modify the canonical MP4 path in place.
 - Gemini transcript temperature is zero.
 - The workspace worker propagates one abort signal through the bridged core pipeline, Gemini translation, Edge TTS, FFmpeg work, and final effects.

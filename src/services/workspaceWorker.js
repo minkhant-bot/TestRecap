@@ -1,4 +1,5 @@
 import { randomUUID } from 'node:crypto';
+import fs from 'node:fs';
 import path from 'node:path';
 import {
     claimNextWorkspaceJob,
@@ -20,11 +21,27 @@ import {
     createGeminiAudioTranscript
 } from './geminiAudioTranscript.js';
 import { getJobKeys } from './jobManager.js';
-import { continueWithCorePipeline } from './corePipelineBridge.js';
+import { assertCompletedCoreOutput, continueWithCorePipeline } from './corePipelineBridge.js';
 import { applyFinalVideoEffects } from './videoEffects.js';
 import { ensureStoragePaths, getStoragePaths } from '../config/runtime.js';
+import {
+    acquireLiveJobLease,
+    handleLiveJobFailure,
+    heartbeatLiveJobLease,
+    isLiveJobBillingEnabled,
+    markLiveJobReviewRequired,
+    markPaidProviderStarted,
+    releaseLiveJobLease,
+    settleLiveJob
+} from './liveJobBilling.js';
 
 const storagePaths = ensureStoragePaths(getStoragePaths());
+
+const validCheckpointFile = target => {
+    if (!target || !fs.existsSync(target)) return false;
+    const stat = fs.lstatSync(target);
+    return !stat.isSymbolicLink() && stat.isFile() && stat.size > 0;
+};
 
 const CORE_STAGE_MAP = Object.freeze({
     generate_tts: 'voice_generation',
@@ -166,7 +183,17 @@ export class WorkspaceWorker {
         }),
         coreStage = continueWithCorePipeline,
         finalEffectsStage = applyFinalVideoEffects,
-        cleanup = async ({ job }) => cleanupWorkspaceAudioPartials(job.storedPath)
+        cleanup = async ({ job }) => cleanupWorkspaceAudioPartials(job.storedPath),
+        liveBillingEnabled = isLiveJobBillingEnabled,
+        billing = {
+            acquireLease: acquireLiveJobLease,
+            heartbeatLease: heartbeatLiveJobLease,
+            releaseLease: releaseLiveJobLease,
+            markStarted: markPaidProviderStarted,
+            settle: settleLiveJob,
+            fail: handleLiveJobFailure,
+            review: markLiveJobReviewRequired
+        }
     } = {}) {
         this.workerId = workerId;
         this.pollIntervalMs = pollIntervalMs;
@@ -175,6 +202,8 @@ export class WorkspaceWorker {
         this.coreStage = coreStage;
         this.finalEffectsStage = finalEffectsStage;
         this.cleanup = cleanup;
+        this.liveBillingEnabled = liveBillingEnabled;
+        this.billing = billing;
         this.running = false;
         this.timer = null;
         this.activeJobId = null;
@@ -191,7 +220,34 @@ export class WorkspaceWorker {
         for (const jobId of recovered) {
             publishWorkspaceEvent(jobId, 'job.recovered', { status: 'queued', stage: 'queued' });
         }
-        this.schedule(0);
+        if (this.liveBillingEnabled()) {
+            Promise.all(recovered.map(async jobId => {
+                const job = getWorkspaceJobInternal(jobId);
+                if (job?.billing?.billingStatus === 'settled') {
+                    try {
+                        assertCompletedCoreOutput(jobId, { videoUrl: `/output/${jobId}.mp4` });
+                        updateWorkspaceJobInternal(jobId, {
+                            status: 'completed', stage: 'completed', progress: 100,
+                            videoUrl: `/output/${jobId}.mp4`, workerId: null
+                        });
+                    } catch {
+                        await this.billing.review(
+                            jobId, 'settled_job_recovery_output_state_uncertain'
+                        );
+                        updateWorkspaceJobInternal(jobId, {
+                            status: 'failed', stage: 'failed', workerId: null,
+                            error: 'Billing recovery requires Super Admin review.',
+                            billing: { ...job.billing, billingStatus: 'review_required' }
+                        });
+                    }
+                }
+            })).catch(error => {
+                console.error('[WorkspaceWorker] Billing reconciliation failed:',
+                    error?.message || error);
+            }).finally(() => this.schedule(0));
+        } else {
+            this.schedule(0);
+        }
     }
 
     schedule(delay = this.pollIntervalMs) {
@@ -212,6 +268,34 @@ export class WorkspaceWorker {
         if (!job) return;
         publishQueuePositions();
 
+        const usesLiveBilling = this.liveBillingEnabled() && Boolean(job.billing);
+        let lease = null;
+        let leaseHeartbeat = null;
+        if (usesLiveBilling) {
+            try {
+                lease = await this.billing.acquireLease(job.id, this.workerId);
+                if (!lease) {
+                    requeueInterruptedWorkspaceJob(job.id);
+                    return;
+                }
+                await this.billing.markStarted(job.id);
+            } catch (error) {
+                if (lease) await this.billing.releaseLease(lease).catch(() => {});
+                requeueInterruptedWorkspaceJob(job.id);
+                console.error(`[WorkspaceWorker] Billing admission failed for ${job.id}:`,
+                    error?.message || error);
+                return;
+            }
+            leaseHeartbeat = setInterval(() => {
+                this.billing.heartbeatLease(lease).catch(error => {
+                    console.error(`[WorkspaceWorker] Lease heartbeat failed for ${job.id}:`,
+                        error?.message || error);
+                    this.activeController?.abort();
+                });
+            }, 30000);
+            leaseHeartbeat.unref?.();
+        }
+
         this.activeJobId = job.id;
         this.activeController = new AbortController();
         let cancellationStage = null;
@@ -230,15 +314,18 @@ export class WorkspaceWorker {
                 extractionStartedAt
             });
             publishWorkspaceEvent(job.id, 'stage.started', extracting);
-            const result = await this.executeStage({
-                job: { ...job },
-                signal: this.activeController.signal,
-                reportProgress: progress => {
-                    const bounded = Math.max(10, Math.min(95, Math.round(progress)));
-                    const updated = updateWorkspaceJobInternal(job.id, { progress: bounded });
-                    publishWorkspaceEvent(job.id, 'stage.progress', updated);
-                }
-            });
+            const checkpoint = getWorkspaceJobInternal(job.id);
+            const result = validCheckpointFile(checkpoint?.audioPath)
+                ? { audioPath: checkpoint.audioPath, audioDuration: checkpoint.audioDuration }
+                : await this.executeStage({
+                    job: { ...job },
+                    signal: this.activeController.signal,
+                    reportProgress: progress => {
+                        const bounded = Math.max(10, Math.min(95, Math.round(progress)));
+                        const updated = updateWorkspaceJobInternal(job.id, { progress: bounded });
+                        publishWorkspaceEvent(job.id, 'stage.progress', updated);
+                    }
+                });
             if (getWorkspaceJobInternal(job.id)?.cancellationRequested) {
                 throw Object.assign(new Error('Processing cancelled.'), { name: 'AbortError' });
             }
@@ -259,11 +346,17 @@ export class WorkspaceWorker {
                 transcriptionStartedAt
             });
             publishWorkspaceEvent(job.id, 'stage.started', transcribing);
-            const transcriptResult = await this.translateStage({
-                job: { ...job },
-                audioPath: result?.audioPath || getWorkspaceJobInternal(job.id)?.audioPath,
-                signal: this.activeController.signal
-            });
+            const transcriptCheckpoint = getWorkspaceJobInternal(job.id);
+            const transcriptResult = validCheckpointFile(transcriptCheckpoint?.transcriptPath)
+                ? {
+                    transcriptPath: transcriptCheckpoint.transcriptPath,
+                    segmentCount: transcriptCheckpoint.transcriptSegmentCount
+                }
+                : await this.translateStage({
+                    job: { ...job },
+                    audioPath: result?.audioPath || getWorkspaceJobInternal(job.id)?.audioPath,
+                    signal: this.activeController.signal
+                });
             if (getWorkspaceJobInternal(job.id)?.cancellationRequested) {
                 throw Object.assign(new Error('Processing cancelled.'), { name: 'AbortError' });
             }
@@ -324,6 +417,13 @@ export class WorkspaceWorker {
             });
             if (getWorkspaceJobInternal(job.id)?.cancellationRequested) {
                 throw Object.assign(new Error('Processing cancelled.'), { name: 'AbortError' });
+            }
+            if (usesLiveBilling) {
+                assertCompletedCoreOutput(job.id, { videoUrl: `/output/${job.id}.mp4` });
+                const billingSnapshot = await this.billing.settle(job.id, {
+                    outputValidated: true
+                });
+                updateWorkspaceJobInternal(job.id, { billing: billingSnapshot });
             }
             const completed = updateWorkspaceJobInternal(job.id, {
                 status: 'completed',
@@ -386,6 +486,14 @@ export class WorkspaceWorker {
                     cancellationRequested: false
                 });
                 publishWorkspaceEvent(job.id, 'job.failed', failed);
+                if (usesLiveBilling) {
+                    const billingSnapshot = await this.billing.fail(
+                        job.id, `system_failure:${failedStage || 'unknown'}`
+                    );
+                    if (billingSnapshot) {
+                        updateWorkspaceJobInternal(job.id, { billing: billingSnapshot });
+                    }
+                }
             }
         } finally {
             try {
@@ -421,12 +529,27 @@ export class WorkspaceWorker {
                         cancellationRequested: true
                     });
                     publishWorkspaceEvent(job.id, 'job.cancelled', cancelled);
+                    if (usesLiveBilling) {
+                        const billingSnapshot = await this.billing.fail(job.id, 'job_cancelled');
+                        if (billingSnapshot) {
+                            updateWorkspaceJobInternal(job.id, { billing: billingSnapshot });
+                        }
+                    }
                 } else {
                     await this.cleanup({ jobId: job.id, job: { ...job } });
                     const audioPath = getWorkspaceJobInternal(job.id)?.audioPath;
                     if (audioPath) cleanupGeminiTranscriptPartial(audioPath);
                 }
             } finally {
+                if (leaseHeartbeat) clearInterval(leaseHeartbeat);
+                if (lease) {
+                    try {
+                        await this.billing.releaseLease(lease);
+                    } catch (error) {
+                        console.error(`[WorkspaceWorker] Lease release failed for ${job.id}:`,
+                            error?.message || error);
+                    }
+                }
                 this.activeJobId = null;
                 this.activeController = null;
                 publishQueuePositions();

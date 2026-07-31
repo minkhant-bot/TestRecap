@@ -17,12 +17,26 @@ Describe the current administrative authorization, backend endpoints, UI exposur
 - Role and status mutations enforce `user < admin < super_admin`, revalidate the actor, and serialize concurrent changes.
 - Administrators cannot change roles, modify peers/higher roles, or change their own role/status.
 - Bootstrap and last-active-super-admin protections prevent administrative lockout.
+- When the billing foundation is explicitly enabled, PostgreSQL
+  `super_admin`—not generic Firebase `admin`—is required for purchase decisions,
+  plan/catalog/promotion policy, Trial assessments, adjustments, screenshot
+  metadata verification, and financial/audit reads.
+- `min85639@gmail.com` is the intended sole Product Owner/Super Admin account;
+  the repository does not prove sole-owner enforcement. Planned ban/unban and
+  reasoned, audited grant/deduction/refund/reversal operations are not complete.
 
 ### Planned or Placeholder
 
 - The shell contains admin-oriented navigation labels, but dedicated Users, Queue, Jobs, System Status, and Logs screens are not implemented.
 - Durable administrative audit history is absent.
-- No approved admin-completion plan is recorded in the repository.
+- P2 moves application role/permission authority to PostgreSQL while Firebase remains identity authority.
+- PostgreSQL role authority and restart-persistent role/ban state are not yet
+  active. Backend PostgreSQL authorization is required for the cutover; a
+  frontend email check cannot establish authorization.
+- Live-job billing/recovery and financial refund/reversal operations are present
+  only in the separately gated PostgreSQL billing domain. Normal Admin receives
+  no credit-changing permission.
+- The protected bootstrap and role migration contract is in `17_P2_FOUNDATION_ARCHITECTURE.md`.
 
 ### Known Issues
 
@@ -84,10 +98,14 @@ demoted or disabled administrator cannot continue with stale authority.
 - Configured bootstrap super-admins cannot be demoted or disabled through the API.
 - At least one active super-admin must always remain.
 - The current admin foundation is not production-complete.
+- Trial, Normal, and Pro are commercial plans and must never enter `user_roles`.
 
 ## Future Work
 
-The following are unapproved admin-system recommendations:
+The following remain unimplemented:
 
 - Connect an approved admin UI to the admin API.
 - Include workspace jobs/queue or consolidate the two job systems first.
+- Complete global PostgreSQL role authority cutover, protected bootstrap
+  activation, and production audit/financial operations after isolated
+  verification; the gated financial boundaries already exist.

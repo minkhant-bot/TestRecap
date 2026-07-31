@@ -20,17 +20,28 @@ Document the current trust boundaries, protections, sensitive data, known vulner
 - Output delivery requires authentication and authorization.
 - Global legacy settings and diagnostic operations require an administrator role.
 - Gemini credentials are encrypted at rest and omitted from responses.
+- Future ledger and audit records are append-only; refunds and reversals use compensating entries.
 - Filesystem cleanup uses root-bound path checks and rejects unsafe symlinks in sensitive paths.
 - Upload size and extension/MIME checks exist.
 - Workspace creation is capped at two active jobs per user; legacy creation routes are admin-only.
 - Workspace deletion cross-checks workspace/core ownership and preflights every linked artifact before revoking records.
 - Retention removes linked terminal records and artifacts together and preserves active or owner-mismatched state.
+- Financial mutations use PostgreSQL transactions, locked authoritative rows,
+  request-hash idempotency, immutable ledger entries, and append-only audit.
+- Billing screenshot records contain private object metadata only. Object keys
+  are server-generated; no public URL or database blob is exposed.
 
 ### Planned or Placeholder
 
-- The approved hosted-credit direction requires platform-owned AI and TTS credentials to remain server-side and requires all balance, reservation, charge, settlement, refund/release, payment-confirmation, and administrative-adjustment authority to remain server-side.
-- BYOK migration or removal must explicitly protect existing encrypted user credentials and avoid unsafe disclosure, orphaning, or silent behavioral changes.
-- These requirements are future roadmap direction and are not implemented.
+- Approved P2 preserves encrypted BYOK for Trial and Normal and introduces explicitly selected Blink-funded Pro using a platform-owned Gemini credential held in secret management.
+- PostgreSQL is authoritative for Super Admin permission on the gated financial
+  API. Global application-role cutover and live reservation,
+  settlement/refund/release authority remain pending.
+- P2 never silently switches BYOK and Blink-funded modes. Workers receive only the job-scoped credential required by the selected mode.
+- Raw BYOK/platform keys are forbidden from logs, audit, analytics, URLs, PostgreSQL policy/settings, and client-readable responses.
+- Credential isolation and no-fallback rules are enforced by billing
+  eligibility/estimate services; live provider-funded execution remains
+  unimplemented.
 - A formal threat model, rate limits, cumulative quotas, broader abuse controls, security-header policy, documented CSRF strategy, secrets rotation, and incident procedures are absent recommendations, not implemented placeholders.
 
 ### Known Issues

@@ -1,22 +1,126 @@
 # AI Assistant Context
 
+## ZIP Handoff Snapshot (2026-07-31)
+
+- Branch: `blink-baseline`
+- HEAD: `5f5bfc9`
+- Working tree: intentionally dirty; 50 changed or untracked paths are present.
+  The changes include documentation, PostgreSQL foundation, billing, and
+  workspace/live-job integration. Never reset, restore, stash, or discard them.
+- The current evidence review records unit results but no successful native
+  PostgreSQL execution. The three PostgreSQL integration tests skip when
+  `TEST_DATABASE_URL` is unset; authored integration coverage is not executed
+  verification.
+- No implementation, configuration, migration, runtime, deployment, or Core AI
+  Pipeline behavior may be changed by a documentation handoff.
+
+### Roadmap status
+
+| Phase | Status and continuation boundary |
+|---|---|
+| P1 | Core functionality implemented; real 30-second upload → processing → final output → preview → download flow passed. Not fully production-validated; all longer-duration/reliability scope remains pending. |
+| P2.1 | PostgreSQL configuration, pool/transactions, checksummed migrations, schema, repositories, readiness, shutdown, and bootstrap scaffolding exist. Inactive; no global authority cutover. |
+| P2.2 | Trial/Normal/Pro plans/policies, entitlements, trial grants, credits/ledger/balance, packages/banks, screenshot metadata, manual purchase review, first-purchase bonus, adjustments, estimates, audit, and Super Admin financial APIs exist. Gated by `P2_BILLING_ENABLED`; no commercial values are seeded. |
+| P2.3 | Live-job duration snapshots, explicit modes, reservations, settlement/release/refund, leases, checkpoint reuse, duplicate-worker protection, and reconciliation implementation exist. Unit-tested; native PostgreSQL test code is authored but skipped. Gated by `P2_LIVE_JOB_BILLING_ENABLED`; real PostgreSQL and production/staging activation remain verification gaps. |
+| P3 | Lifecycle consolidation and PostgreSQL/global role authority cutover: not implemented. |
+| P4 | Performance, scaling, and operational optimization: not implemented. |
+| P5 | No approved implementation scope; future product expansion such as selectable voices remains deferred. |
+
+The original detailed P2.4–P2.9 labels are retained in
+`17_P2_FOUNDATION_ARCHITECTURE.md`; current repository delivery labels are the
+P2.1/P2.2/P2.3 rows above.
+
+## P2.1 Implementation Status (2026-07-30)
+
+- PostgreSQL configuration, shared pooling, transactions, forward checksummed
+  migrations, the initial schema, foundational repositories/services, redacted
+  readiness, graceful shutdown, and bootstrap scaffolding exist.
+- This foundation is inactive: JSON/file stores, Firebase-claim authorization,
+  encrypted BYOK persistence, and current job execution remain authoritative.
+  No dual-write is active.
+- PostgreSQL/Docker integration was not available in the implementation
+  environment. Never claim database integration verification until run separately.
+- JSON/BYOK restart persistence is tested; PostgreSQL restart persistence is not.
+- No ban/unban persistence schema exists. Planned ban/unban and Super Admin
+  credit grant/deduction/refund/reversal UI and flows are not complete.
+- Never auto-run migrations or activate `DATABASE_REQUIRED`/role authority without
+  an approved, tested cutover.
+
+## PostgreSQL Billing and Live Job Status (2026-07-31)
+
+- `P2_BILLING_ENABLED=true` activates only plans, Trial, estimates,
+  balance/ledger, catalog/banks, screenshot metadata, purchases, bonus,
+  adjustments, and financial audit APIs.
+- No commercial values are seeded. Missing policy/catalog/storage configuration
+  fails closed.
+- Financial mutations use PostgreSQL Super Admin authority. Other application
+  roles, JSON jobs, encrypted BYOK, and runtime data remain under their existing
+  authorities.
+- `P2_LIVE_JOB_BILLING_ENABLED=true` separately enables authoritative-duration
+  snapshots, locked reservations before queue admission, explicit BYOK/Pro
+  execution, usable-output settlement, release/full-refund compensation,
+  worker leases, and checkpoint-aware recovery. It is disabled by default.
+- Keep both gates disabled until the native PostgreSQL integration tests execute
+  successfully in an isolated database.
+- Object-upload adapters, UI activation, global role cutover, production
+  activation, and the Core AI Pipeline remain unchanged.
+
+### Super Admin and bootstrap boundary
+
+Roles remain exactly `user`, `admin`, and `super_admin`; Trial/Normal/Pro are
+plans, never roles. Current application requests derive role authority from
+validated Firebase claims and configured bootstrap UIDs. The approved P2
+PostgreSQL design uses Firebase for identity, synchronizes the user, and gives
+financial mutations only to PostgreSQL `super_admin`. Bootstrap is a temporary
+server-only approved Firebase UID resolved through Firebase Admin, inserted in a
+locked one-time PostgreSQL transaction as a protected bootstrap role, audited,
+and then disabled/removed. Protected bootstrap demotion/deletion/disablement
+requires an approved recovery procedure and another active Super Admin.
+
+Super Admin financial permissions include plan/policy/entitlement/promotion
+configuration, Trial decisions, package/bank configuration, purchase
+approve/reject, manual grant/deduction, approved full reversal/refund, and
+financial/audit review. Generic `admin` does not receive credit-changing
+authority. The current admin UI is not connected to these PostgreSQL screens.
+`min85639@gmail.com` is the intended sole Product Owner/Super Admin account;
+sole-owner enforcement is not proven by the current repository. PostgreSQL
+must become the backend role authority before claiming that guarantee.
+
 ## Purpose
 
 Give a brand-new AI assistant enough context to work safely and accurately without rediscovering the project’s goals, rules, and approval boundaries.
 
 ## Current Status
 
+### P1 verification status
+
+P1 core functionality is implemented and a real 30-second end-to-end flow has
+passed from upload through processing, final output, preview, and download.
+Valid output enforcement and the authoritative `videoUrl` contract are verified
+for that tested flow. P1 is functionally complete for the verified short-video
+flow, but is not yet fully production-validated. Long-duration and reliability
+verification remains pending because the available Gemini key/quota limited the
+latest real E2E test to 30 seconds.
+
+Treat the longer-job, Gemini error/quota, retry/resume, restart/recovery,
+resource-usage, and performance items in `12_KNOWN_ISSUES.md` as pending
+verification, not confirmed defects. Do not claim that long videos fail or that
+retry/recovery is fixed without new repository evidence.
+
 ### Implemented
 
-This file documents the current working-tree architecture as of 2026-07-29.
+This file documents the current working-tree architecture as of 2026-07-31.
 
 ### Planned or Placeholder
 
-The Credits page is a placeholder and the admin experience is an incomplete foundation. Hosted credits and later multiple selectable voices are approved future product direction, but are not implemented or approved implementation scope. The remediation phases in `14_ROADMAP.md` remain proposals.
+The Credits page remains a placeholder and the admin UI is incomplete. The
+PostgreSQL billing API and live-job integration are implemented behind separate
+explicit activation gates; object storage, UI activation, global role cutover,
+backup/restore, and staging validation remain pending.
 
 ### Known Issues
 
-Read `12_KNOWN_ISSUES.md` before proposing work. The working application is not fully tracked, and two job/lifecycle systems coexist.
+Read `12_KNOWN_ISSUES.md` and `17_P2_FOUNDATION_ARCHITECTURE.md` before P2 work. Two job/lifecycle systems still coexist.
 
 ## Project Goals
 
@@ -26,7 +130,7 @@ Read `12_KNOWN_ISSUES.md` before proposing work. The working application is not 
 - Keep user media, outputs, sessions, and Gemini credentials private.
 - Provide durable processing state, clear History, and reliable downloads.
 - Operate within constrained compute using one processing job at a time.
-- In the future, replace mandatory BYOK with purchased credits and server-side platform AI/TTS credentials.
+- In P2, preserve BYOK for Trial/Normal, add Blink-funded Pro, and charge configurable duration-based Blink credits for every plan.
 - In the future, support server-validated selectable voices with preview and plan, credit-cost, or provider eligibility.
 
 ## Architecture/Flow
@@ -74,6 +178,22 @@ The workspace and core records share the job ID. Do not assume either can be del
 9. Do not commit unless explicitly requested.
 10. Update affected documentation after approved behavior changes.
 
+### Safe local commands
+
+```bash
+npm install
+cp .env.example .env.local
+npm run dev
+node --test
+npm run lint
+npm run build
+npm run db:status
+npm run db:migrate
+```
+
+There is no `npm test` script. Database status/migrations require an isolated
+PostgreSQL connection and must never run automatically.
+
 ## Coding Rules
 
 - Preserve unrelated dirty-worktree changes.
@@ -99,14 +219,14 @@ The workspace and core records share the job ID. Do not assume either can be del
 
 ## Current Risk Priorities
 
-The repository contains approved future product direction but no approved delivery plan. Remediation should continue by risk priority. When hosted-credit implementation is approved, its required order is:
+The repository contains approved P2 implementation behind inactive gates. Follow
+the remaining operational boundaries in `17_P2_FOUNDATION_ARCHITECTURE.md`:
 
-1. Credit ledger and accounting.
-2. Platform-owned secret/key architecture.
-3. Job reservation, charge, refund, and cancellation settlement.
-4. Payment integration with confirmation before credit issuance.
-5. Explicit, safe BYOK migration or removal.
-6. Multiple voice catalog, preview, selection, server validation, and pricing.
+1. Isolated PostgreSQL integration and production migration verification.
+2. Private screenshot object storage and content-verification adapters.
+3. Backup/restore, reconciliation deadlines, and authenticated staging smoke.
+4. Global PostgreSQL role/authority cutover only after approved migration.
+5. Lifecycle consolidation, scaling, and later product scope.
 
 ## Things AI Must Never Change Without Approval
 
@@ -133,6 +253,7 @@ The repository contains approved future product direction but no approved delive
 - API: `docs/05_API_CONTRACT.md`
 - Known issues: `docs/12_KNOWN_ISSUES.md`
 - Roadmap: `docs/14_ROADMAP.md`
+- P2 foundation: `docs/17_P2_FOUNDATION_ARCHITECTURE.md`
 - Server: `server.js`
 - Workspace lifecycle: `src/services/workspaceJobs.js`, `src/services/workspaceWorker.js`
 - Core workflow: `src/services/corePipelineBridge.js`, `src/workers/processor.js`
@@ -144,10 +265,22 @@ The repository contains approved future product direction but no approved delive
 - Keep `react-router` and `react-router-dom` at `7.18.1`; do not downgrade to `7.11.0` or migrate to version 8 without separate architectural approval. Re-review when a compatible patched 7.x release or supported DOM migration path exists.
 - The installed `uuid@9.0.1` remains reported for GHSA-w5hq-g745-h8pq, but the reviewed application and installed Google dependency call sites use only unaffected `v4()` calls without caller-provided buffers; the loaded `gaxios@7.3.0` uses `randomUUID()`, while audited but unloaded `gaxios@6.7.1` uses unaffected `v4()`. Treat this as a scoped beta risk acceptance, not remediation. Re-review before any `v3()`, `v5()`, or `v6()` buffer/offset use or during a compatible direct/Firebase Admin upgrade.
 - `firebase-admin@13.10.0` is used only through modular App/Auth imports. Firestore, Cloud Storage, `google-gax`, `retry-request`, `teeny-request`, audited `gaxios@6.7.1`, and their `uuid` path are installed but not loaded or reachable. Treat the aggregate Firebase Admin finding as an Auth-only beta risk acceptance; re-review before enabling another Admin service, importing Google Cloud directly, changing import style, or changing Firebase Admin/lockfile versions.
-- P1 security and dependency work is complete for beta: `ws` is remediated, every remaining audit entry has an evidence-backed risk acceptance and re-review trigger, and 232/232 automated tests pass. It did not change the Core AI Pipeline contract, workflow, prompts, TTS behavior, timeline, FFmpeg composition, export, or accepted output quality. Authenticated staging smoke testing remains a separate pre-beta release gate.
-- Hosted credits and selectable voices are approved product direction, not implemented behavior or approved implementation scope.
+- P1 security and dependency implementation work is complete for beta: `ws` is
+  remediated, every remaining audit entry has an evidence-backed risk acceptance
+  and re-review trigger, and 232/232 automated tests passed in that recorded
+  cycle. This does not claim full P1 production validation; real E2E verification
+  is currently limited to the documented 30-second flow, and the pending scope
+  is authoritative in `12_KNOWN_ISSUES.md`. The work did not change the Core AI
+  Pipeline contract, workflow, prompts, TTS behavior, timeline, FFmpeg
+  composition, export, or accepted output quality. Authenticated staging smoke
+  testing remains a separate pre-beta release gate.
+- Trial/Normal/Pro policies, estimates, manual purchase review,
+  first-purchase bonus, PostgreSQL financial Super Admin authority, and the
+  gated live BYOK/Pro job admission/reservation/settlement implementation exist.
+  The gates remain off and global role cutover is not complete.
 - Credit balances and charges are exclusively backend-authoritative; clients never issue credits or determine settlement.
-- Preserve current BYOK and single-voice behavior until explicit replacement implementation is approved and verified.
+- Trial/Normal/Pro are plans, never roles. Firebase verifies identity; PostgreSQL is the approved future role/permission authority.
+- Preserve current BYOK and single-voice behavior until the applicable P2 phase is explicitly approved and verified.
 - Authenticated staging smoke testing remains a separate pre-beta requirement.
 - Current Railway screenshots prove only that a project and Production environment exist, a public URL exists, one replica is running, and the shown deployment succeeded. They do not establish that the deployment is Blink or verify `DATA_DIR`, a persistent volume, required variables, or startup/recovery logs. Deployment preflight remains blocked and authenticated staging smoke testing has not started.
 - Never claim success solely from mocked tests.

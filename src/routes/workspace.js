@@ -14,7 +14,8 @@ import {
     listWorkspaceJobs,
     queueWorkspaceJob,
     requestWorkspaceJobCancellation,
-    updateWorkspaceJobEffects
+    updateWorkspaceJobEffects,
+    updateWorkspaceJobBilling
 } from '../services/workspaceJobs.js';
 import { deleteWorkspaceJobEverywhere } from '../services/workspaceJobDeletion.js';
 import { publishWorkspaceEvent, subscribeToWorkspaceJob } from '../services/workspaceEvents.js';
@@ -32,6 +33,12 @@ import {
     createMutationAdmissionMiddleware,
     sendAdmissionError
 } from '../services/admissionControl.js';
+import { getDuration } from '../ffmpeg/index.js';
+import {
+    isLiveJobBillingEnabled,
+    releaseLiveJob,
+    reserveLiveJob
+} from '../services/liveJobBilling.js';
 
 const storagePaths = ensureStoragePaths(getStoragePaths());
 const incomingDirectory = path.join(storagePaths.uploads, '.incoming');
@@ -70,7 +77,11 @@ const sendQuotaExceeded = (res, quota) => res.status(429).json({
 
 export const createWorkspaceRouter = ({
     verifyKey = verifyGeminiApiKey,
-    admission = admissionService
+    admission = admissionService,
+    readSourceDuration = getDuration,
+    liveBillingEnabled = isLiveJobBillingEnabled,
+    reserveBilling = reserveLiveJob,
+    releaseBilling = releaseLiveJob
 } = {}) => {
     const router = express.Router();
     const admitMutation = endpoint => createMutationAdmissionMiddleware(admission, endpoint);
@@ -167,19 +178,56 @@ export const createWorkspaceRouter = ({
         return res.json({ ...job, queuePosition: queued?.position ?? null });
     });
 
-    router.post('/jobs/:jobId/queue', admitMutation('workspace.jobs.queue'), (req, res) => {
+    router.post('/jobs/:jobId/queue', admitMutation('workspace.jobs.queue'), async (req, res) => {
+        let reserved = false;
         try {
             console.info('[Blink effects]', JSON.stringify({
                 boundary: 'queue.received',
                 jobId: req.params.jobId,
                 effects: req.body?.effects || null
             }));
-            const geminiApiKey = req.body?.geminiApiKey ||
-                req.headers['x-gemini-api-key'] ||
-                getUserGeminiApiKey(req.user.uid) ||
-                process.env.GEMINI_API_KEY;
+            const liveBilling = liveBillingEnabled();
+            const requestedMode = String(req.body?.billingMode || '').trim();
+            const requestedPlanCode = String(req.body?.planCode || '').trim();
+            const geminiApiKey = liveBilling
+                ? requestedMode === 'byok'
+                    ? getUserGeminiApiKey(req.user.uid)
+                    : requestedMode === 'blink_funded'
+                        ? String(process.env.GEMINI_API_KEY || '').trim()
+                        : null
+                : req.body?.geminiApiKey ||
+                    req.headers['x-gemini-api-key'] ||
+                    getUserGeminiApiKey(req.user.uid) ||
+                    process.env.GEMINI_API_KEY;
             if (!geminiApiKey) {
-                return res.status(400).json({ error: 'Enter a Gemini API key before processing.' });
+                const pro = requestedMode === 'blink_funded';
+                return res.status(liveBilling ? (pro ? 503 : 422) : 400).json({
+                    error: liveBilling
+                        ? pro
+                            ? 'Blink-funded Gemini processing is unavailable.'
+                            : 'A verified BYOK Gemini key is required.'
+                        : 'Enter a Gemini API key before processing.',
+                    ...(liveBilling ? {
+                        code: pro ? 'PLATFORM_PROVIDER_UNAVAILABLE' : 'BYOK_REQUIRED'
+                    } : {})
+                });
+            }
+            if (liveBilling && requestedMode === 'byok') {
+                const verification = await verifyKey(geminiApiKey);
+                if (!verification.valid) {
+                    const status = verification.providerError?.httpStatus ||
+                        verification.providerError?.body?.error?.code;
+                    const quota = Number(status) === 429;
+                    return res.status(quota || verification.retryable ? 503 : 422).json({
+                        error: quota ? 'The BYOK Gemini quota is exhausted.'
+                            : verification.retryable
+                                ? 'The BYOK Gemini provider is temporarily unavailable.'
+                                : 'The BYOK Gemini key is invalid.',
+                        code: quota ? 'BYOK_QUOTA_EXHAUSTED'
+                            : verification.retryable ? 'BYOK_PROVIDER_UNAVAILABLE' : 'BYOK_INVALID',
+                        retryable: Boolean(verification.retryable)
+                    });
+                }
             }
             const configured = updateWorkspaceJobEffects(req.params.jobId, req.user.uid, req.body?.effects);
             if (!configured) return res.status(404).json({ error: 'Project not found.' });
@@ -188,6 +236,18 @@ export const createWorkspaceRouter = ({
                 jobId: req.params.jobId,
                 effects: configured.effects
             }));
+            if (liveBilling) {
+                const internal = getWorkspaceJobInternal(req.params.jobId);
+                const sourceDurationSeconds = await readSourceDuration(internal.storedPath);
+                const result = await reserveBilling({
+                    identity: req.user, jobId: internal.id, sourceDurationSeconds,
+                    requestedPlanCode, requestedMode,
+                    idempotencyKey: req.headers['idempotency-key'],
+                    effects: configured.effects
+                });
+                reserved = true;
+                updateWorkspaceJobBilling(internal.id, req.user.uid, result.snapshot);
+            }
             const job = admission.withProcessingAdmission(
                 req.user.uid,
                 req.params.jobId,
@@ -201,6 +261,16 @@ export const createWorkspaceRouter = ({
             const queued = getWorkspaceQueue(req.user.uid).find(item => item.id === job.id);
             return res.status(202).json({ ...job, queuePosition: queued?.position ?? null });
         } catch (error) {
+            if (reserved) {
+                try {
+                    await releaseBilling(req.params.jobId, 'queue_admission_failed');
+                } catch (releaseError) {
+                    console.error('[Workspace queue] reservation compensation failed', {
+                        jobId: req.params.jobId,
+                        message: releaseError?.message
+                    });
+                }
+            }
             if (sendAdmissionError(res, error, req.requestId)) return;
             console.error('[Workspace queue] request failed', {
                 requestId: req.requestId,
@@ -211,15 +281,24 @@ export const createWorkspaceRouter = ({
             if (error?.code === 'INVALID_JOB_STATE') {
                 return res.status(409).json({ error: error.message });
             }
+            if (error?.name === 'BillingError') {
+                return res.status(error.status).json({ error: error.message, code: error.code });
+            }
             return res.status(500).json({ error: 'Project could not enter the queue.' });
         }
     });
 
-    router.post('/jobs/:jobId/cancel', admitMutation('workspace.jobs.cancel'), (req, res) => {
+    router.post('/jobs/:jobId/cancel', admitMutation('workspace.jobs.cancel'), async (req, res) => {
         try {
             const result = requestWorkspaceJobCancellation(req.params.jobId, req.user.uid);
             if (!result) return res.status(404).json({ error: 'Project not found.' });
             if (result.interruptWorker) workspaceWorker.cancel(req.params.jobId);
+            if (!result.interruptWorker && liveBillingEnabled() && result.job.billing) {
+                const billing = await releaseBilling(req.params.jobId, 'job_cancelled_before_start');
+                result.job = updateWorkspaceJobBilling(
+                    req.params.jobId, req.user.uid, billing
+                );
+            }
             publishWorkspaceEvent(
                 req.params.jobId,
                 result.interruptWorker ? 'job.cancellation_requested' : 'job.cancelled',
@@ -341,17 +420,19 @@ export const createWorkspaceRouter = ({
                 return res.status(415).json({ error: 'This video format is not supported.' });
             }
 
-            const geminiApiKey = req.body?.geminiApiKey ||
-                getUserGeminiApiKey(req.user.uid) ||
-                process.env.GEMINI_API_KEY;
-            const verification = await verifyKey(geminiApiKey);
-            if (!verification.valid) {
-                removeIfPresent(file.path);
-                const status = verification.retryable ? 503 : 400;
-                const message = verification.retryable
-                    ? 'Gemini API key verification is temporarily unavailable.'
-                    : 'Verify a valid Gemini API key before creating a recap.';
-                return res.status(status).json({ error: message });
+            const liveBilling = liveBillingEnabled();
+            const geminiApiKey = liveBilling ? null : req.body?.geminiApiKey ||
+                getUserGeminiApiKey(req.user.uid) || process.env.GEMINI_API_KEY;
+            if (!liveBilling) {
+                const verification = await verifyKey(geminiApiKey);
+                if (!verification.valid) {
+                    removeIfPresent(file.path);
+                    const status = verification.retryable ? 503 : 400;
+                    const message = verification.retryable
+                        ? 'Gemini API key verification is temporarily unavailable.'
+                        : 'Verify a valid Gemini API key before creating a recap.';
+                    return res.status(status).json({ error: message });
+                }
             }
 
             const jobId = randomUUID();
@@ -369,7 +450,7 @@ export const createWorkspaceRouter = ({
                     duration: parseDuration(req.body.duration),
                     storedPath
                 });
-                setJobKeys(job.id, { geminiApiKey });
+                if (geminiApiKey) setJobKeys(job.id, { geminiApiKey });
                 return res.status(201).json(job);
             } catch (error) {
                 removeIfPresent(file.path);

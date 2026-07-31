@@ -1,0 +1,83 @@
+import assert from 'node:assert/strict';
+import test from 'node:test';
+import { ensureUser, findUserByFirebaseUid } from './users.js';
+import { assignRole } from './roles.js';
+import { insertLedgerEntry } from './ledger.js';
+
+test('user lookup uses a parameterized query and stable mapping', async () => {
+  const calls = [];
+  const client = {
+    async query(sql, values) {
+      calls.push({ sql, values });
+      return { rows: [{
+        id: 'user-id',
+        firebase_uid: 'firebase-id',
+        email: 'redacted@example.test',
+        display_name: 'Name',
+        photo_url: '',
+        status: 'active',
+        created_at: new Date(0),
+        updated_at: new Date(0),
+        last_login_at: null,
+      }] };
+    },
+  };
+  const user = await findUserByFirebaseUid('firebase-id', { client });
+  assert.deepEqual(calls[0].values, ['firebase-id']);
+  assert.match(calls[0].sql, /firebase_uid = \$1/);
+  assert.equal(user.firebaseUid, 'firebase-id');
+});
+
+test('financial and role mutations require transaction clients', async () => {
+  await assert.rejects(
+    assignRole({ userId: 'id', role: 'user', source: 'manual' }, {}),
+    /transaction client/,
+  );
+  await assert.rejects(
+    insertLedgerEntry({
+      userId: 'id',
+      amount: 1n,
+      entryType: 'manual_grant',
+      correlationKey: 'key',
+    }, {}),
+    /transaction client/,
+  );
+});
+
+test('protected role SQL cannot demote a bootstrap Super Admin', async () => {
+  const client = {
+    async query(sql) {
+      assert.match(sql, /WHERE NOT user_roles\.protected_bootstrap/);
+      return { rows: [] };
+    },
+  };
+  await assert.rejects(
+    assignRole({
+      userId: 'id',
+      role: 'admin',
+      source: 'manual',
+    }, { client }),
+    /cannot be changed/,
+  );
+});
+
+test('identity synchronization never silently reactivates a disabled PostgreSQL user', async () => {
+  const client = {
+    async query(sql) {
+      assert.match(sql, /WHEN users\.status = 'disabled' THEN users\.status/);
+      return { rows: [{
+        id: 'user-id',
+        firebase_uid: 'firebase-id',
+        email: null,
+        display_name: '',
+        photo_url: '',
+        status: 'disabled',
+        created_at: new Date(0),
+        updated_at: new Date(0),
+        last_login_at: null,
+      }] };
+    },
+  };
+  const user = await ensureUser({ firebaseUid: 'firebase-id' }, { client });
+  assert.equal(user.status, 'disabled');
+});

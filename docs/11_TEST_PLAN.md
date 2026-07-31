@@ -15,6 +15,8 @@ Describe the current automated tests, safe verification levels, important regres
 - TypeScript validation through `npm run lint`.
 - Production bundling through `npm run build`.
 - Static source-contract tests for parts of the current UI.
+- Billing configuration, API, calculation/mode, authorization-error, and real
+  PostgreSQL transaction/concurrency integration coverage.
 
 ### Planned or Placeholder
 
@@ -53,12 +55,20 @@ Describe the current automated tests, safe verification levels, important regres
    - Key isolation.
    - Queue/effect persistence.
    - Cancellation/deletion contracts.
+   - Billing authentication, idempotency propagation, and structured
+     PostgreSQL-Super-Admin denial.
 
 4. **Media tests**
    - FFmpeg process timeout/abort.
    - Scene rebuild arguments and outputs.
    - Stream and duration validation.
    - Effects ordering with lightweight mocked files.
+
+5. **PostgreSQL billing integration**
+   - Atomic Trial/purchase/bonus/adjustment ledger and balance updates.
+   - Concurrent purchase approval permits one terminal decision.
+   - First-purchase bonus is issued once; rejection issues no credits.
+   - Idempotent replay, invalid terminal transitions, and append-only guards.
 
 5. **Build checks**
    - `npm run lint`

@@ -15,6 +15,8 @@ import { canAccessJob, requireAuth } from './src/middleware/auth.js';
 import { workspaceWorker } from './src/services/workspaceWorker.js';
 import { admissionService } from './src/services/admissionControl.js';
 import { listWorkspaceJobsForAdmission } from './src/services/workspaceJobs.js';
+import { getDatabaseConfiguration, getRedactedDatabaseConfiguration } from './src/config/database.js';
+import { shutdownDatabase } from './src/db/client.js';
 
 const app = express();
 const storagePaths = ensureStoragePaths(getStoragePaths());
@@ -57,7 +59,12 @@ app.get('/output/:filename', requireAuth, (req, res) => {
 app.use('/api', apiRoutes);
 
 async function startServer() {
+  const databaseConfiguration = getDatabaseConfiguration();
   console.info(JSON.stringify({ event: 'server.starting', pid: process.pid }));
+  console.info(JSON.stringify({
+    event: 'database.configuration',
+    ...getRedactedDatabaseConfiguration(databaseConfiguration)
+  }));
   console.log(formatFasterWhisperStartupConfig(getFasterWhisperRuntimeConfig()));
   recoverStuckJobs();
   restoreQueuedJobs();
@@ -101,6 +108,7 @@ async function startServer() {
     forcedExit.unref();
     await workspaceWorker.stop();
     await new Promise(resolve => server.close(resolve));
+    await shutdownDatabase();
     clearTimeout(forcedExit);
     process.exit(0);
   };

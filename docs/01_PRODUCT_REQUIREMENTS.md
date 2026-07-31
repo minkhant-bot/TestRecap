@@ -24,7 +24,9 @@ Define the behavior the current product actually implements, while separating pl
 
 - The Credits page explicitly marks purchasing as “coming soon.”
 - The admin shell exposes placeholder destinations for operational screens that are not implemented.
-- No approved requirements for credit-based admission, billing, support, or durable notifications are recorded in the repository.
+- The PostgreSQL billing API foundation is implemented behind explicit
+  activation, but the Credits UI, commercial configuration, private object
+  adapter, and live job reservation/settlement are not activated.
 
 ### Known Issues
 
@@ -86,7 +88,9 @@ Define the behavior the current product actually implements, while separating pl
 - Effects become read-only after the job leaves `pending`.
 - Processing is FIFO and single-concurrency.
 - User-facing stages intentionally aggregate many internal workflow-v2 stages.
-- Gemini BYOK is a product prerequisite for recap creation.
+- Gemini BYOK is currently required. Under approved P2 rules, Trial and Normal remain BYOK while Pro is explicitly Blink-funded; there is no automatic fallback between modes.
+- Trial, Normal, and Pro are commercial plans, not authorization roles.
+- Future user-facing charges are integer credits calculated from authoritative source duration in 30-second blocks using versioned plan rates.
 
 ## Future Work
 
@@ -95,4 +99,5 @@ The following are unapproved requirements recommendations derived from current g
 - Define measurable product limits and enforce them server-side.
 - Confirm the existing 24-hour retention expectation as an explicit product policy before changing it.
 - Decide whether failed jobs are retryable in the workspace product.
-- Specify credits only after ledger semantics and failure compensation are approved.
+- Implement P2 only through separately approved phases; preserve current behavior until the applicable phase is verified and activated.
+- Finalize the open values and operational decisions listed in `17_P2_FOUNDATION_ARCHITECTURE.md`.

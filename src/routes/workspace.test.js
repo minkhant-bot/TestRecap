@@ -478,3 +478,72 @@ test('valid upload creates a persistent pending job without activating processin
     const empty = await fetch(`${baseUrl}/jobs`, { headers: authenticated });
     assert.deepEqual(await empty.json(), []);
 });
+
+test('live billing reservation is compensated when queue admission fails', async () => {
+    let released = null;
+    const liveApp = express();
+    liveApp.use(express.json());
+    liveApp.use('/api/workspace', requireAuth, createWorkspaceRouter({
+        verifyKey: async () => ({ valid: true }),
+        liveBillingEnabled: () => true,
+        readSourceDuration: async () => 61,
+        reserveBilling: async () => ({
+            snapshot: {
+                planCode: 'normal', billingMode: 'byok',
+                billingBlocks: '3', totalCredits: '6', billingStatus: 'reserved'
+            }
+        }),
+        releaseBilling: async (jobId, reason) => {
+            released = { jobId, reason };
+            return { billingStatus: 'released' };
+        },
+        admission: {
+            consumeMutation: () => ({ allowed: true }),
+            withProcessingAdmission: () => {
+                const error = new Error('Synthetic queue capacity failure.');
+                error.code = 'PROCESSING_CAPACITY_EXCEEDED';
+                throw error;
+            }
+        }
+    }));
+    const liveServer = await new Promise(resolve => {
+        const listener = liveApp.listen(0, '127.0.0.1', () => resolve(listener));
+    });
+    const liveUrl = `http://127.0.0.1:${liveServer.address().port}/api/workspace`;
+    try {
+        await fetch(`${liveUrl}/gemini-key`, {
+            method: 'PUT',
+            headers: { ...authenticated, 'Content-Type': 'application/json' },
+            body: JSON.stringify({ geminiApiKey: 'verified-byok-key' })
+        });
+        const body = new FormData();
+        body.append('video', new Blob([Buffer.alloc(512)], { type: 'video/mp4' }), 'billed.mp4');
+        const upload = await fetch(`${liveUrl}/jobs`, {
+            method: 'POST', headers: authenticated, body
+        });
+        assert.equal(upload.status, 201);
+        const job = await upload.json();
+        const queued = await fetch(`${liveUrl}/jobs/${job.id}/queue`, {
+            method: 'POST',
+            headers: {
+                ...authenticated,
+                'Content-Type': 'application/json',
+                'Idempotency-Key': 'route-live-1'
+            },
+            body: JSON.stringify({
+                planCode: 'normal', billingMode: 'byok', effects: {}
+            })
+        });
+        assert.equal(queued.status, 500);
+        assert.deepEqual(released, {
+            jobId: job.id, reason: 'queue_admission_failed'
+        });
+        assert.equal(getWorkspaceJobInternal(job.id).status, 'pending');
+        updateWorkspaceJobInternal(job.id, { status: 'failed', stage: 'failed' });
+        await fetch(`${liveUrl}/jobs/${job.id}`, {
+            method: 'DELETE', headers: authenticated
+        });
+    } finally {
+        await new Promise(resolve => liveServer.close(resolve));
+    }
+});

@@ -12,13 +12,14 @@ Explain current local development and Railway/Docker production deployment, requ
 - Production Docker image based on Node 20 Bookworm Slim.
 - Python virtual environment with Faster-Whisper dependencies.
 - System FFmpeg, Burmese fonts, and cached Whisper model.
-- Railway deployment configuration for Dockerfile builds, `/api/health`, one requested replica, and restart-on-failure. This describes repository configuration, not verified live Railway state.
+- Railway deployment configuration for Dockerfile builds, `/api/health`, one requested replica, and restart-on-failure. Railway main is initially a test/staging target, not production; this describes repository configuration, not verified live state.
 - Persistent runtime paths under `DATA_DIR`.
 - A startup-and-30-minute sweep applies the existing 24-hour completed-job retention window across linked workspace/core state.
 
 ### Planned or Placeholder
 
-- No approved operations expansion is recorded in the repository.
+- P2 requires managed PostgreSQL and private durable object storage under the architecture in `17_P2_FOUNDATION_ARCHITECTURE.md`; neither is provisioned or verified.
+- Payment screenshots must not rely on the Railway local filesystem or be stored as PostgreSQL blobs.
 - Automated CI/CD gates, migrations, backup/restore, an observability backend, and multi-worker deployment are absent recommendations, not implemented placeholders.
 
 ### Known Issues
@@ -84,15 +85,35 @@ Default local binding: `http://0.0.0.0:3000`.
 - Whisper: model/device/compute/threads/workers/beam/cache settings
 - Railway provides `PORT`; production binds `0.0.0.0`
 
+P2.1 PostgreSQL variables:
+
+- `DATABASE_URL`: optional while the foundation is inactive.
+- `DATABASE_REQUIRED`: defaults false; enable only after an approved cutover.
+- `DATABASE_SSL_MODE`: `disable`, `require`, or `verify-full`; configured
+  production defaults to `verify-full`.
+- Optional pool controls: `DATABASE_POOL_MAX` (10),
+  `DATABASE_IDLE_TIMEOUT_MS` (30000), `DATABASE_CONNECTION_TIMEOUT_MS` (5000),
+  and `DATABASE_QUERY_TIMEOUT_MS` (15000).
+- `P2_BILLING_ENABLED`: defaults false and gates the PostgreSQL billing APIs.
+- `P2_LIVE_JOB_BILLING_ENABLED`: defaults false, requires the billing gate, and
+  separately gates live reservations, provider mode, settlement, and recovery.
+
+Run `npm run db:status` and then `npm run db:migrate` as a controlled operation.
+Migrations are checksummed and advisory-locked. Startup never auto-migrates and
+there is no destructive rollback command.
+
 ### Persistent volume
 
 Railway must mount a volume at `/data`. Losing it loses job and admission records, encryption key, encrypted credentials, uploads, caches, and outputs.
 
 ### Health and shutdown
 
-- Health: `GET /api/health`
+- Health: `GET /api/health`. It remains HTTP 200 when PostgreSQL is intentionally
+  disabled and reports redacted database state. With `DATABASE_REQUIRED=true`,
+  unavailable PostgreSQL or non-current migrations returns HTTP 503.
 - Docker health check uses Node `fetch`.
-- SIGINT/SIGTERM stops the workspace worker, closes HTTP, then exits.
+- SIGINT/SIGTERM stops the workspace worker, closes HTTP, closes the PostgreSQL
+  pool, then exits.
 - A ten-second forced nonzero exit guards shutdown.
 
 ### Pre-beta requirement
@@ -119,6 +140,8 @@ valid only when the variable and Railway volume mount are deliberately identical
 - Production must use persistent `DATA_DIR`.
 - Blink requires exactly one Railway replica; the live staging replica count is not yet verified.
 - Configure at least one reviewed bootstrap super-admin UID before first administrative use.
+- P2 deployment must use a one-time protected PostgreSQL bootstrap transaction and then disable temporary bootstrap configuration; permanent email comparisons are forbidden.
+- PostgreSQL and object-storage backups/restores must be tested before financial activation.
 - The Whisper model is downloaded during image build, not per job.
 - Application code runs as non-root.
 - Production serves the built `dist` SPA from Express.

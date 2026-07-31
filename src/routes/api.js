@@ -17,11 +17,14 @@ import { recordAuditEvent } from '../services/auditLog.js';
 import authRoutes from './auth.js';
 import adminRoutes from './admin.js';
 import workspaceRoutes from './workspace.js';
+import billingRoutes from './billing.js';
+import adminBillingRoutes from './adminBilling.js';
 import {
     admissionService,
     createMutationAdmissionMiddleware,
     sendAdmissionError
 } from '../services/admissionControl.js';
+import { getApplicationHealth } from '../services/databaseReadiness.js';
 
 
 const router = express.Router();
@@ -59,7 +62,10 @@ const handleUpload = (req, res, next) => {
     });
 };
 
-router.get('/health', (req, res) => res.json({ status: 'ok' }));
+router.get('/health', async (req, res) => {
+    const health = await getApplicationHealth();
+    res.status(health.httpStatus).json(health.body);
+});
 router.get('/config/firebase', (req, res) => res.json({
     apiKey: process.env.FIREBASE_WEB_API_KEY || '',
     authDomain: process.env.FIREBASE_AUTH_DOMAIN || '',
@@ -68,6 +74,8 @@ router.get('/config/firebase', (req, res) => res.json({
 }));
 router.use('/auth', authRoutes);
 router.use(requireAuth);
+router.use(billingRoutes);
+router.use('/admin/billing', adminBillingRoutes);
 router.use('/workspace', workspaceRoutes);
 router.use('/admin', adminRoutes);
 

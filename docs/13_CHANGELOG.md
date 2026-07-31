@@ -1,5 +1,64 @@
 # Changelog
 
+## 2026-07-31 — P2.3 live job billing and recovery integration
+
+- Added a separate default-off activation gate connecting authoritative source
+  duration and immutable plan/mode/rate/entitlement snapshots to locked,
+  idempotent PostgreSQL reservations before workspace queue admission.
+- Added explicit Trial/Normal BYOK and Pro Blink-funded enforcement without
+  fallback, structured BYOK errors, usable-output settlement, pre-settlement
+  release, one full compensating post-settlement refund, worker leases,
+  duplicate-worker protection, checkpoint reuse, and exceptional
+  `review_required` recovery.
+- Added focused unit coverage and authored native PostgreSQL integration-test
+  coverage for concurrency, queue compensation, mode/entitlement enforcement,
+  lease ownership, settlement, release/refund, restart checkpoints, and
+  duplicate financial transitions. The native tests have not executed
+  successfully; they skip without `TEST_DATABASE_URL`.
+- No commercial values were seeded; UI, deployment, global role authority, and
+  Core AI Pipeline stages/output behavior were not changed.
+
+## 2026-07-31 — PostgreSQL billing foundation
+
+- Added explicitly gated PostgreSQL plans/policies/entitlements, Trial
+  eligibility and one-time grants, integer 30-second estimates, balance/ledger,
+  credit-package/bank, private screenshot-metadata, purchase, first-purchase
+  bonus, adjustment, and financial audit services/APIs.
+- Financial mutations require PostgreSQL Super Admin authority, transactions,
+  locked rows, request-hash idempotency, and same-transaction audit records.
+- Added authored native PostgreSQL integration-test coverage for atomic
+  approval, concurrent review, idempotency, duplicate-bonus prevention,
+  rejection without credits, invalid transitions, and ledger/balance
+  consistency. This is test code, not executed PostgreSQL verification.
+- No commercial values were seeded. JSON/Firebase authority outside billing,
+  encrypted BYOK data, live jobs, reservation/settlement, UI, deployment, and
+  the Core AI Pipeline remain unchanged.
+
+## 2026-07-31 — P1 verification status clarification (documentation only)
+
+- Recorded that P1 core functionality is implemented and that one real
+  30-second flow passed upload, processing, final output, preview, and download,
+  including valid output enforcement and the authoritative `videoUrl` contract
+  for that tested flow.
+- Clarified that P1 is functionally complete for the verified short-video flow,
+  but is not fully production-validated; long-duration and reliability
+  verification remains pending because the available Gemini key/quota limited
+  the latest real E2E test to 30 seconds.
+- Classified the remaining long-job, provider-error, retry/resume,
+  restart/recovery, resource-usage, and performance scope as unverified rather
+  than as confirmed defects. No implementation behavior changed.
+
+## 2026-07-30 — P2.1 database and persistence foundation
+
+- Added centralized optional/required PostgreSQL configuration and one shared
+  process pool with query, client, transaction, health, and shutdown helpers.
+- Added ordered, checksummed, advisory-locked forward migrations and the initial
+  constrained P2 schema with append-only and retained-record protections.
+- Added foundational repositories/services and transactional, idempotent,
+  pre-resolved-Firebase-UID Super Admin bootstrap scaffolding.
+- Extended `/api/health` with redacted database readiness without activating
+  PostgreSQL authority or changing JSON, BYOK, job, or pipeline behavior.
+
 ## Purpose
 
 Record verified project evolution and documentation changes. This is not a substitute for Git history.
@@ -64,6 +123,7 @@ The working tree currently adds or changes:
 - **2026-07-30 — Final P1 security and dependency review, documentation only:** Confirmed `ws@8.21.1` across production Edge TTS paths, re-ran the production audit, verified complete evidence and re-review triggers for all remaining advisory entries, and passed 232/232 automated tests. P1 security work did not change the Core AI Pipeline contract, workflow, prompts, TTS behavior, timeline, FFmpeg composition, export, or accepted output quality. Authenticated staging smoke testing remains a separate pre-beta release requirement.
 - **2026-07-30 — Authenticated staging smoke-test plan, documentation only:** Defined the mandatory real-Railway pre-beta checks for authentication, role enforcement, admission controls, restart and volume persistence, protected jobs/outputs, deployment configuration, evidence, blocking failures, and cleanup. No smoke test was executed and no application or deployment behavior changed.
 - **2026-07-30 — Railway evidence correction, documentation only:** Rejected previously shown screenshots because they belonged to another person's Railway project. Blink's deployment target, staging URL, replica count, volume, effective `DATA_DIR`, and production-variable presence remain unverified; deployment preflight is blocked and authenticated staging smoke testing has not started.
+- **2026-07-30 — P2 plan, credit, BYOK, and Blink-funded architecture approval, documentation only:** Added the complete PostgreSQL/object-storage target, Trial/Normal/Pro separation, duration billing in 30-second blocks, immutable ledger, manual purchase review, first-purchase bonus, usable-output settlement, full system-failure compensation, `review_required` recovery, PostgreSQL role authority, protected bootstrap, explicit mode selection, APIs, transactions, security, tests, and phased delivery contract. No runtime, dependency, test, deployment, or Core AI Pipeline behavior changed.
 
 ## File References
 

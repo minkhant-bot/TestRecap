@@ -51,7 +51,7 @@ export const getDatabaseReadiness = async ({
     };
   }
 };
-export const getApplicationHealth = async options => {
+export const getApplicationReadiness = async options => {
   const database = await getDatabaseReadiness(options);
   const blocking = database.required && !database.ready;
   return {
@@ -62,3 +62,7 @@ export const getApplicationHealth = async options => {
     },
   };
 };
+
+// Compatibility for callers outside the HTTP routing layer. The HTTP health
+// endpoint is liveness-only; this function has always represented readiness.
+export const getApplicationHealth = getApplicationReadiness;

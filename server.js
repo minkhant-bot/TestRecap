@@ -60,6 +60,8 @@ app.get('/output/:filename', requireAuth, (req, res) => {
 app.use('/api', apiRoutes);
 
 async function startServer() {
+  // Validate required configuration before accepting traffic. Dependency
+  // reachability is reported separately by /api/ready.
   const databaseConfiguration = getDatabaseConfiguration();
   console.info(JSON.stringify({ event: 'server.starting', pid: process.pid }));
   console.info(JSON.stringify({
@@ -67,27 +69,6 @@ async function startServer() {
     ...getRedactedDatabaseConfiguration(databaseConfiguration)
   }));
   console.log(formatFasterWhisperStartupConfig(getFasterWhisperRuntimeConfig()));
-  const removedTemporaryProofs = await paymentProofStorage.cleanupTemporaryFiles();
-  if (removedTemporaryProofs.length) {
-    console.info(JSON.stringify({
-      event: 'payment_proof.temporary_cleanup',
-      removedCount: removedTemporaryProofs.length,
-    }));
-  }
-  recoverStuckJobs();
-  restoreQueuedJobs();
-  admissionService.reconcileProcessingStarts([
-    ...listJobs().map(job => ({
-      id: job.id,
-      ownerUid: job.ownerUid,
-      createdAt: job.created_at,
-      queuedAt: job.queuedAt
-    })),
-    ...listWorkspaceJobsForAdmission()
-  ]);
-  admissionService.prune();
-  workspaceWorker.start();
-  startCleanupSweep();
   if (process.env.NODE_ENV !== 'production') {
     const { createServer: createViteServer } = await import('vite');
     const vite = await createViteServer({
@@ -104,8 +85,67 @@ async function startServer() {
   }
 
   const { port, host } = getServerBinding();
-  const server = app.listen(port, host, () => {
-    console.log(`Server running on http://${host}:${port} (pid ${process.pid})`);
+  const server = await new Promise((resolve, reject) => {
+    const listener = app.listen(port, host);
+    const onError = error => {
+      listener.off('listening', onListening);
+      reject(error);
+    };
+    const onListening = () => {
+      listener.off('error', onError);
+      resolve(listener);
+    };
+    listener.once('listening', onListening);
+    listener.once('error', onError);
+  });
+  console.log(`Server running on http://${host}:${port} (pid ${process.pid})`);
+
+  // These tasks are recoverable or operational background work. Start them
+  // only after the liveness endpoint is reachable, and do not make Railway's
+  // healthcheck wait for them.
+  setImmediate(() => {
+    void paymentProofStorage.cleanupTemporaryFiles()
+      .then(removedTemporaryProofs => {
+        if (removedTemporaryProofs.length) {
+          console.info(JSON.stringify({
+            event: 'payment_proof.temporary_cleanup',
+            removedCount: removedTemporaryProofs.length,
+          }));
+        }
+      })
+      .catch(error => console.error(JSON.stringify({
+        event: 'payment_proof.temporary_cleanup.failed',
+        message: error?.message || String(error),
+      })));
+
+    try {
+      recoverStuckJobs();
+      restoreQueuedJobs();
+      admissionService.reconcileProcessingStarts([
+        ...listJobs().map(job => ({
+          id: job.id,
+          ownerUid: job.ownerUid,
+          createdAt: job.created_at,
+          queuedAt: job.queuedAt
+        })),
+        ...listWorkspaceJobsForAdmission()
+      ]);
+      admissionService.prune();
+      workspaceWorker.start();
+    } catch (error) {
+      console.error(JSON.stringify({
+        event: 'workspace.background_start.failed',
+        message: error?.message || String(error),
+      }));
+    }
+    try {
+      startCleanupSweep();
+    } catch (error) {
+      console.error(JSON.stringify({
+        event: 'cleanup.background_start.failed',
+        message: error?.message || String(error),
+      }));
+    }
   });
   let shuttingDown = false;
   const shutdown = async signal => {

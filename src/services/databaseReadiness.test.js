@@ -1,16 +1,16 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { getApplicationHealth } from './databaseReadiness.js';
+import { getApplicationReadiness } from './databaseReadiness.js';
 
-test('optional absent database preserves successful process health', async () => {
-  const result = await getApplicationHealth({
+test('optional absent database preserves successful application readiness', async () => {
+  const result = await getApplicationReadiness({
     configuration: { enabled: false, required: false },
   });
   assert.equal(result.httpStatus, 200);
   assert.equal(result.body.database.status, 'disabled');
 });
 test('required unavailable database fails readiness without exposing errors', async () => {
-  const result = await getApplicationHealth({
+  const result = await getApplicationReadiness({
     configuration: { enabled: true, required: true },
     healthCheck: async () => ({ configured: true, reachable: false }),
   });
@@ -21,7 +21,7 @@ test('required unavailable database fails readiness without exposing errors', as
 });
 
 test('reachable database with current migrations is ready', async () => {
-  const result = await getApplicationHealth({
+  const result = await getApplicationReadiness({
     configuration: { enabled: true, required: true },
     healthCheck: async () => ({ configured: true, reachable: true }),
     migrationCheck: async () => ({ current: true }),

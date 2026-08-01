@@ -130,9 +130,13 @@ pending records rather than deleting financial history.
 
 ### Health and shutdown
 
-- Health: `GET /api/health`. It remains HTTP 200 when PostgreSQL is intentionally
-  disabled and reports redacted database state. With `DATABASE_REQUIRED=true`,
-  unavailable PostgreSQL or non-current migrations returns HTTP 503.
+- Liveness: `GET /api/health` returns HTTP 200 with `{ "status": "ok" }` once
+  the HTTP server is accepting requests. Railway and Docker use this endpoint;
+  optional/background startup work and dependency warmup do not change it.
+- Readiness: `GET /api/ready` reports redacted PostgreSQL reachability and
+  migration state. With `DATABASE_REQUIRED=true`, unavailable PostgreSQL or
+  non-current migrations returns HTTP 503. Invalid required database
+  configuration remains a fatal startup error before the server binds.
 - Docker health check uses Node `fetch`.
 - SIGINT/SIGTERM stops the workspace worker, closes HTTP, closes the PostgreSQL
   pool, then exits.

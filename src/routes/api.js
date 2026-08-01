@@ -24,7 +24,7 @@ import {
     createMutationAdmissionMiddleware,
     sendAdmissionError
 } from '../services/admissionControl.js';
-import { getApplicationHealth } from '../services/databaseReadiness.js';
+import healthRoutes from './health.js';
 import { getDuration } from '../ffmpeg/index.js';
 import {
     validateSourceVideoDuration,
@@ -90,10 +90,7 @@ const enforceUploadedVideoDuration = async (req, res, next) => {
     }
 };
 
-router.get('/health', async (req, res) => {
-    const health = await getApplicationHealth();
-    res.status(health.httpStatus).json(health.body);
-});
+router.use(healthRoutes);
 router.get('/config/firebase', (req, res) => res.json({
     apiKey: process.env.FIREBASE_WEB_API_KEY || '',
     authDomain: process.env.FIREBASE_AUTH_DOMAIN || '',

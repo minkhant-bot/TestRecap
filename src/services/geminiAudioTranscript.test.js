@@ -9,6 +9,7 @@ import {
     createGeminiAudioTranscript,
     GEMINI_AUDIO_PROMPT,
     GEMINI_AUDIO_RESPONSE_SCHEMA,
+    GEMINI_TRANSCRIPT_END_EPSILON_SECONDS,
     getGeminiTranscriptPaths,
     validateGeminiTranscript
 } from './geminiAudioTranscript.js';
@@ -114,6 +115,54 @@ test('strict validation rejects empty, missing, overlapping, and invalid transla
     assert.throws(() => validateGeminiTranscript([{
         start_time: 0, end_time: 1, type: 'narration', original_text: 'a', burmese_text: ''
     }], 10), /Burmese/);
+});
+
+test('final transcript segment clamps timestamp overflow up to 500 milliseconds', () => {
+    assert.equal(GEMINI_TRANSCRIPT_END_EPSILON_SECONDS, 0.5);
+    for (const endTime of [10.2, 10.5]) {
+        const result = validateGeminiTranscript([{
+            start_time: 9,
+            end_time: endTime,
+            type: 'narration',
+            original_text: 'Final line',
+            burmese_text: 'နောက်ဆုံးစာကြောင်း'
+        }], 10);
+        assert.equal(result[0].end_time, 10);
+    }
+});
+
+test('transcript validation rejects clearly invalid timestamp overflow', () => {
+    const segment = {
+        type: 'narration',
+        original_text: 'Line',
+        burmese_text: 'စာကြောင်း'
+    };
+    assert.throws(() => validateGeminiTranscript([{
+        ...segment, start_time: 9, end_time: 10.501
+    }], 10), /outside the audio duration/);
+    assert.throws(() => validateGeminiTranscript([
+        { ...segment, start_time: 0, end_time: 10.2 },
+        { ...segment, start_time: 9, end_time: 10 }
+    ], 10), /outside the audio duration/);
+    assert.throws(() => validateGeminiTranscript([{
+        ...segment, start_time: 10, end_time: 10.2
+    }], 10), /outside the audio duration/);
+});
+
+test('transcript validation preserves valid timestamps unchanged', () => {
+    const input = [{
+        start_time: 0.125,
+        end_time: 9.875,
+        speaker: 'Speaker 1',
+        type: 'dialogue',
+        original_text: ' Valid transcript ',
+        burmese_text: ' မှန်ကန်သော စာသား '
+    }];
+    assert.deepEqual(validateGeminiTranscript(input, 10), [{
+        ...input[0],
+        original_text: 'Valid transcript',
+        burmese_text: 'မှန်ကန်သော စာသား'
+    }]);
 });
 
 test('invalid JSON and empty Gemini responses fail without leaving transcript artifacts', async () => {

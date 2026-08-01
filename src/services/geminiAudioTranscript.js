@@ -5,6 +5,7 @@ import { getModelCandidates, rememberSuccessfulGeminiModel } from '../ai/geminiM
 import { validateExtractedAudio } from './audioExtraction.js';
 
 export const GEMINI_AUDIO_TIMEOUT_MS = Number(process.env.GEMINI_TRANSCRIPT_TIMEOUT_MS) || 120000;
+export const GEMINI_TRANSCRIPT_END_EPSILON_SECONDS = 0.5;
 export const GEMINI_TRANSCRIPT_FILENAME = 'gemini-transcript.json';
 export const GEMINI_TRANSCRIPT_PARTIAL_FILENAME = 'gemini-transcript.partial.json';
 
@@ -68,7 +69,15 @@ export const validateGeminiTranscript = (value, audioDuration) => {
         if (!Number.isFinite(startTime) || !Number.isFinite(endTime)) {
             throw new Error(`Gemini transcript segment ${index} is missing valid timestamps.`);
         }
-        if (startTime < 0 || endTime <= startTime || endTime > audioDuration) {
+        const isLastSegment = index === value.length - 1;
+        const endOverflow = endTime - audioDuration;
+        const canClampFinalEnd = isLastSegment &&
+            endOverflow > 0 &&
+            endOverflow <= GEMINI_TRANSCRIPT_END_EPSILON_SECONDS &&
+            startTime < audioDuration;
+        const validatedEndTime = canClampFinalEnd ? audioDuration : endTime;
+        if (startTime < 0 || startTime >= audioDuration ||
+            validatedEndTime <= startTime || validatedEndTime > audioDuration) {
             throw new Error(`Gemini transcript segment ${index} is outside the audio duration.`);
         }
         if (startTime < previousEnd) {
@@ -86,10 +95,10 @@ export const validateGeminiTranscript = (value, audioDuration) => {
         if (segment.speaker != null && typeof segment.speaker !== 'string') {
             throw new Error(`Gemini transcript segment ${index} has an invalid speaker.`);
         }
-        previousEnd = endTime;
+        previousEnd = validatedEndTime;
         return {
             start_time: startTime,
-            end_time: endTime,
+            end_time: validatedEndTime,
             ...(segment.speaker?.trim() ? { speaker: segment.speaker.trim() } : {}),
             type: segment.type,
             original_text: segment.original_text.trim(),

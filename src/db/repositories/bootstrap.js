@@ -13,7 +13,6 @@ export const findBootstrapState = async (
   );
   return firstRow(result);
 };
-
 export const completeBootstrapState = async ({
   bootstrapName,
   userId,
@@ -55,4 +54,3 @@ export const disableBootstrapState = async (bootstrapName, { client }) => {
   );
   return firstRow(result);
 };
-

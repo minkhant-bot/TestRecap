@@ -10,6 +10,9 @@ Define the behavior the current product actually implements, while separating pl
 
 - A signed-in user can store and verify a Gemini API key.
 - A user can upload one supported video up to the configured size limit.
+- Blink accepts source videos through 15:00 at launch and rejects longer media
+  before creating or queueing a job or reserving credits. This is Blink's
+  launch safety limit, not an external-platform limit.
 - Upload creates a pending project; processing does not start automatically.
 - The user can preview and configure Color Grading, Flip Video, Blur masks, and burned subtitles before starting.
 - Start Processing submits the complete effects object and queues the same job.
@@ -51,7 +54,11 @@ Define the behavior the current product actually implements, while separating pl
 - Extensions: MP4, MKV, MOV, AVI, WEBM.
 - Maximum size: configured by positive `MAX_UPLOAD_SIZE_MB`; the workspace upload endpoint fails closed if configuration is invalid.
 - Client and server both check extension and size.
-- Server additionally checks a video-like MIME type, but does not deeply validate the container until media processing.
+- Client metadata provides immediate duration feedback. Backend media probing is
+  authoritative: 14:59 and 15:00 are accepted; 15:01 is rejected with
+  `Video is too long. Maximum supported duration is 15 minutes.`
+- Server additionally checks a video-like MIME type and validates readable
+  duration before pending-job creation.
 
 ### Effects contract
 
@@ -91,12 +98,12 @@ Define the behavior the current product actually implements, while separating pl
 - Gemini BYOK is currently required. Under approved P2 rules, Trial and Normal remain BYOK while Pro is explicitly Blink-funded; there is no automatic fallback between modes.
 - Trial, Normal, and Pro are commercial plans, not authorization roles.
 - Future user-facing charges are integer credits calculated from authoritative source duration in 30-second blocks using versioned plan rates.
+- Do not claim 15-minute support is verified until a real near-15-minute E2E passes.
 
 ## Future Work
 
 The following are unapproved requirements recommendations derived from current gaps:
 
-- Define measurable product limits and enforce them server-side.
 - Confirm the existing 24-hour retention expectation as an explicit product policy before changing it.
 - Decide whether failed jobs are retryable in the workspace product.
 - Implement P2 only through separately approved phases; preserve current behavior until the applicable phase is verified and activated.

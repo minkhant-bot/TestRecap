@@ -1,5 +1,10 @@
 # Blink Automation — Project Overview
 
+> Current Product Owner decisions: `18_PRODUCT_OWNER_DECISIONS_2026-08-01.md`.
+> Its duration, purchase, administration, UI, and staging rules supersede older
+> conflicting design text. Fifteen-minute support remains unverified until a
+> near-15-minute real E2E passes.
+
 ## Purpose
 
 Blink Automation, whose package and repository still use the names `cinerecap-ai` and `TestRecap`, is an authenticated web application that converts an uploaded source video into a Burmese-narrated recap. It combines transcription, Burmese translation, text-to-speech, chronological scene reconstruction, final video export, and optional visual effects.
@@ -29,18 +34,17 @@ separate:
 - **Implemented:** PostgreSQL persistence boundaries cover users, roles, plans,
   credits, ledger, purchases, banks, reservations, leases, and Super Admin
   bootstrap. No ban/unban persistence schema exists.
-- **Unit-tested:** focused live-billing tests passed 36/36; the full suite
-  recorded 284 passed, 0 failed, and 3 skipped.
-- **Integration-test code authored:** the three native PostgreSQL tests exist,
-  but all three were skipped because `TEST_DATABASE_URL` was unset.
-- **Actually verified against PostgreSQL:** none. PostgreSQL restart
-  persistence, P2.3 reserve/settle/release/refund/retry/recovery, locking,
-  transactions, concurrency, and duplicate prevention are not proven.
-- **Pending:** isolated PostgreSQL execution, migration and backup/restore,
-  reconciliation, Railway/staging activation, and restart persistence.
+- **Unit-tested:** the latest full Node inventory passed 327 tests, failed 0,
+  and skipped 3.
+- **Verified against PostgreSQL:** all three native suites passed using an
+  isolated `TEST_DATABASE_URL`. Migrations 0001 and 0002, restart persistence,
+  reserve/settle/release/refund/recovery, locking, transactions, concurrency,
+  idempotency, and duplicate prevention were exercised successfully.
+- **Pending:** production migration and backup/restore, reconciliation
+  operations, and Railway/staging activation.
 
-Keep both billing gates disabled until isolated real-PostgreSQL verification
-passes. The intended sole Product Owner/Super Admin is `min85639@gmail.com`;
+Keep both billing gates disabled until isolated Railway staging acceptance. The
+intended sole Product Owner/Super Admin is `min85639@gmail.com`;
 sole-owner enforcement is not currently proven. Backend authorization must use
 PostgreSQL-backed roles after cutover; frontend email checks are insufficient.
 Railway main is initially a test/staging deployment, not production, and final
@@ -70,10 +74,9 @@ UI/UX plus Super Admin operational UI remain pending.
 
 ### Planned or Placeholder
 
-- The Credits page explicitly presents purchasing as “coming soon.”
-- The admin shell contains placeholder navigation labels, but its operational screens are not connected to the admin APIs.
-- Global PostgreSQL role cutover and private object upload/download remain
-  planned. Billing and live-job integration seed no commercial values and are
+- The Credits and Super Admin screens use their existing production APIs,
+  including private payment-proof upload and authenticated preview.
+- Global PostgreSQL role cutover remains planned. Billing and live-job integration seed no commercial values and are
   disabled by default.
 - Future voice support will provide a server-validated catalog, previews, and selectable voices whose availability may depend on plan, credit cost, or provider.
 - Remaining directions and phased boundaries are defined in
@@ -83,8 +86,8 @@ UI/UX plus Super Admin operational UI remain pending.
 
 - The reviewed Blink baseline is committed on `blink-baseline`; deployment and merge/push status remain separate operational decisions.
 - Two job stores and two lifecycle vocabularies coexist.
-- The Credits UI is not connected to the gated PostgreSQL billing foundation,
-  and live job billing is not activated by default.
+- Billing and live job billing remain inactive by default; the connected UI
+  reports the gated/unavailable state accurately.
 - Current roles still use Firebase custom claims; approved P2 architecture moves application role authority to PostgreSQL while retaining Firebase identity.
 - P1 long-duration and reliability behavior remains unverified beyond the
   passed 30-second real E2E flow; this is not evidence that longer videos fail.

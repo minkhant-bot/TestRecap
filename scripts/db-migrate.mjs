@@ -27,4 +27,3 @@ if (!['status', 'up'].includes(command)) {
     await shutdownDatabase();
   }
 }
-

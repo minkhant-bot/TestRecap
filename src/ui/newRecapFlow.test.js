@@ -21,6 +21,8 @@ test('one valid video uploads automatically without a submission button', () => 
   assert.match(upload, /candidates\.length !== 1/);
   assert.doesNotMatch(upload, /type="file"\s+multiple/);
   assert.match(upload, /void uploadVideos\(selected\)/);
+  assert.match(upload, /video\.duration > configuration\.maxSourceDurationSeconds/);
+  assert.match(upload, /Video is too long\. Maximum supported duration is 15 minutes\./);
   assert.doesNotMatch(upload, />\s*Upload\s*<\/Button>/);
   assert.doesNotMatch(upload, /Drop up to 2 videos|Select up to 2 videos/);
   assert.doesNotMatch(upload, /return \(\) => cancelRef\.current/);
@@ -58,18 +60,22 @@ test('New Recap embeds live processing and applies the two-active-job UI limit',
   assert.doesNotMatch(processing, /processing-page--embedded|Recap status/);
   assert.doesNotMatch(processing, />Back<\/Button>/);
   assert.match(processing, /job\?\.status === 'failed'/);
-  assert.match(processing, />ထပ်ကြိုးစားမည်<\/Button>/);
+  assert.match(processing, />Recap အသစ် စမည်<\/Button>/);
+  assert.match(processing, /getWorkspaceRetryEligibility/);
+  assert.match(processing, /retryWorkspaceJob/);
+  assert.match(processing, />Retry recap<\/Button>/);
   assert.doesNotMatch(processing, /processing-stage--failed/);
 });
 
-test('New Recap stays upload-only until a job exists and uses only measured progress', () => {
+test('New Recap keeps one stable workflow container and uses only measured progress', () => {
   const page = read('./pages/NewRecapPage.tsx');
   const processing = read('./pages/ProcessingPage.tsx');
   const upload = read('./pages/UploadPage.tsx');
   const presentation = read('./workspace/workflowPresentation.ts');
 
   assert.match(processing, /!workflowStarted && <div className="new-recap-workspace__upload">/);
-  assert.match(processing, /const pipeline = workflowStarted \? \([\s\S]*new-recap-workspace__pipeline/);
+  assert.match(processing, /const pipeline = \([\s\S]*new-recap-workspace__pipeline/);
+  assert.match(processing, /\{pipeline\}[\s\S]*!workflowStarted && <div className="new-recap-workspace__upload">/);
   assert.match(processing, /const workflowStarted = Boolean\(projectId \|\| job\)/);
   assert.doesNotMatch(processing, />Processing<|Current stage|processing-progress/);
   assert.match(processing, /job && job\.status !== 'pending'/);
@@ -94,11 +100,11 @@ test('idle New Recap shows one compact guide that disappears as soon as a file i
   assert.match(page, /500 MB အထိ <i>•<\/i> စတင်လုပ်ဆောင်မည်ကို နှိပ်မှသာ စတင်ပါမည်/);
   assert.match(page, /!uploadLifecycle\.filename && \(/);
   assert.match(styles, /\.new-recap-how/);
-  assert.match(styles, /color-mix\(in srgb, var\(--ds-violet-500\)/);
+  assert.match(styles, /color-mix\(in srgb, var\(--ds-brand-500\)/);
   assert.match(styles, /\.new-recap-how ol \{[^}]*grid-template-columns: repeat\(3, 1fr\)/);
   assert.match(styles, /@media \(max-width: 640px\)[\s\S]*\.new-recap-how ol \{ grid-template-columns: 1fr; \}/);
   assert.match(processing, /!workflowStarted && <div className="new-recap-workspace__upload">/);
-  assert.doesNotMatch(processing, /!workflowStarted[\s\S]{0,120}processing-stages/);
+  assert.match(processing, /\{pipeline\}[\s\S]*!workflowStarted/);
 });
 
 test('History contains processing and completed recaps', () => {
@@ -116,6 +122,21 @@ test('History contains processing and completed recaps', () => {
   assert.match(list, /navigate\(`\/new-recap\?job=/);
   assert.match(detail, /<Navigate to=\{`\/new-recap\?job=/);
   assert.doesNotMatch(detail, /workspace-project-summary|workspace-full-timeline|job\.filename/);
+});
+
+test('failed jobs expose retry only after real recoverability and use the idempotent API', () => {
+  const processing = read('./pages/ProcessingPage.tsx');
+  const history = read('./pages/HistoryPage.tsx');
+  const list = read('./workspace/JobList.tsx');
+  const api = read('./workspace/api.ts');
+  assert.match(api, /\/api\/workspace\/jobs\/\$\{encodeURIComponent\(jobId\)\}\/retry/);
+  assert.match(api, /'Idempotency-Key': idempotencyKey/);
+  assert.match(processing, /retryEligibility\.recoverable/);
+  assert.match(processing, /job\.retry_accepted/);
+  assert.match(history, /getWorkspaceRetryEligibility/);
+  assert.match(history, /retryWorkspaceJob/);
+  assert.match(list, /retryEligibility\[job\.id\]\?\.recoverable/);
+  assert.match(list, /Requeueing…/);
 });
 
 test('active cancellation stays on the existing job until SSE reports cancelled', () => {
@@ -253,15 +274,12 @@ test('processing progress hides the source file box and presents Final Export su
   assert.match(presentation, /Math\.min\(99, Math\.round\(job\.progress\)\)/);
 });
 
-test('completed workflow details are collapsed per job and toggle on request', () => {
+test('workflow remains visible for completed jobs without a second duplicate pipeline', () => {
   const processing = read('./pages/ProcessingPage.tsx');
 
-  assert.match(processing, /useState<string \| null>\(null\)/);
-  assert.match(processing, /setExpandedWorkflowJobId\(null\)/);
-  assert.match(processing, /\[projectId, job\?\.status\]/);
-  assert.match(processing, /current === job\.id \? null : job\.id/);
-  assert.match(processing, /expandedWorkflowJobId === job\.id && pipeline/);
-  assert.match(processing, /aria-expanded=\{expandedWorkflowJobId === job\.id\}/);
+  assert.match(processing, /\{pipeline\}/);
+  assert.doesNotMatch(processing, /expandedWorkflowJobId|View workflow details/);
+  assert.equal((processing.match(/\{pipeline\}/g) || []).length, 1);
 });
 
 test('mobile recap workspace uses one editor, one compact seven-stage pipeline, and one completed output', () => {
@@ -270,26 +288,24 @@ test('mobile recap workspace uses one editor, one compact seven-stage pipeline, 
   const presentation = read('./workspace/workflowPresentation.ts');
   const styles = read('./styles/layout.css');
 
-  assert.doesNotMatch(page, /<h1>New Recap<\/h1>/);
-  assert.match(processing, /workflowStarted && job && !showEditor && job\.status !== 'completed' && pipeline/);
-  assert.doesNotMatch(processing, /showEditor && pipeline/);
+  assert.match(page, /<h1>New Recap<\/h1>/);
+  assert.match(processing, /\{pipeline\}/);
   assert.doesNotMatch(processing, /showReadOnlyEditor|new-recap-workspace__editor--readonly/);
   assert.match(processing, /Current progress/);
   assert.match(processing, /Start Processing/);
   assert.equal((presentation.match(/\{ id: '/g) || []).length, 7);
   assert.equal((processing.match(/Completed Recap/g) || []).length, 0);
   assert.equal((processing.match(/Download Video/g) || []).length, 1);
-  assert.match(processing, /View workflow details/);
-  assert.match(processing, /aria-expanded=\{expandedWorkflowJobId === job\.id\}/);
-  assert.match(processing, /job\.status !== 'completed' && pipeline/);
+  assert.doesNotMatch(processing, /View workflow details|expandedWorkflowJobId/);
   assert.doesNotMatch(styles, /new-recap-workspace__actions \{ min-height: 24rem/);
   assert.doesNotMatch(styles, /new-recap-workspace__workflow \{ min-height: 25rem/);
-  assert.match(styles, /\.new-recap-workspace \.processing-stages \{[\s\S]*grid-template-columns: 1fr/);
+  assert.match(styles, /\.new-recap-workspace \.processing-stages \{[\s\S]*grid-template-columns: repeat\(7, minmax\(6\.5rem, 1fr\)\)/);
+  assert.match(styles, /scroll-snap-type: inline proximity/);
   assert.match(styles, /@keyframes blink-workspace-in/);
   assert.match(styles, /@media \(prefers-reduced-motion: reduce\)/);
 });
 
-test('processing pipeline uses seven vertical full-width status cards', () => {
+test('processing pipeline uses the approved seven-stage horizontal filmstrip', () => {
   const processing = read('./pages/ProcessingPage.tsx');
   const presentation = read('./workspace/workflowPresentation.ts');
   const styles = read('./styles/layout.css');
@@ -301,9 +317,10 @@ test('processing pipeline uses seven vertical full-width status cards', () => {
   assert.match(processing, /complete \? 'Complete' : active \? 'In progress' : 'Waiting'/);
   assert.match(processing, /stage\.id === 'final_export' && active/);
   assert.match(processing, /processing-stage__helper/);
-  assert.match(styles, /\.new-recap-workspace \.processing-stages \{[\s\S]*grid-template-columns: 1fr/);
-  assert.match(styles, /\.new-recap-workspace \.processing-stage \{[\s\S]*width: 100%/);
-  assert.doesNotMatch(styles, /grid-template-columns: repeat\(7/);
+  assert.match(processing, /aria-current=\{active \? 'step' : undefined\}/);
+  assert.match(styles, /\.new-recap-workspace \.processing-stages \{[\s\S]*grid-template-columns: repeat\(7/);
+  assert.match(styles, /\.new-recap-workspace \.processing-stage \{[\s\S]*scroll-snap-align: start/);
+  assert.doesNotMatch(styles, /\.new-recap-workspace \.processing-stages \{[\s\S]{0,180}grid-template-columns: 1fr/);
 });
 
 test('History presents all terminal and active job states in compact mobile rows', () => {
@@ -321,7 +338,25 @@ test('History presents all terminal and active job states in compact mobile rows
   assert.match(history, /workspace-history-page/);
   assert.match(styles, /\.workspace-history-card \.workspace-job-list \{ width: 100%; margin: 0; \}/);
   assert.match(styles, /\.workspace-history-card \{ overflow: visible; \}/);
-  assert.match(styles, /padding-bottom: calc\(var\(--ds-bottom-nav-height\) \+ var\(--ds-space-16\) \+ env\(safe-area-inset-bottom\)\)/);
+  assert.match(styles, /padding-bottom: calc\(var\(--ds-space-16\) \+ env\(safe-area-inset-bottom\)\)/);
+});
+
+test('mobile shell uses the approved hamburger drawer with production identity and billing APIs', () => {
+  const shell = read('./layout/AppShell.tsx');
+  const styles = read('./styles/layout.css');
+
+  assert.match(shell, /className="ds-topbar__menu"/);
+  assert.match(shell, /className="ds-mobile-drawer"/);
+  assert.match(shell, /fetch\('\/api\/credits\/balance'/);
+  assert.match(shell, /fetch\('\/api\/plans\/me'/);
+  assert.match(shell, /profile\?\.role === 'super_admin'/);
+  assert.match(shell, /Owner \/ Super Admin/);
+  assert.match(shell, /event\.key === 'Escape'/);
+  assert.doesNotMatch(shell, /ds-bottom-nav/);
+  assert.match(styles, /\.ds-mobile-drawer__panel \{/);
+  assert.match(styles, /animation: ds-drawer-in/);
+  assert.match(styles, /\.ds-mobile-billing \{/);
+  assert.doesNotMatch(styles, /\.ds-bottom-nav/);
 });
 
 test('frontend navigation, pipeline, actions, and document language are localized for Burmese users', () => {

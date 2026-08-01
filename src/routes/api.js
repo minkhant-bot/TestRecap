@@ -25,6 +25,11 @@ import {
     sendAdmissionError
 } from '../services/admissionControl.js';
 import { getApplicationHealth } from '../services/databaseReadiness.js';
+import { getDuration } from '../ffmpeg/index.js';
+import {
+    validateSourceVideoDuration,
+    VIDEO_TOO_LONG_MESSAGE
+} from '../config/upload.js';
 
 
 const router = express.Router();
@@ -60,6 +65,29 @@ const handleUpload = (req, res, next) => {
         }
         next();
     });
+};
+
+const removeUploadedVideo = req => {
+    if (req.file?.path && fs.existsSync(req.file.path)) fs.unlinkSync(req.file.path);
+};
+
+const enforceUploadedVideoDuration = async (req, res, next) => {
+    if (!req.file) return next();
+    try {
+        req.authoritativeSourceDuration = validateSourceVideoDuration(
+            await getDuration(req.file.path)
+        );
+        return next();
+    } catch (error) {
+        removeUploadedVideo(req);
+        if (error?.code === 'SOURCE_VIDEO_TOO_LONG') {
+            return res.status(422).json({ error: VIDEO_TOO_LONG_MESSAGE, code: error.code });
+        }
+        return res.status(422).json({
+            error: 'Video duration could not be verified.',
+            code: 'INVALID_SOURCE_VIDEO_DURATION'
+        });
+    }
 };
 
 router.get('/health', async (req, res) => {
@@ -254,15 +282,27 @@ router.post(
     requireAdmin,
     admitMutation('legacy.jobs.create'),
     handleUpload,
+    enforceUploadedVideoDuration,
     createProcessingJob
 );
 
-router.post('/retry/:jobId', (req, res) => {
+router.post('/retry/:jobId', async (req, res) => {
     const job = getJob(req.params.jobId);
     if (!requireJobAccess(req, res, job)) return;
     if (job.status !== 'error') return res.status(400).json({ error: 'Job is not in error state' });
     if (isLegacyJob(job)) {
         return res.status(409).json({ error: 'Legacy workflow jobs cannot be resumed under workflow version ' + WORKFLOW_VERSION + '. Start a new job.' });
+    }
+    try {
+        validateSourceVideoDuration(await getDuration(job.videoPath));
+    } catch (error) {
+        if (error?.code === 'SOURCE_VIDEO_TOO_LONG') {
+            return res.status(422).json({ error: VIDEO_TOO_LONG_MESSAGE, code: error.code });
+        }
+        return res.status(422).json({
+            error: 'Video duration could not be verified.',
+            code: 'INVALID_SOURCE_VIDEO_DURATION'
+        });
     }
     
     const geminiApiKey = req.body?.geminiApiKey || req.headers['x-gemini-api-key'] || getJobKeys(req.params.jobId).geminiApiKey || process.env.GEMINI_API_KEY;
@@ -339,7 +379,8 @@ router.delete('/jobs/:jobId', (req, res) => {
 });
 
 // Adding compatibility routes based on instructions
-router.post('/process', requireAdmin, admitMutation('legacy.process.create'), handleUpload, (req, res) => {
+router.post('/process', requireAdmin, admitMutation('legacy.process.create'), handleUpload,
+    enforceUploadedVideoDuration, (req, res) => {
      // Forward to process-recap logic
      const videoFile = req.file;
      const audioFile = null;

@@ -1,3 +1,5 @@
+import { getPaymentProofConfiguration } from './paymentProof.js';
+
 const parseBoolean = (value, name, fallback = false) => {
   if (value === undefined || value === '') return fallback;
   if (value === 'true') return true;
@@ -11,8 +13,7 @@ export const getBillingConfiguration = (env = process.env) => {
     env.P2_LIVE_JOB_BILLING_ENABLED,
     'P2_LIVE_JOB_BILLING_ENABLED',
   );
-  const storageProvider = String(env.PAYMENT_SCREENSHOT_STORAGE_PROVIDER || '').trim();
-  const storageBucket = String(env.PAYMENT_SCREENSHOT_STORAGE_BUCKET || '').trim();
+  const paymentProof = getPaymentProofConfiguration(env);
   if (enabled && (!String(env.DATABASE_URL || '').trim())) {
     throw new Error('P2_BILLING_ENABLED requires DATABASE_URL.');
   }
@@ -22,8 +23,10 @@ export const getBillingConfiguration = (env = process.env) => {
   return Object.freeze({
     enabled,
     liveJobBillingEnabled,
-    screenshotStorageConfigured: Boolean(storageProvider && storageBucket),
-    storageProvider,
-    storageBucket,
+    screenshotStorageConfigured: true,
+    storageProvider: paymentProof.storageProvider,
+    storageBucket: paymentProof.storageBucket,
+    paymentProofMaxBytes: paymentProof.maxBytes,
+    paymentProofMimeTypes: paymentProof.mimeTypes,
   });
 };

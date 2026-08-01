@@ -1,4 +1,16 @@
-import type { UploadConfiguration, VideoEffects, WorkspaceJob, WorkspaceJobStatus, WorkspaceQueue } from './types';
+import type { UploadConfiguration, VideoEffects, WorkspaceJob, WorkspaceJobStatus, WorkspaceQueue, WorkspaceRetryEligibility, WorkspaceRetryResult } from './types';
+
+export class WorkspaceApiError extends Error {
+  code?: string;
+  status: number;
+
+  constructor(message: string, status: number, code?: string) {
+    super(message);
+    this.name = 'WorkspaceApiError';
+    this.status = status;
+    this.code = code;
+  }
+}
 
 const parseResponse = async <T>(response: Response): Promise<T> => {
   if (response.status === 401) {
@@ -6,7 +18,9 @@ const parseResponse = async <T>(response: Response): Promise<T> => {
     throw new Error('Session သက်တမ်းကုန်သွားပါပြီ။ ဆက်လုပ်ရန် ပြန်ဝင်ပါ။');
   }
   const payload = await response.json().catch(() => ({}));
-  if (!response.ok) throw new Error(payload.error || 'တောင်းဆိုမှုကို မလုပ်ဆောင်နိုင်ပါ။');
+  if (!response.ok) throw new WorkspaceApiError(
+    payload.error || 'တောင်းဆိုမှုကို မလုပ်ဆောင်နိုင်ပါ။', response.status, payload.code,
+  );
   return payload as T;
 };
 
@@ -91,6 +105,22 @@ export const getWorkspaceJobStatus = async (jobId: string) =>
 
 export const getWorkspaceQueue = async () =>
   parseResponse<WorkspaceQueue>(await fetch('/api/workspace/queue', { credentials: 'include' }));
+
+export const getWorkspaceRetryEligibility = async (jobId: string) =>
+  parseResponse<WorkspaceRetryEligibility>(await fetch(
+    `/api/workspace/jobs/${encodeURIComponent(jobId)}/retry`,
+    { credentials: 'include' },
+  ));
+
+export const retryWorkspaceJob = async (jobId: string, idempotencyKey: string) =>
+  parseResponse<WorkspaceRetryResult>(await fetch(
+    `/api/workspace/jobs/${encodeURIComponent(jobId)}/retry`,
+    {
+      method: 'POST',
+      credentials: 'include',
+      headers: { 'Idempotency-Key': idempotencyKey },
+    },
+  ));
 
 export const queueWorkspaceJob = async (jobId: string, geminiApiKey: string, effects?: VideoEffects) => {
   const body = { geminiApiKey, effects };

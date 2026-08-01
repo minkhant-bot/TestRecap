@@ -4,7 +4,6 @@ const DEFAULTS = Object.freeze({
   connectionTimeoutMs: 5_000,
   queryTimeoutMs: 15_000,
 });
-
 const parseBoolean = (value, name, fallback = false) => {
   if (value === undefined || value === '') return fallback;
   if (value === 'true') return true;
@@ -94,4 +93,3 @@ export const getRedactedDatabaseConfiguration = (configuration = getDatabaseConf
   connectionTimeoutMs: configuration.connectionTimeoutMs,
   queryTimeoutMs: configuration.queryTimeoutMs,
 });
-

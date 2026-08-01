@@ -1,8 +1,7 @@
 import assert from 'node:assert/strict';
-import fs from 'node:fs';
 import test from 'node:test';
 import pg from 'pg';
-import { migrationsDirectory } from './migrations.js';
+import { discoverMigrations } from './migrations.js';
 
 const testUrl = process.env.TEST_DATABASE_URL;
 const integration = testUrl ? test : test.skip;
@@ -14,8 +13,7 @@ integration('P2.1 schema constraints and append-only protections execute in Post
     await client.query('BEGIN');
     await client.query('CREATE SCHEMA blink_p2_integration');
     await client.query('SET LOCAL search_path TO blink_p2_integration');
-    const sql = fs.readFileSync(`${migrationsDirectory}/0001_p2_foundation.sql`, 'utf8');
-    await client.query(sql);
+    for (const migration of discoverMigrations()) await client.query(migration.sql);
 
     const userId = '00000000-0000-4000-8000-000000000001';
     const ledgerId = '00000000-0000-4000-8000-000000000002';
@@ -88,6 +86,10 @@ integration('P2.1 schema constraints and append-only protections execute in Post
         created_by_user_id, updated_by_user_id)
        VALUES ($1, 'test-credits', 'Test credits', 10, 100, 'USD', $2, $2)`,
       [creditPlanId, bootstrapUserId],
+    );
+    await expectConstraintFailure(
+      () => client.query('DELETE FROM credit_plans WHERE id = $1', [creditPlanId]),
+      /retained financial history and cannot be deleted/,
     );
     await client.query(
       `INSERT INTO bank_accounts

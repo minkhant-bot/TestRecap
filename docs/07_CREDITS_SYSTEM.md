@@ -1,5 +1,9 @@
 # Credits and Commercial Plans
 
+> Current product workflow is manual bank confirmation followed by manual credit
+> addition, not primarily Approve/Reject. Package/correction rules are in
+> `18_PRODUCT_OWNER_DECISIONS_2026-08-01.md` and supersede conflicts below.
+
 ## Purpose
 
 Separate current placeholder behavior from the approved P2 plan, purchase,
@@ -25,30 +29,35 @@ and API specification is `17_P2_FOUNDATION_ARCHITECTURE.md`.
   immutable job snapshots, reservations, settlement/release/full-refund,
   worker leases, checkpoint recovery, and exceptional `review_required`
   reconciliation to the existing workspace worker.
+- Super Admin package management now provides create, edit, activate,
+  deactivate, archive, and reorder operations behind the billing gate. Package
+  mutations require explicit confirmation, idempotency, PostgreSQL Super Admin
+  authority, and append-only audit entries. User reads return active,
+  non-archived packages only.
 
 ### Approved and implemented as a gated foundation
 
 - PostgreSQL-backed plans, policy rates, entitlements, Trial grants, purchase
   credits/bonus, immutable ledger, balance projection, and financial audit.
 - Exact 30-second estimates and explicit BYOK versus Blink-funded eligibility.
-- Manual purchase metadata and review, without public files or database blobs.
+- Manual purchase metadata, private binary proof upload/preview, and review,
+  without public files or database blobs.
 
 ### Still not implemented
 
-- Private object upload/download and malware/image verification integration.
-- UI activation or redesign.
+- Antivirus scanning beyond strict server-side JPEG/PNG/WebP structure,
+  declared-type, size, and SHA-256 integrity validation.
 - Production activation, global role cutover, backup/restore operations, and
   staging validation.
 
 ### Known gaps
 
-- The current Credits UI is not connected to the PostgreSQL billing APIs.
 - Legacy processing admission remains unchanged while the live billing gate is
   disabled.
 - With the live gate enabled, every queue request must explicitly select the
   assigned plan and entitled mode; no server-key fallback is permitted.
-- Screenshot metadata can be administratively verified, but storage-provider
-  upload and evidence-access adapters remain required before production use.
+- Railway proof-volume persistence plus synchronized database/binary
+  backup/restore remain required before production use.
 
 ## Plan model
 

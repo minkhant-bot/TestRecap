@@ -1,8 +1,7 @@
 import assert from 'node:assert/strict';
-import fs from 'node:fs';
 import test from 'node:test';
 import pg from 'pg';
-import { migrationsDirectory } from '../db/migrations.js';
+import { discoverMigrations } from '../db/migrations.js';
 import * as audit from '../db/repositories/auditLogs.js';
 import * as balances from '../db/repositories/balances.js';
 import * as billing from '../db/repositories/billing.js';
@@ -19,13 +18,18 @@ import {
   configureCreditPlan,
   configurePlan,
   configurePromotion,
+  completeScreenshotUpload,
+  createCreditPackage,
   createPlanPolicy,
   createScreenshotIntent,
+  editCreditPackage,
   grantTrial,
   linkPackageBank,
+  archiveCreditPackage,
+  reorderCreditPackages,
   reviewPurchase,
+  setCreditPackageStatus,
   submitPurchase,
-  verifyScreenshot,
 } from './billingFoundation.js';
 
 const testUrl = process.env.TEST_DATABASE_URL;
@@ -33,8 +37,7 @@ const integration = testUrl ? test : test.skip;
 const env = {
   P2_BILLING_ENABLED: 'true',
   DATABASE_URL: testUrl || 'postgresql://disabled.invalid/blink',
-  PAYMENT_SCREENSHOT_STORAGE_PROVIDER: 'integration-private',
-  PAYMENT_SCREENSHOT_STORAGE_BUCKET: 'integration-private',
+  PAYMENT_PROOF_MAX_SIZE_MB: '10',
   GEMINI_API_KEY: 'integration-platform-key',
 };
 const adminIdentity = {
@@ -51,7 +54,7 @@ integration('P2 billing services preserve atomic, idempotent, one-time-credit in
   await setup.connect();
   await setup.query(`CREATE SCHEMA ${schema}`);
   await setup.query(`SET search_path TO ${schema}`);
-  await setup.query(fs.readFileSync(`${migrationsDirectory}/0001_p2_foundation.sql`, 'utf8'));
+  for (const migration of discoverMigrations()) await setup.query(migration.sql);
   await setup.end();
 
   const pool = new pg.Pool({
@@ -211,7 +214,32 @@ integration('P2 billing services preserve atomic, idempotent, one-time-credit in
       currency: 'USD',
       active: true,
       displayOrder: 1,
+      confirmed: true,
     }, { env, deps, ...headers('package') });
+    const managedPackage = await createCreditPackage(adminIdentity, {
+      name: 'Managed package', price: 250, creditAmount: 25, bonusCredits: 5,
+      currency: 'USD', active: true, displayOrder: 2, note: 'Native PostgreSQL',
+      confirmed: true,
+    }, { env, deps, ...headers('managed-package-create') });
+    const managedPackageId = managedPackage.body.creditPackage.id;
+    await editCreditPackage(adminIdentity, managedPackageId, {
+      name: 'Managed package edited', price: 275, creditAmount: 27,
+      bonusCredits: 6, currency: 'USD', active: true, displayOrder: 2,
+      note: 'Edited in native PostgreSQL', confirmed: true,
+    }, { env, deps, ...headers('managed-package-edit') });
+    await setCreditPackageStatus(adminIdentity, managedPackageId, false, {
+      confirmed: true,
+    }, { env, deps, ...headers('managed-package-deactivate') });
+    await setCreditPackageStatus(adminIdentity, managedPackageId, true, {
+      confirmed: true,
+    }, { env, deps, ...headers('managed-package-activate') });
+    await reorderCreditPackages(adminIdentity, {
+      confirmed: true,
+      items: [
+        { id: packageResult.body.creditPlan.id, displayOrder: 2 },
+        { id: managedPackageId, displayOrder: 1 },
+      ],
+    }, { env, deps, ...headers('managed-package-reorder') });
     const bankResult = await configureBank(adminIdentity, {
       code: 'integration-bank',
       bankName: 'Integration Bank',
@@ -229,15 +257,16 @@ integration('P2 billing services preserve atomic, idempotent, one-time-credit in
     }, { env, deps, ...headers('link') });
 
     const createPendingPurchase = async sequence => {
+      const sha256 = String(sequence).padStart(64, 'a').slice(-64).replace(/[^0-9a-f]/g, 'a');
       const screenshot = await createScreenshotIntent(userIdentity, {
         originalFilename: `payment-${sequence}.png`,
         mimeType: 'image/png',
         sizeBytes: 100,
-        sha256: String(sequence).padStart(64, 'a').slice(-64).replace(/[^0-9a-f]/g, 'a'),
+        sha256,
       }, { env, deps, ...headers(`screenshot-${sequence}`) });
-      await verifyScreenshot(adminIdentity, screenshot.body.id, {
-        env, deps, ...headers(`verify-${sequence}`),
-      });
+      await completeScreenshotUpload(userIdentity, screenshot.body.id, {
+        mimeType: 'image/png', sizeBytes: 100, sha256,
+      }, { env, deps, ...headers(`complete-${sequence}`) });
       return submitPurchase(userIdentity, {
         creditPlanId: packageResult.body.creditPlan.id,
         bankAccountId: bankResult.body.bank.id,
@@ -275,6 +304,22 @@ integration('P2 billing services preserve atomic, idempotent, one-time-credit in
       { env, deps, ...headers('reject-third') },
     );
     assert.equal(rejectedResult.body.purchase.status, 'rejected');
+    const purchaseSnapshotBeforePackageEdit = await pool.query(
+      `SELECT plan_name_snapshot,purchase_credit_snapshot,price_minor_snapshot,currency_snapshot
+       FROM credit_purchase_requests WHERE id=$1`,
+      [first.body.purchase.id],
+    );
+    await editCreditPackage(adminIdentity, packageResult.body.creditPlan.id, {
+      name: 'Changed after purchase', price: 999, creditAmount: 99,
+      bonusCredits: 0, currency: 'USD', active: true, displayOrder: 2,
+      note: null, confirmed: true,
+    }, { env, deps, ...headers('purchased-package-edit') });
+    const purchaseSnapshotAfterPackageEdit = await pool.query(
+      `SELECT plan_name_snapshot,purchase_credit_snapshot,price_minor_snapshot,currency_snapshot
+       FROM credit_purchase_requests WHERE id=$1`,
+      [first.body.purchase.id],
+    );
+    assert.deepEqual(purchaseSnapshotAfterPackageEdit.rows, purchaseSnapshotBeforePackageEdit.rows);
     await assert.rejects(
       reviewPurchase(adminIdentity, rejected.body.purchase.id, { decision: 'approved' }, {
         env, deps, ...headers('approve-rejected'),
@@ -314,6 +359,18 @@ integration('P2 billing services preserve atomic, idempotent, one-time-credit in
     const ledgerTotal = await ledger.sumPostedCredits(user.id, { client: pool });
     assert.equal(projection.postedBalance, ledgerTotal);
     assert.equal(ledgerTotal, 31n);
+    await archiveCreditPackage(adminIdentity, managedPackageId, { confirmed: true }, {
+      env, deps, ...headers('managed-package-archive'),
+    });
+    const archivedPackage = await billing.findCreditPackageById(managedPackageId, { client: pool });
+    assert.equal(archivedPackage.active, false);
+    assert.ok(archivedPackage.archivedAt);
+    await assert.rejects(
+      editCreditPackage(adminIdentity, managedPackageId, {
+        name: 'Cannot rewrite archived package', confirmed: true,
+      }, { env, deps, ...headers('managed-package-edit-archived') }),
+      error => error.code === 'PACKAGE_ARCHIVED',
+    );
   } finally {
     await pool.end();
     const cleanup = new pg.Client({ connectionString: testUrl });

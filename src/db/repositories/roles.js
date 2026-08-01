@@ -10,7 +10,6 @@ export const findRoleByUserId = async (userId, { client = null, forUpdate = fals
   );
   return mapRole(firstRow(result));
 };
-
 export const assignRole = async ({
   userId,
   role,
@@ -39,4 +38,3 @@ export const assignRole = async ({
   if (!row) throw new Error('Protected bootstrap Super Admin role cannot be changed.');
   return mapRole(row);
 };
-

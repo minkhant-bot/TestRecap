@@ -18,8 +18,8 @@ Explain the current runtime components and ownership boundaries without requirin
 ### Planned or Placeholder
 
 - Managed PostgreSQL is implemented as the opt-in authority for the billing API
-  domain. Operational jobs remain JSON-authoritative, and the private payment
-  screenshot object-storage adapter remains unimplemented.
+  domain. Operational jobs remain JSON-authoritative. Private payment proofs use
+  an authenticated single-replica adapter below the persistent `DATA_DIR`.
 - The complete P2 target architecture is `17_P2_FOUNDATION_ARCHITECTURE.md`.
 
 ### Known Issues

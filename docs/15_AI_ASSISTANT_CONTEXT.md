@@ -1,5 +1,20 @@
 # AI Assistant Context
 
+> Read `18_PRODUCT_OWNER_DECISIONS_2026-08-01.md` first. It is authoritative for
+> launch duration, manual payment/credit operations, packages, roles, owner UI,
+> analytics, UI/UX, and Railway staging. Preserve the Core AI Pipeline.
+
+Blink's launch source-video safety maximum is 15:00. Backend upload and queue
+checks are authoritative; frontend metadata validation is only immediate
+feedback. Billing remains in 30-second blocks. Do not claim 15-minute support
+until a near-15-minute real E2E passes.
+
+Credit-package management backend APIs are implemented behind the default-off
+PostgreSQL billing gate. Super Admin can create, edit, activate/deactivate,
+archive, and reorder; normal users read active packages only. Mutations require
+confirmation/idempotency and audit. No package-management UI is implemented.
+The native PostgreSQL integration suites passed 3/3.
+
 ## ZIP Handoff Snapshot (2026-07-31)
 
 - Branch: `blink-baseline`
@@ -7,10 +22,9 @@
 - Working tree: intentionally dirty; 50 changed or untracked paths are present.
   The changes include documentation, PostgreSQL foundation, billing, and
   workspace/live-job integration. Never reset, restore, stash, or discard them.
-- The current evidence review records unit results but no successful native
-  PostgreSQL execution. The three PostgreSQL integration tests skip when
-  `TEST_DATABASE_URL` is unset; authored integration coverage is not executed
-  verification.
+- This historical snapshot predated native PostgreSQL execution. The current
+  evidence supersedes it: all three native suites passed using an isolated
+  `TEST_DATABASE_URL`, including migration and restart-persistence coverage.
 - No implementation, configuration, migration, runtime, deployment, or Core AI
   Pipeline behavior may be changed by a documentation handoff.
 
@@ -21,7 +35,7 @@
 | P1 | Core functionality implemented; real 30-second upload → processing → final output → preview → download flow passed. Not fully production-validated; all longer-duration/reliability scope remains pending. |
 | P2.1 | PostgreSQL configuration, pool/transactions, checksummed migrations, schema, repositories, readiness, shutdown, and bootstrap scaffolding exist. Inactive; no global authority cutover. |
 | P2.2 | Trial/Normal/Pro plans/policies, entitlements, trial grants, credits/ledger/balance, packages/banks, screenshot metadata, manual purchase review, first-purchase bonus, adjustments, estimates, audit, and Super Admin financial APIs exist. Gated by `P2_BILLING_ENABLED`; no commercial values are seeded. |
-| P2.3 | Live-job duration snapshots, explicit modes, reservations, settlement/release/refund, leases, checkpoint reuse, duplicate-worker protection, and reconciliation implementation exist. Unit-tested; native PostgreSQL test code is authored but skipped. Gated by `P2_LIVE_JOB_BILLING_ENABLED`; real PostgreSQL and production/staging activation remain verification gaps. |
+| P2.3 | Live-job duration snapshots, explicit modes, reservations, settlement/release/refund, leases, checkpoint reuse, duplicate-worker protection, and reconciliation implementation exist. Unit tests and all three native PostgreSQL suites passed. Gated by `P2_LIVE_JOB_BILLING_ENABLED`; production/staging activation remains pending. |
 | P3 | Lifecycle consolidation and PostgreSQL/global role authority cutover: not implemented. |
 | P4 | Performance, scaling, and operational optimization: not implemented. |
 | P5 | No approved implementation scope; future product expansion such as selectable voices remains deferred. |
@@ -38,9 +52,9 @@ P2.1/P2.2/P2.3 rows above.
 - This foundation is inactive: JSON/file stores, Firebase-claim authorization,
   encrypted BYOK persistence, and current job execution remain authoritative.
   No dual-write is active.
-- PostgreSQL/Docker integration was not available in the implementation
-  environment. Never claim database integration verification until run separately.
-- JSON/BYOK restart persistence is tested; PostgreSQL restart persistence is not.
+- Native PostgreSQL verification subsequently passed in an isolated test
+  database, including migrations 0001 and 0002 and restart persistence.
+- JSON/BYOK and PostgreSQL restart persistence are tested.
 - No ban/unban persistence schema exists. Planned ban/unban and Super Admin
   credit grant/deduction/refund/reversal UI and flows are not complete.
 - Never auto-run migrations or activate `DATABASE_REQUIRED`/role authority without
@@ -60,8 +74,7 @@ P2.1/P2.2/P2.3 rows above.
   snapshots, locked reservations before queue admission, explicit BYOK/Pro
   execution, usable-output settlement, release/full-refund compensation,
   worker leases, and checkpoint-aware recovery. It is disabled by default.
-- Keep both gates disabled until the native PostgreSQL integration tests execute
-  successfully in an isolated database.
+- Keep both gates disabled until isolated Railway staging acceptance.
 - Object-upload adapters, UI activation, global role cutover, production
   activation, and the Core AI Pipeline remain unchanged.
 
@@ -113,9 +126,10 @@ This file documents the current working-tree architecture as of 2026-07-31.
 
 ### Planned or Placeholder
 
-The Credits page remains a placeholder and the admin UI is incomplete. The
-PostgreSQL billing API and live-job integration are implemented behind separate
-explicit activation gates; object storage, UI activation, global role cutover,
+The Credits and Super Admin UI use the existing billing/admin APIs, including
+private `DATA_DIR` payment-proof upload and authenticated streaming. The
+PostgreSQL billing API and live-job integration remain behind separate explicit
+activation gates; global role cutover, synchronized database/proof-volume
 backup/restore, and staging validation remain pending.
 
 ### Known Issues
@@ -222,7 +236,7 @@ PostgreSQL connection and must never run automatically.
 The repository contains approved P2 implementation behind inactive gates. Follow
 the remaining operational boundaries in `17_P2_FOUNDATION_ARCHITECTURE.md`:
 
-1. Isolated PostgreSQL integration and production migration verification.
+1. Production migration verification using isolated Railway staging resources.
 2. Private screenshot object storage and content-verification adapters.
 3. Backup/restore, reconciliation deadlines, and authenticated staging smoke.
 4. Global PostgreSQL role/authority cutover only after approved migration.

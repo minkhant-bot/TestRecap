@@ -15,7 +15,6 @@ export const mapUser = row => row && ({
   updatedAt: row.updated_at,
   lastLoginAt: row.last_login_at,
 });
-
 export const mapRole = row => row && ({
   userId: row.user_id,
   role: row.role,
@@ -26,4 +25,3 @@ export const mapRole = row => row && ({
   createdAt: row.created_at,
   updatedAt: row.updated_at,
 });
-

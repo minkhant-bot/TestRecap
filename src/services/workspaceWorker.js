@@ -34,6 +34,7 @@ import {
     releaseLiveJobLease,
     settleLiveJob
 } from './liveJobBilling.js';
+import { inspectQueuedWorkspaceRetry } from './workspaceRetry.js';
 
 const storagePaths = ensureStoragePaths(getStoragePaths());
 
@@ -183,6 +184,7 @@ export class WorkspaceWorker {
         }),
         coreStage = continueWithCorePipeline,
         finalEffectsStage = applyFinalVideoEffects,
+        validateOutput = assertCompletedCoreOutput,
         cleanup = async ({ job }) => cleanupWorkspaceAudioPartials(job.storedPath),
         liveBillingEnabled = isLiveJobBillingEnabled,
         billing = {
@@ -201,6 +203,7 @@ export class WorkspaceWorker {
         this.translateStage = translateStage;
         this.coreStage = coreStage;
         this.finalEffectsStage = finalEffectsStage;
+        this.validateOutput = validateOutput;
         this.cleanup = cleanup;
         this.liveBillingEnabled = liveBillingEnabled;
         this.billing = billing;
@@ -267,6 +270,20 @@ export class WorkspaceWorker {
         const job = claimNextWorkspaceJob(this.workerId);
         if (!job) return;
         publishQueuePositions();
+
+        if ((job.retry?.attempts || 0) > 0) {
+            const eligibility = inspectQueuedWorkspaceRetry(job);
+            if (!eligibility.recoverable) {
+                const failed = updateWorkspaceJobInternal(job.id, {
+                    status: 'failed', stage: 'failed', workerId: null,
+                    failedAt: new Date().toISOString(),
+                    error: eligibility.reason || 'Retry checkpoint is no longer recoverable.'
+                });
+                publishWorkspaceEvent(job.id, 'job.failed', failed);
+                publishQueuePositions();
+                return;
+            }
+        }
 
         const usesLiveBilling = this.liveBillingEnabled() && Boolean(job.billing);
         let lease = null;
@@ -379,6 +396,11 @@ export class WorkspaceWorker {
                 });
                 publishWorkspaceEvent(job.id, 'stage.progress', updated);
             };
+            const coreStarting = updateWorkspaceJobInternal(job.id, {
+                stage: 'voice_generation',
+                progress: 35
+            });
+            publishWorkspaceEvent(job.id, 'stage.started', coreStarting);
             const output = await this.coreStage({
                 job: { ...getWorkspaceJobInternal(job.id) },
                 audioPath: result?.audioPath || getWorkspaceJobInternal(job.id)?.audioPath,
@@ -415,11 +437,11 @@ export class WorkspaceWorker {
                     publishWorkspaceEvent(job.id, 'stage.progress', updated);
                 }
             });
+            this.validateOutput(job.id, { videoUrl: `/output/${job.id}.mp4` });
             if (getWorkspaceJobInternal(job.id)?.cancellationRequested) {
                 throw Object.assign(new Error('Processing cancelled.'), { name: 'AbortError' });
             }
             if (usesLiveBilling) {
-                assertCompletedCoreOutput(job.id, { videoUrl: `/output/${job.id}.mp4` });
                 const billingSnapshot = await this.billing.settle(job.id, {
                     outputValidated: true
                 });
@@ -459,7 +481,8 @@ export class WorkspaceWorker {
                 }
                 if (failedStage === 'audio_extraction') {
                     cleanupWorkspaceAudioArtifacts(job.storedPath);
-                } else if (getWorkspaceJobInternal(job.id)?.audioPath) {
+                } else if (failedStage === 'gemini_transcript' &&
+                    getWorkspaceJobInternal(job.id)?.audioPath) {
                     cleanupGeminiTranscriptArtifacts(getWorkspaceJobInternal(job.id).audioPath);
                 }
                 const failed = updateWorkspaceJobInternal(job.id, {
@@ -480,9 +503,11 @@ export class WorkspaceWorker {
                         audioDuration: null,
                         extractionCompletedAt: null
                     } : {}),
-                    transcriptPath: null,
-                    transcriptSegmentCount: null,
-                    transcriptionCompletedAt: null,
+                    ...(['audio_extraction', 'gemini_transcript'].includes(failedStage) ? {
+                        transcriptPath: null,
+                        transcriptSegmentCount: null,
+                        transcriptionCompletedAt: null
+                    } : {}),
                     cancellationRequested: false
                 });
                 publishWorkspaceEvent(job.id, 'job.failed', failed);

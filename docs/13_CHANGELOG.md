@@ -1,5 +1,24 @@
 # Changelog
 
+## 2026-08-01 — Super Admin credit-package management
+
+- Added gated backend create/edit/activate/deactivate/archive/reorder operations,
+  active-only normal-user reads, bonus credits and optional notes, confirmation,
+  idempotency, transaction-bound audit records, and a database no-delete guard.
+- Existing purchase snapshots, ledger entries, plan/role separation, payment
+  proof, live-job billing, UI, deployment, and Core AI Pipeline were unchanged.
+- The native PostgreSQL integration suites subsequently passed 3/3.
+
+## 2026-08-01 — 15-minute launch source-video safety limit
+
+- Updated Blink's launch source-video safety limit to 15:00 while preserving
+  30-second-block billing.
+- Added authoritative backend media-duration probing before pending-job creation,
+  a queue-time recheck before reservation, legacy API/retry guards, immediate
+  frontend feedback, and inclusive boundary coverage for 14:59/15:00/15:01.
+- The Core AI Pipeline and billing calculation were unchanged. Real
+  near-15-minute E2E support remains unverified.
+
 ## 2026-07-31 — P2.3 live job billing and recovery integration
 
 - Added a separate default-off activation gate connecting authoritative source
@@ -10,11 +29,11 @@
   release, one full compensating post-settlement refund, worker leases,
   duplicate-worker protection, checkpoint reuse, and exceptional
   `review_required` recovery.
-- Added focused unit coverage and authored native PostgreSQL integration-test
-  coverage for concurrency, queue compensation, mode/entitlement enforcement,
-  lease ownership, settlement, release/refund, restart checkpoints, and
-  duplicate financial transitions. The native tests have not executed
-  successfully; they skip without `TEST_DATABASE_URL`.
+- Added focused unit coverage and native PostgreSQL integration-test coverage
+  for concurrency, queue compensation, mode/entitlement enforcement, lease
+  ownership, settlement, release/refund, restart checkpoints, and duplicate
+  financial transitions. The native suites subsequently passed 3/3 using an
+  isolated `TEST_DATABASE_URL`.
 - No commercial values were seeded; UI, deployment, global role authority, and
   Core AI Pipeline stages/output behavior were not changed.
 
@@ -26,10 +45,11 @@
   bonus, adjustment, and financial audit services/APIs.
 - Financial mutations require PostgreSQL Super Admin authority, transactions,
   locked rows, request-hash idempotency, and same-transaction audit records.
-- Added authored native PostgreSQL integration-test coverage for atomic
+- Added native PostgreSQL integration-test coverage for atomic
   approval, concurrent review, idempotency, duplicate-bonus prevention,
   rejection without credits, invalid transitions, and ledger/balance
-  consistency. This is test code, not executed PostgreSQL verification.
+  consistency. The native suites subsequently passed 3/3 using an isolated
+  `TEST_DATABASE_URL`.
 - No commercial values were seeded. JSON/Firebase authority outside billing,
   encrypted BYOK data, live jobs, reservation/settlement, UI, deployment, and
   the Core AI Pipeline remain unchanged.

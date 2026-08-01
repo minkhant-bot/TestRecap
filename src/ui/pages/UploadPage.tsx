@@ -7,6 +7,7 @@ import type { UploadConfiguration, WorkspaceJob } from '../workspace/types';
 
 type UploadState = 'empty' | 'uploading' | 'error' | 'complete';
 type SelectedVideo = { file: File; duration: number | null };
+const VIDEO_TOO_LONG_MESSAGE = 'Video is too long. Maximum supported duration is 15 minutes.';
 
 export interface UploadLifecycle {
   state: UploadState;
@@ -137,6 +138,12 @@ export function UploadPanel({
       duration: await readDuration(file),
     })));
     setVideos(selected);
+    if (selected.some(video => video.duration !== null &&
+      video.duration > configuration.maxSourceDurationSeconds)) {
+      setState('error');
+      setError(VIDEO_TOO_LONG_MESSAGE);
+      return;
+    }
     void uploadVideos(selected);
   };
 

@@ -13,7 +13,7 @@ const {
     continueWithCorePipeline,
     prepareCorePipelineState
 } = await import('./corePipelineBridge.js');
-const { createJob, updateJob } = await import('./jobManager.js');
+const { createJob, getJob, updateJob } = await import('./jobManager.js');
 
 after(() => fs.rmSync(temporaryRoot, { recursive: true, force: true }));
 
@@ -106,4 +106,38 @@ test('restart resumes final effects from an already completed core output withou
         audioPath: path.join(temporaryRoot, 'uploads', 'already-cleaned.wav'),
         transcriptPath: path.join(temporaryRoot, 'uploads', 'already-cleaned.json')
     }), result);
+});
+
+test('workspace retry preserves the verified translate_burmese core resume stage', async () => {
+    const jobId = '33333333-3333-4333-8333-333333333333';
+    const directory = path.join(temporaryRoot, 'uploads', 'workspace', jobId);
+    const cache = path.join(temporaryRoot, 'cache', jobId);
+    fs.mkdirSync(directory, { recursive: true });
+    fs.mkdirSync(cache, { recursive: true });
+    const videoPath = path.join(directory, 'source.mp4');
+    const audioPath = path.join(directory, 'audio.wav');
+    fs.writeFileSync(videoPath, 'video');
+    fs.writeFileSync(audioPath, 'audio');
+    fs.writeFileSync(path.join(cache, 'state.json'), JSON.stringify({
+        workflowVersion: 2,
+        stageId: 'translate_burmese',
+        originalTranscript: [{ timestamp: [0, 1], text: 'hello' }]
+    }));
+    createJob(jobId, { ownerUid: 'owner', videoPath, audioPath });
+    updateJob(jobId, {
+        status: 'error', stageId: 'translate_burmese', progress: 30,
+        retryable: true, resumeStage: 'translate_burmese', error: 'quota'
+    });
+    let observedStage = null;
+    await assert.rejects(continueWithCorePipeline({
+        job: { id: jobId, ownerUid: 'owner', storedPath: videoPath },
+        audioPath,
+        transcriptPath: path.join(directory, 'unused.json'),
+        runPipeline: async id => {
+            observedStage = getJob(id).stageId;
+            throw new Error('stop after observing resume stage');
+        }
+    }), /stop after observing resume stage/);
+    assert.equal(observedStage, 'translate_burmese');
+    assert.equal(getJob(jobId).stageId, 'translate_burmese');
 });

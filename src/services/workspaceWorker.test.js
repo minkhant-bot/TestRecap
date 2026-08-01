@@ -16,6 +16,7 @@ const {
     getWorkspaceJob,
     getWorkspaceJobInternal,
     queueWorkspaceJob,
+    retryFailedWorkspaceJob,
     requestWorkspaceJobCancellation,
     updateWorkspaceJobEffects
 } = await import('./workspaceJobs.js');
@@ -74,6 +75,7 @@ test('persistent worker processes FIFO with concurrency one and backend progress
     const worker = new WorkspaceWorker({
         workerId: 'fifo-worker',
         pollIntervalMs: 5,
+        validateOutput: () => true,
         executeStage: async ({ job, reportProgress }) => {
             active += 1;
             peak = Math.max(peak, active);
@@ -245,6 +247,7 @@ test('workspace worker mirrors every restored core stage and exposes both comple
     const worker = new WorkspaceWorker({
         workerId: 'restored-core-worker',
         pollIntervalMs: 5,
+        validateOutput: () => true,
         executeStage: async ({ job: activeJob }) => ({
             audioPath: path.join(path.dirname(activeJob.storedPath), 'audio.wav'),
             audioDuration: 2
@@ -332,6 +335,7 @@ test('startup recovers a persistently locked job after a crash', async () => {
     const worker = new WorkspaceWorker({
         workerId: 'recovery-worker',
         pollIntervalMs: 5,
+        validateOutput: () => true,
         executeStage: async () => {},
         translateStage: async () => {},
         coreStage: async ({ job: activeJob }) => ({
@@ -359,6 +363,7 @@ test('live worker requires a lease, resumes validated checkpoints, and settles a
     const worker = new WorkspaceWorker({
         workerId: 'live-recovery-worker',
         pollIntervalMs: 5,
+        validateOutput: () => true,
         liveBillingEnabled: () => true,
         billing: {
             acquireLease: async () => {
@@ -416,7 +421,7 @@ test('worker records a safe terminal failure and no automatic retry', async () =
     const failed = getWorkspaceJob(job.id, ownerUid);
     assert.ok(failed.failedAt);
     assert.equal(failed.error, 'Audio could not be extracted from this video.');
-    assert.deepEqual(failed.retry, { attempts: 0, maxAttempts: 0, lastAttemptAt: failed.startedAt });
+    assert.deepEqual(failed.retry, { attempts: 0, maxAttempts: 0, lastAttemptAt: failed.startedAt, resumeStage: null });
 });
 
 test('Gemini failure preserves structured diagnostics while public error remains friendly', async () => {
@@ -470,6 +475,49 @@ test('Gemini failure preserves structured diagnostics while public error remains
     assert.equal(internalFailure.diagnostic.requestModel, 'example-flash');
     assert.equal(internalFailure.diagnostic.requestTimeoutMs, 120000);
     assert.equal(internalFailure.diagnostic.retryAttempt, 1);
+});
+
+test('manual retry preserves validated workspace artifacts and resumes core work', async () => {
+    clearWorkspaceJobsForTests();
+    const job = createPending('manual-retry.mp4');
+    queueWorkspaceJob(job.id, ownerUid);
+    const directory = path.dirname(getWorkspaceJobInternal(job.id).storedPath);
+    const audioPath = path.join(directory, 'audio.wav');
+    const transcriptPath = path.join(directory, 'transcript.json');
+    const first = new WorkspaceWorker({
+        workerId: 'manual-retry-first', pollIntervalMs: 5,
+        executeStage: async () => {
+            fs.writeFileSync(audioPath, 'audio');
+            return { audioPath, audioDuration: 1 };
+        },
+        translateStage: async () => {
+            fs.writeFileSync(transcriptPath, JSON.stringify({ segments: [{}] }));
+            return { transcriptPath, segmentCount: 1 };
+        },
+        coreStage: async () => { throw new Error('temporary core failure'); }
+    });
+    first.start();
+    await waitFor(() => getWorkspaceJob(job.id, ownerUid)?.status === 'failed');
+    await first.stop();
+    assert.equal(getWorkspaceJobInternal(job.id).audioPath, audioPath);
+    assert.equal(getWorkspaceJobInternal(job.id).transcriptPath, transcriptPath);
+
+    retryFailedWorkspaceJob(job.id, ownerUid, {
+        idempotencyKey: 'manual-retry-key', resumeStage: 'generate_tts', resumeProgress: 35
+    });
+    const second = new WorkspaceWorker({
+        workerId: 'manual-retry-second', pollIntervalMs: 5,
+        validateOutput: () => true,
+        executeStage: async () => { throw new Error('audio checkpoint was not reused'); },
+        translateStage: async () => { throw new Error('transcript checkpoint was not reused'); },
+        coreStage: async ({ job: activeJob }) => ({ videoUrl: `/output/${activeJob.id}.mp4` }),
+        finalEffectsStage: async () => undefined
+    });
+    second.start();
+    await waitFor(() => getWorkspaceJob(job.id, ownerUid)?.status === 'completed');
+    await second.stop();
+    assert.equal(getWorkspaceJob(job.id, ownerUid).retry.attempts, 1);
+    assert.equal(getWorkspaceJob(job.id, ownerUid).retry.resumeStage, 'generate_tts');
 });
 
 test('Gemini SDK JSON embedded in error.message is retained as the provider response', () => {

@@ -1,6 +1,6 @@
 import { useState } from 'react';
 import { Navigate } from 'react-router-dom';
-import { Film, ShieldCheck } from 'lucide-react';
+import { ShieldCheck, Sparkles } from 'lucide-react';
 import { useAuth } from '../../auth/AuthProvider';
 import { Button } from '../components';
 
@@ -45,20 +45,22 @@ export function LoginPage() {
 
   return (
     <main className="ds-login">
-      <section className="ds-login__story" aria-label="TestRecap အကြောင်း">
-        <div className="ds-login__brand"><span>T</span><strong>TestRecap</strong></div>
+      <section className="ds-login__story" aria-label="Blink Automation အကြောင်း">
+        <div className="ds-login__brand"><span>B</span><strong>Blink Automation</strong></div>
         <div>
-          <span className="ds-login__eyebrow"><Film size={15} /> AI ရုပ်ရှင် Recap စတူဒီယို</span>
-          <h1>မြန်မာဘာသာဖြင့် AI ရုပ်ရှင် Recap များ။</h1>
+          <span className="ds-login__eyebrow"><Sparkles size={15} /> AI recap studio</span>
+          <h1>Burmese-narrated movie recaps, generated end to end.</h1>
+          <p>ဗီဒီယိုတစ်ခုတင်ပြီး စာသားဖော်ထုတ်ခြင်း၊ ဘာသာပြန်ခြင်း၊ အသံဖန်တီးခြင်း၊ timeline နှင့် export အထိ Blink မှ လုပ်ဆောင်ပေးပါသည်။</p>
         </div>
         <small>သီးသန့်အလုပ်နေရာ · လုံခြုံသော ဆာဗာ Session</small>
       </section>
 
       <section className="ds-login__access">
-        <div className="ds-login-card">
+        <div className="ds-login-card" aria-busy={loading || submitting}>
           <span className="ds-login-card__icon"><ShieldCheck size={22} /></span>
           <span className="ds-login-card__eyebrow">လုံခြုံစွာ ဝင်ရောက်ရန်</span>
-          <h2>TestRecap မှ ကြိုဆိုပါတယ်</h2>
+          <h2>Blink မှ ကြိုဆိုပါတယ်</h2>
+          <p>Google အကောင့်ဖြင့်သာ ဝင်ရောက်နိုင်ပြီး Blink အတွက် သီးခြား password မလိုအပ်ပါ။</p>
 
           {(configurationError || sessionError || error) && (
             <div className="ds-login-card__error" role="alert">
@@ -71,15 +73,15 @@ export function LoginPage() {
             variant="secondary"
             size="lg"
             icon={<GoogleMark />}
-            loading={submitting}
-            disabled={Boolean(configurationError)}
+            loading={loading || submitting}
+            disabled={loading || Boolean(configurationError)}
             onClick={login}
           >
             Google ဖြင့် ဆက်လုပ်မည်
           </Button>
 
           <p className="ds-login-card__legal">
-            ဆက်လုပ်ခြင်းဖြင့် ဝန်ဆောင်မှုစည်းမျဉ်းများနှင့် ကိုယ်ရေးအချက်အလက်မူဝါဒကို သဘောတူပါသည်။
+            Firebase Authentication ဖြင့် လုံခြုံစွာ ဝင်ရောက်ပါမည်။
           </p>
         </div>
       </section>

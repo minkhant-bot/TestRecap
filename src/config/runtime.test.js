@@ -19,6 +19,7 @@ test('DATA_DIR preserves local paths when absent and contains Railway artifacts 
     assert.deepEqual(getStoragePaths({}, projectRoot), {
         root: projectRoot,
         uploads: path.join(projectRoot, 'src', 'tmp'),
+        paymentProofs: path.join(projectRoot, 'data', 'payment-proofs'),
         cache: path.join(projectRoot, 'data', 'cache'),
         output: path.join(projectRoot, 'public', 'output'),
         settings: path.join(projectRoot, 'data')
@@ -26,6 +27,7 @@ test('DATA_DIR preserves local paths when absent and contains Railway artifacts 
     assert.deepEqual(getStoragePaths({ DATA_DIR: '/data' }, projectRoot), {
         root: '/data',
         uploads: '/data/uploads',
+        paymentProofs: '/data/payment-proofs',
         cache: '/data/cache',
         output: '/data/output',
         settings: '/data'

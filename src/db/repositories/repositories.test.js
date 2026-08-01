@@ -3,6 +3,8 @@ import test from 'node:test';
 import { ensureUser, findUserByFirebaseUid } from './users.js';
 import { assignRole } from './roles.js';
 import { insertLedgerEntry } from './ledger.js';
+import { listCreditPlans } from './billing.js';
+import { insertAuditLog } from './auditLogs.js';
 
 test('user lookup uses a parameterized query and stable mapping', async () => {
   const calls = [];
@@ -80,4 +82,37 @@ test('identity synchronization never silently reactivates a disabled PostgreSQL 
   };
   const user = await ensureUser({ firebaseUid: 'firebase-id' }, { client });
   assert.equal(user.status, 'disabled');
+});
+
+test('normal package reads query only active non-archived packages in display order', async () => {
+  const client = {
+    async query(sql, values) {
+      assert.match(sql, /active=true AND archived_at IS NULL/);
+      assert.match(sql, /ORDER BY display_order,code/);
+      assert.deepEqual(values, [null, false]);
+      return { rows: [] };
+    },
+  };
+  assert.deepEqual(await listCreditPlans({ client }), []);
+});
+
+test('audit JSON parameters serialize objects and arrays explicitly for PostgreSQL jsonb', async () => {
+  const client = {
+    async query(_sql, values) {
+      assert.equal(values[8], JSON.stringify([{ id: 'before' }]));
+      assert.equal(values[9], JSON.stringify({ id: 'after' }));
+      assert.equal(values[10], JSON.stringify({ source: 'test' }));
+      return { rows: [{
+        id: values[0], occurred_at: new Date(0), actor_service: 'test',
+        event_type: 'package.reordered', resource_type: 'credit_plan',
+        before_state: [{ id: 'before' }], after_state: { id: 'after' },
+        metadata: { source: 'test' },
+      }] };
+    },
+  };
+  const event = await insertAuditLog({
+    actorService: 'test', eventType: 'package.reordered', resourceType: 'credit_plan',
+    beforeState: [{ id: 'before' }], afterState: { id: 'after' }, metadata: { source: 'test' },
+  }, { client, id: 'audit-id' });
+  assert.deepEqual(event.beforeState, [{ id: 'before' }]);
 });

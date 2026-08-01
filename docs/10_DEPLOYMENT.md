@@ -1,5 +1,10 @@
 # Deployment
 
+> Current staging truth: Railway Hobby is active; duplicated Staging points to
+> old/main and is not deploy-ready. Keep auto-deploy off, do not deploy old code,
+> and provision separate staging PostgreSQL without blindly reusing production
+> database, volume, or secrets. See `18_PRODUCT_OWNER_DECISIONS_2026-08-01.md`.
+
 ## Purpose
 
 Explain current local development and Railway/Docker production deployment, required configuration, persistent storage, health checks, and operational constraints.
@@ -18,8 +23,10 @@ Explain current local development and Railway/Docker production deployment, requ
 
 ### Planned or Placeholder
 
-- P2 requires managed PostgreSQL and private durable object storage under the architecture in `17_P2_FOUNDATION_ARCHITECTURE.md`; neither is provisioned or verified.
-- Payment screenshots must not rely on the Railway local filesystem or be stored as PostgreSQL blobs.
+- P2 requires managed PostgreSQL and durable private payment-proof storage;
+  neither is provisioned or verified on Railway. The implemented single-replica
+  adapter stores proofs on the mounted `DATA_DIR` volume, never the ephemeral
+  application filesystem or PostgreSQL blobs.
 - Automated CI/CD gates, migrations, backup/restore, an observability backend, and multi-worker deployment are absent recommendations, not implemented placeholders.
 
 ### Known Issues
@@ -76,6 +83,8 @@ Default local binding: `http://0.0.0.0:3000`.
 
 - `DATA_DIR=/data`
 - `MAX_UPLOAD_SIZE_MB=<positive integer>`
+- Optional `PAYMENT_PROOF_MAX_SIZE_MB` (integer 1–25, default 10); private proofs
+  are stored below `DATA_DIR/payment-proofs`
 - `PROCESSING_USAGE_LIMIT`, `PROCESSING_USAGE_WINDOW_MS`, `MUTATION_RATE_LIMIT`, and `MUTATION_RATE_WINDOW_MS` (all required positive bounded integers in production)
 - Optional `ADMISSION_STORE_PATH`; otherwise admission state is stored under `DATA_DIR`
 - Firebase web: `FIREBASE_PROJECT_ID`, `FIREBASE_WEB_API_KEY`, `FIREBASE_AUTH_DOMAIN`, `FIREBASE_APP_ID`
@@ -104,7 +113,20 @@ there is no destructive rollback command.
 
 ### Persistent volume
 
-Railway must mount a volume at `/data`. Losing it loses job and admission records, encryption key, encrypted credentials, uploads, caches, and outputs.
+Railway must mount a volume at `/data`. Losing it loses job and admission records, encryption key, encrypted credentials, uploads, private payment proofs, caches, and outputs. Staging and production must use separate databases and separate volumes/`DATA_DIR` roots.
+
+Back up PostgreSQL and `DATA_DIR/payment-proofs` as one operational recovery set.
+Restore both to a consistent recovery point: PostgreSQL contains only the opaque
+proof reference and integrity metadata, while the volume contains the binary.
+Missing binaries return an explicit unavailable response without deleting the
+historical purchase or ledger record.
+
+Uploads use atomic temporary files. Startup removes only abandoned `.tmp` files
+older than 24 hours. If storage, database completion, or purchase association
+fails, the pending metadata and any completed opaque binary are retained so the
+same idempotency key can retry safely; cleanup never deletes verified proof
+binaries, purchases, or ledger history. Operators should reconcile retained
+pending records rather than deleting financial history.
 
 ### Health and shutdown
 
@@ -141,7 +163,8 @@ valid only when the variable and Railway volume mount are deliberately identical
 - Blink requires exactly one Railway replica; the live staging replica count is not yet verified.
 - Configure at least one reviewed bootstrap super-admin UID before first administrative use.
 - P2 deployment must use a one-time protected PostgreSQL bootstrap transaction and then disable temporary bootstrap configuration; permanent email comparisons are forbidden.
-- PostgreSQL and object-storage backups/restores must be tested before financial activation.
+- PostgreSQL and private proof-volume backups/restores must be tested together
+  before financial activation.
 - The Whisper model is downloaded during image build, not per job.
 - Application code runs as non-root.
 - Production serves the built `dist` SPA from Express.

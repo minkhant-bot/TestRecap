@@ -1,5 +1,9 @@
 # UI and UX
 
+> Final redesign is pending. Do not add blur, subtitle-position, font, or color
+> controls; developer state/role/screen controls are prototype-only. See
+> `18_PRODUCT_OWNER_DECISIONS_2026-08-01.md`.
+
 ## Purpose
 
 Describe the current routes, navigation, screens, interaction rules, responsiveness, and user feedback.
@@ -34,6 +38,9 @@ Describe the current routes, navigation, screens, interaction rules, responsiven
 - History polls every three seconds even when no jobs are active.
 - Normal users and super-admins receive different navigation. Current Firebase-claim roles are hardened; approved P2 migration to PostgreSQL role authority remains unimplemented.
 - Some duplicate loading/error patterns exist across pages.
+- Browser metadata provides immediate over-15-minute feedback, but real
+  near-15-minute end-to-end processing remains unverified. Backend enforcement
+  is authoritative if metadata is missing or a client bypasses the UI.
 
 ## Architecture/Flow
 

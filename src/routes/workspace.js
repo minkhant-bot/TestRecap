@@ -4,7 +4,11 @@ import path from 'node:path';
 import multer from 'multer';
 import { randomUUID } from 'node:crypto';
 import { ensureStoragePaths, getStoragePaths } from '../config/runtime.js';
-import { getUploadConfiguration } from '../config/upload.js';
+import {
+    getUploadConfiguration,
+    validateSourceVideoDuration,
+    VIDEO_TOO_LONG_MESSAGE
+} from '../config/upload.js';
 import {
     createWorkspaceJob,
     getWorkspaceJob,
@@ -13,6 +17,7 @@ import {
     getWorkspaceQueue,
     listWorkspaceJobs,
     queueWorkspaceJob,
+    retryFailedWorkspaceJob,
     requestWorkspaceJobCancellation,
     updateWorkspaceJobEffects,
     updateWorkspaceJobBilling
@@ -21,6 +26,11 @@ import { deleteWorkspaceJobEverywhere } from '../services/workspaceJobDeletion.j
 import { publishWorkspaceEvent, subscribeToWorkspaceJob } from '../services/workspaceEvents.js';
 import { publishQueuePositions, workspaceWorker } from '../services/workspaceWorker.js';
 import { setJobKeys } from '../services/jobManager.js';
+import {
+    inspectWorkspaceRetry,
+    requireRecoverableWorkspaceRetry,
+    WorkspaceRetryError
+} from '../services/workspaceRetry.js';
 import { verifyGeminiApiKey } from '../services/geminiKeyVerification.js';
 import {
     deleteUserGeminiApiKey,
@@ -62,12 +72,6 @@ const isSupportedVideo = file => {
     return validType && getUploadConfiguration().supportedExtensions.includes(extension);
 };
 
-const parseDuration = raw => {
-    if (raw === undefined || raw === null || raw === '') return null;
-    const duration = Number(raw);
-    return Number.isFinite(duration) && duration > 0 ? duration : null;
-};
-
 const sendQuotaExceeded = (res, quota) => res.status(429).json({
     error: `You can have at most ${quota.activeJobLimit} active recap projects.`,
     code: 'ACTIVE_JOB_QUOTA_EXCEEDED',
@@ -81,7 +85,10 @@ export const createWorkspaceRouter = ({
     readSourceDuration = getDuration,
     liveBillingEnabled = isLiveJobBillingEnabled,
     reserveBilling = reserveLiveJob,
-    releaseBilling = releaseLiveJob
+    releaseBilling = releaseLiveJob,
+    worker = workspaceWorker,
+    publishQueue = publishQueuePositions,
+    resolveGeminiKey = uid => getUserGeminiApiKey(uid) || process.env.GEMINI_API_KEY
 } = {}) => {
     const router = express.Router();
     const admitMutation = endpoint => createMutationAdmissionMiddleware(admission, endpoint);
@@ -95,6 +102,7 @@ export const createWorkspaceRouter = ({
             configured: true,
             maxUploadSizeMb: config.maxMegabytes,
             maxUploadSizeBytes: config.maxBytes,
+            maxSourceDurationSeconds: config.maxSourceDurationSeconds,
             supportedExtensions: config.supportedExtensions
         });
     });
@@ -157,14 +165,14 @@ export const createWorkspaceRouter = ({
     });
 
     router.get('/queue', (req, res) => {
-        const worker = workspaceWorker.snapshot();
+        const workerSnapshot = worker.snapshot();
         res.json({
             concurrency: 1,
             worker: {
-                ...worker,
-                activeJobId: worker.activeJobId &&
-                    getWorkspaceJob(worker.activeJobId, req.user.uid)
-                    ? worker.activeJobId
+                ...workerSnapshot,
+                activeJobId: workerSnapshot.activeJobId &&
+                    getWorkspaceJob(workerSnapshot.activeJobId, req.user.uid)
+                    ? workerSnapshot.activeJobId
                     : null
             },
             jobs: getWorkspaceQueue(req.user.uid)
@@ -178,9 +186,118 @@ export const createWorkspaceRouter = ({
         return res.json({ ...job, queuePosition: queued?.position ?? null });
     });
 
+    router.get('/jobs/:jobId/retry', (req, res) => {
+        const job = getWorkspaceJob(req.params.jobId, req.user.uid);
+        if (!job) return res.status(404).json({
+            error: 'Project not found.', code: 'NOT_FOUND'
+        });
+        return res.json(inspectWorkspaceRetry(getWorkspaceJobInternal(req.params.jobId)));
+    });
+
+    router.post('/jobs/:jobId/retry', admitMutation('workspace.jobs.retry'), async (req, res) => {
+        const idempotencyKey = String(req.get('Idempotency-Key') || '').trim();
+        try {
+            const job = getWorkspaceJob(req.params.jobId, req.user.uid);
+            if (!job) return res.status(404).json({
+                error: 'Project not found.', code: 'NOT_FOUND'
+            });
+            if (['queued', 'processing'].includes(job.status)) {
+                const duplicate = retryFailedWorkspaceJob(req.params.jobId, req.user.uid, {
+                    idempotencyKey,
+                    resumeStage: job.retry?.resumeStage || 'queued',
+                    resumeProgress: job.progress
+                });
+                return res.status(duplicate.replayed ? 200 : 409).json({
+                    status: duplicate.replayed ? 'duplicate' : 'already_active',
+                    replayed: duplicate.replayed,
+                    code: duplicate.replayed ? 'RETRY_IDEMPOTENT_REPLAY' : 'JOB_ALREADY_ACTIVE',
+                    resumeStage: duplicate.job.retry?.resumeStage || null,
+                    job: duplicate.job
+                });
+            }
+            if (job.status !== 'failed') {
+                retryFailedWorkspaceJob(req.params.jobId, req.user.uid, {
+                    idempotencyKey, resumeStage: 'none'
+                });
+            }
+            const internal = getWorkspaceJobInternal(req.params.jobId);
+            const eligibility = requireRecoverableWorkspaceRetry(internal);
+            validateSourceVideoDuration(await readSourceDuration(internal.storedPath));
+            const geminiApiKey = resolveGeminiKey(req.user.uid);
+            if (!geminiApiKey) {
+                return res.status(422).json({
+                    error: 'A verified Gemini API key is required to retry this project.',
+                    code: 'BYOK_REQUIRED'
+                });
+            }
+            const result = admission.withProcessingAdmission(
+                req.user.uid,
+                req.params.jobId,
+                () => retryFailedWorkspaceJob(req.params.jobId, req.user.uid, {
+                    idempotencyKey,
+                    resumeStage: eligibility.resumeStage,
+                    resumeProgress: eligibility.resumeProgress
+                })
+            );
+            setJobKeys(req.params.jobId, { geminiApiKey });
+            publishWorkspaceEvent(req.params.jobId, 'job.retry_accepted', {
+                ...result.job,
+                resumeStage: eligibility.resumeStage,
+                replayed: result.replayed
+            });
+            publishQueue();
+            worker.wake();
+            return res.status(result.replayed ? 200 : 202).json({
+                status: result.replayed ? 'duplicate' : 'accepted',
+                replayed: result.replayed,
+                code: result.replayed ? 'RETRY_IDEMPOTENT_REPLAY' : 'RETRY_ACCEPTED',
+                resumeStage: eligibility.resumeStage,
+                job: result.job
+            });
+        } catch (error) {
+            if (sendAdmissionError(res, error, req.requestId)) return;
+            if (error instanceof WorkspaceRetryError) {
+                return res.status(error.status).json({ error: error.message, code: error.code });
+            }
+            if (error?.code === 'ACTIVE_JOB_QUOTA_EXCEEDED') {
+                return sendQuotaExceeded(res, error.quota);
+            }
+            const statusByCode = {
+                IDEMPOTENCY_KEY_REQUIRED: 400,
+                JOB_ALREADY_ACTIVE: 409,
+                JOB_NOT_FAILED: 409
+            };
+            if (statusByCode[error?.code]) {
+                return res.status(statusByCode[error.code]).json({
+                    error: error.message, code: error.code
+                });
+            }
+            if (error?.code === 'SOURCE_VIDEO_TOO_LONG') {
+                return res.status(422).json({ error: VIDEO_TOO_LONG_MESSAGE, code: error.code });
+            }
+            if (error?.code === 'INVALID_SOURCE_VIDEO_DURATION') {
+                return res.status(422).json({ error: error.message, code: error.code });
+            }
+            console.error('[Workspace retry] request failed', {
+                requestId: req.requestId,
+                jobId: req.params.jobId,
+                message: error?.message
+            });
+            return res.status(500).json({
+                error: 'Project retry could not be requested.', code: 'RETRY_FAILED'
+            });
+        }
+    });
+
     router.post('/jobs/:jobId/queue', admitMutation('workspace.jobs.queue'), async (req, res) => {
         let reserved = false;
         try {
+            const existing = getWorkspaceJob(req.params.jobId, req.user.uid);
+            if (!existing) return res.status(404).json({ error: 'Project not found.' });
+            const internal = getWorkspaceJobInternal(req.params.jobId);
+            const sourceDurationSeconds = validateSourceVideoDuration(
+                await readSourceDuration(internal.storedPath)
+            );
             console.info('[Blink effects]', JSON.stringify({
                 boundary: 'queue.received',
                 jobId: req.params.jobId,
@@ -237,8 +354,6 @@ export const createWorkspaceRouter = ({
                 effects: configured.effects
             }));
             if (liveBilling) {
-                const internal = getWorkspaceJobInternal(req.params.jobId);
-                const sourceDurationSeconds = await readSourceDuration(internal.storedPath);
                 const result = await reserveBilling({
                     identity: req.user, jobId: internal.id, sourceDurationSeconds,
                     requestedPlanCode, requestedMode,
@@ -256,8 +371,8 @@ export const createWorkspaceRouter = ({
             if (!job) return res.status(404).json({ error: 'Project not found.' });
             setJobKeys(job.id, { geminiApiKey });
             publishWorkspaceEvent(job.id, 'job.queued', job);
-            publishQueuePositions();
-            workspaceWorker.wake();
+            publishQueue();
+            worker.wake();
             const queued = getWorkspaceQueue(req.user.uid).find(item => item.id === job.id);
             return res.status(202).json({ ...job, queuePosition: queued?.position ?? null });
         } catch (error) {
@@ -281,6 +396,12 @@ export const createWorkspaceRouter = ({
             if (error?.code === 'INVALID_JOB_STATE') {
                 return res.status(409).json({ error: error.message });
             }
+            if (error?.code === 'SOURCE_VIDEO_TOO_LONG') {
+                return res.status(422).json({ error: VIDEO_TOO_LONG_MESSAGE, code: error.code });
+            }
+            if (error?.code === 'INVALID_SOURCE_VIDEO_DURATION') {
+                return res.status(422).json({ error: error.message, code: error.code });
+            }
             if (error?.name === 'BillingError') {
                 return res.status(error.status).json({ error: error.message, code: error.code });
             }
@@ -292,7 +413,7 @@ export const createWorkspaceRouter = ({
         try {
             const result = requestWorkspaceJobCancellation(req.params.jobId, req.user.uid);
             if (!result) return res.status(404).json({ error: 'Project not found.' });
-            if (result.interruptWorker) workspaceWorker.cancel(req.params.jobId);
+            if (result.interruptWorker) worker.cancel(req.params.jobId);
             if (!result.interruptWorker && liveBillingEnabled() && result.job.billing) {
                 const billing = await releaseBilling(req.params.jobId, 'job_cancelled_before_start');
                 result.job = updateWorkspaceJobBilling(
@@ -304,7 +425,7 @@ export const createWorkspaceRouter = ({
                 result.interruptWorker ? 'job.cancellation_requested' : 'job.cancelled',
                 result.job
             );
-            publishQueuePositions();
+            publishQueue();
             return res.status(202).json(result.job);
         } catch (error) {
             if (error?.code === 'INVALID_JOB_STATE') {
@@ -420,6 +541,23 @@ export const createWorkspaceRouter = ({
                 return res.status(415).json({ error: 'This video format is not supported.' });
             }
 
+            let sourceDurationSeconds;
+            try {
+                sourceDurationSeconds = validateSourceVideoDuration(await readSourceDuration(file.path));
+            } catch (durationError) {
+                removeIfPresent(file.path);
+                if (durationError?.code === 'SOURCE_VIDEO_TOO_LONG') {
+                    return res.status(422).json({
+                        error: VIDEO_TOO_LONG_MESSAGE,
+                        code: durationError.code
+                    });
+                }
+                return res.status(422).json({
+                    error: 'Video duration could not be verified.',
+                    code: 'INVALID_SOURCE_VIDEO_DURATION'
+                });
+            }
+
             const liveBilling = liveBillingEnabled();
             const geminiApiKey = liveBilling ? null : req.body?.geminiApiKey ||
                 getUserGeminiApiKey(req.user.uid) || process.env.GEMINI_API_KEY;
@@ -447,7 +585,7 @@ export const createWorkspaceRouter = ({
                     ownerUid: req.user.uid,
                     filename: file.originalname,
                     fileSize: file.size,
-                    duration: parseDuration(req.body.duration),
+                    duration: sourceDurationSeconds,
                     storedPath
                 });
                 if (geminiApiKey) setJobKeys(job.id, { geminiApiKey });

@@ -21,6 +21,11 @@ const ENTITLEMENT_KEYS = new Set([
 ]);
 const PURCHASE_STATES = new Set(['pending', 'approved', 'rejected']);
 const TRIAL_DECISIONS = new Set(['eligible', 'ineligible', 'review_required']);
+const PAYMENT_PROOF_EXTENSIONS = new Map([
+  ['image/jpeg', 'jpg'],
+  ['image/png', 'png'],
+  ['image/webp', 'webp'],
+]);
 
 export class BillingError extends Error {
   constructor(message, { code = 'BILLING_ERROR', status = 400 } = {}) {
@@ -50,6 +55,22 @@ const text = (value, name, { max = 500, optional = false } = {}) => {
   if (normalized.length > max) fail(`${name} is too long.`, 'INVALID_INPUT');
   return normalized;
 };
+const displayOrder = value => {
+  const normalized = Number(integer(value ?? 0, 'displayOrder'));
+  if (!Number.isSafeInteger(normalized)) fail('displayOrder is too large.', 'INVALID_INPUT');
+  return normalized;
+};
+const requireConfirmation = input => {
+  if (input?.confirmed !== true) {
+    fail('Package change confirmation is required.', 'CONFIRMATION_REQUIRED', 422);
+  }
+};
+const currencyCode = value => {
+  const normalized = text(value, 'currency', { max: 3 }).toUpperCase();
+  if (!/^[A-Z]{3}$/.test(normalized)) fail('currency must be a three-letter code.', 'INVALID_INPUT');
+  return normalized;
+};
+const packagePrice = input => integer(input?.price ?? input?.priceMinor, 'price', { min: 1 });
 const isoDate = (value, name, { optional = false } = {}) => {
   if ((value === null || value === undefined || value === '') && optional) return null;
   const date = new Date(value);
@@ -386,6 +407,12 @@ export const createScreenshotIntent = async (identity, input, {
   const sizeBytes = integer(input?.sizeBytes, 'sizeBytes', { min: 1 });
   const sha256 = text(input?.sha256, 'sha256', { max: 64 }).toLowerCase();
   if (!/^[0-9a-f]{64}$/.test(sha256)) fail('sha256 must be lowercase hexadecimal.', 'INVALID_INPUT');
+  if (!configuration.paymentProofMimeTypes.includes(mimeType)) {
+    fail('Payment proof must be a JPEG, PNG, or WebP image.', 'PROOF_TYPE_UNSUPPORTED', 415);
+  }
+  if (sizeBytes > BigInt(configuration.paymentProofMaxBytes)) {
+    fail('Payment proof exceeds the configured size limit.', 'PROOF_TOO_LARGE', 413);
+  }
   return idempotent({
     actorScope: `firebase:${identity.uid}`,
     operation: 'screenshot.intent',
@@ -396,7 +423,8 @@ export const createScreenshotIntent = async (identity, input, {
       const actor = await ensureActor(identity, { client, deps });
       const id = randomUUID();
       const now = new Date();
-      const objectKey = `payment-screenshots/${actor.user.id}/${now.getUTCFullYear()}/${String(now.getUTCMonth() + 1).padStart(2, '0')}/${id}`;
+      const extension = PAYMENT_PROOF_EXTENSIONS.get(mimeType);
+      const objectKey = `payment-proofs/${actor.user.id}/${now.getUTCFullYear()}/${String(now.getUTCMonth() + 1).padStart(2, '0')}/${id}.${extension}`;
       const file = await deps.billing.insertScreenshotMetadata({
         id, userId: actor.user.id, storageProvider: configuration.storageProvider,
         bucket: configuration.storageBucket, objectKey, originalFilename, mimeType,
@@ -419,6 +447,50 @@ export const createScreenshotIntent = async (identity, input, {
           uploadUrl: null,
         },
       };
+    },
+  }, { deps });
+};
+
+export const completeScreenshotUpload = async (identity, id, input, {
+  env = process.env, idempotencyKey, deps = dependencies,
+} = {}) => {
+  requireEnabled(env);
+  const request = {
+    id: text(id, 'screenshot id', { max: 50 }),
+    mimeType: text(input?.mimeType, 'mimeType', { max: 100 }),
+    sizeBytes: integer(input?.sizeBytes, 'sizeBytes', { min: 1 }),
+    sha256: text(input?.sha256, 'sha256', { max: 64 }).toLowerCase(),
+  };
+  return idempotent({
+    actorScope: `firebase:${identity.uid}`,
+    operation: 'screenshot.upload.complete',
+    idempotencyKey,
+    request,
+    resourceType: 'uploaded_file',
+    work: async client => {
+      const actor = await ensureActor(identity, { client, deps });
+      const current = await deps.billing.findScreenshotMetadata(request.id, { client, forUpdate: true });
+      if (!current || current.owner_user_id !== actor.user.id) {
+        fail('Payment proof not found.', 'NOT_FOUND', 404);
+      }
+      if (current.status !== 'pending') {
+        fail('Payment proof upload is already complete or unavailable.', 'PROOF_ALREADY_COMPLETED', 409);
+      }
+      if (current.mime_type !== request.mimeType ||
+          bigint(current.size_bytes) !== request.sizeBytes ||
+          current.sha256 !== request.sha256) {
+        fail('Stored proof metadata does not match the validated upload.', 'PROOF_METADATA_MISMATCH', 409);
+      }
+      const file = await deps.billing.verifyScreenshotMetadata(request.id, { client });
+      await deps.audit.insertAuditLog({
+        actorUserId: actor.user.id,
+        eventType: 'payment_screenshot.upload.completed',
+        resourceType: 'uploaded_file',
+        resourceId: request.id,
+        beforeState: { status: 'pending' },
+        afterState: { status: 'verified', mimeType: request.mimeType, sizeBytes: String(request.sizeBytes) },
+      }, { client });
+      return { status: 200, resourceId: request.id, body: { file } };
     },
   }, { deps });
 };
@@ -502,6 +574,29 @@ export const getMyPurchase = async (identity, id, {
   const purchase = await deps.billing.findPurchase(id);
   if (!purchase || purchase.userId !== actor.user.id) fail('Purchase not found.', 'NOT_FOUND', 404);
   return purchase;
+};
+
+export const getMyScreenshotMetadata = async (identity, id, {
+  env = process.env, deps = dependencies,
+} = {}) => {
+  requireEnabled(env);
+  const actor = await ensureActor(identity, { deps });
+  const file = await deps.billing.findScreenshotMetadata(id);
+  if (!file || file.owner_user_id !== actor.user.id) {
+    fail('Payment proof not found.', 'NOT_FOUND', 404);
+  }
+  return {
+    id: file.id,
+    ownerUserId: file.owner_user_id,
+    objectKey: file.object_key,
+    originalFilename: file.original_filename,
+    mimeType: file.mime_type,
+    sizeBytes: bigint(file.size_bytes),
+    sha256: file.sha256,
+    status: file.status,
+    uploadedAt: file.uploaded_at,
+    verifiedAt: file.verified_at,
+  };
 };
 
 const withSuperAdminMutation = async (identity, {
@@ -735,26 +830,191 @@ export const createPlanPolicy = async (identity, planCode, input, options = {}) 
 
 export const configureCreditPlan = async (identity, input, options = {}) => {
   const { env = process.env, idempotencyKey, deps = dependencies } = options;
+  requireConfirmation(input);
   const request = {
     code: text(input?.code, 'code', { max: 50 }),
     name: text(input?.name, 'name', { max: 100 }),
     description: text(input?.description, 'description', { max: 1000, optional: true }),
     creditAmount: integer(input?.creditAmount, 'creditAmount', { min: 1 }),
     priceMinor: integer(input?.priceMinor, 'priceMinor', { min: 1 }),
-    currency: text(input?.currency, 'currency', { max: 3 }).toUpperCase(),
-    active: Boolean(input?.active), displayOrder: Number(input?.displayOrder || 0),
+    bonusCredits: integer(input?.bonusCredits ?? 0, 'bonusCredits'),
+    note: text(input?.note, 'note', { max: 1000, optional: true }) || null,
+    currency: currencyCode(input?.currency),
+    active: Boolean(input?.active), displayOrder: displayOrder(input?.displayOrder),
   };
-  if (!/^[A-Z]{3}$/.test(request.currency)) fail('currency must be a three-letter code.', 'INVALID_INPUT');
   return withSuperAdminMutation(identity, {
     env, idempotencyKey, operation: 'credit_plan.configure', request,
     resourceType: 'credit_plan', deps,
     work: async (client, actor) => {
       const plan = await deps.billing.upsertCreditPlan({ ...request, actorUserId: actor.user.id }, { client });
+      if (!plan) fail('Archived credit packages cannot be edited.', 'PACKAGE_ARCHIVED', 409);
       await deps.audit.insertAuditLog({
         actorUserId: actor.user.id, eventType: 'credit_plan.configured',
         resourceType: 'credit_plan', resourceId: plan.id, afterState: publicJson(request),
       }, { client });
       return { status: 200, resourceId: plan.id, body: { creditPlan: plan } };
+    },
+  });
+};
+
+export const createCreditPackage = async (identity, input, options = {}) => {
+  const { env = process.env, idempotencyKey, deps = dependencies } = options;
+  requireConfirmation(input);
+  const request = {
+    code: input?.code ? text(input.code, 'code', { max: 50 }) : null,
+    name: text(input?.name, 'name', { max: 100 }),
+    price: packagePrice(input),
+    creditAmount: integer(input?.creditAmount, 'creditAmount', { min: 1 }),
+    bonusCredits: integer(input?.bonusCredits ?? 0, 'bonusCredits'),
+    active: input?.active === true,
+    displayOrder: displayOrder(input?.displayOrder),
+    note: text(input?.note, 'note', { max: 1000, optional: true }) || null,
+    currency: currencyCode(input?.currency),
+  };
+  return withSuperAdminMutation(identity, {
+    env, idempotencyKey, operation: 'credit_package.create', request,
+    resourceType: 'credit_plan', deps,
+    work: async (client, actor) => {
+      const creditPackage = await deps.billing.insertCreditPackage({
+        ...request, actorUserId: actor.user.id,
+      }, { client });
+      await deps.audit.insertAuditLog({
+        actorUserId: actor.user.id, eventType: 'credit_package.created',
+        resourceType: 'credit_plan', resourceId: creditPackage.id,
+        afterState: publicJson(creditPackage),
+      }, { client });
+      return { status: 201, resourceId: creditPackage.id, body: { creditPackage } };
+    },
+  });
+};
+
+export const editCreditPackage = async (identity, id, input, options = {}) => {
+  const { env = process.env, idempotencyKey, deps = dependencies } = options;
+  requireConfirmation(input);
+  const patch = {};
+  if (Object.hasOwn(input || {}, 'name')) patch.name = text(input.name, 'name', { max: 100 });
+  if (Object.hasOwn(input || {}, 'price') || Object.hasOwn(input || {}, 'priceMinor')) {
+    patch.price = packagePrice(input);
+  }
+  if (Object.hasOwn(input || {}, 'creditAmount')) {
+    patch.creditAmount = integer(input.creditAmount, 'creditAmount', { min: 1 });
+  }
+  if (Object.hasOwn(input || {}, 'bonusCredits')) {
+    patch.bonusCredits = integer(input.bonusCredits, 'bonusCredits');
+  }
+  if (Object.hasOwn(input || {}, 'active')) {
+    if (typeof input.active !== 'boolean') fail('active must be boolean.', 'INVALID_INPUT');
+    patch.active = input.active;
+  }
+  if (Object.hasOwn(input || {}, 'displayOrder')) patch.displayOrder = displayOrder(input.displayOrder);
+  if (Object.hasOwn(input || {}, 'note')) {
+    patch.note = text(input.note, 'note', { max: 1000, optional: true }) || null;
+  }
+  if (Object.hasOwn(input || {}, 'currency')) patch.currency = currencyCode(input.currency);
+  if (!Object.keys(patch).length) fail('At least one package field is required.', 'INVALID_INPUT');
+  return withSuperAdminMutation(identity, {
+    env, idempotencyKey, operation: 'credit_package.edit', request: { id, patch },
+    resourceType: 'credit_plan', deps,
+    work: async (client, actor) => {
+      const before = await deps.billing.findCreditPackageById(id, { client, forUpdate: true });
+      if (!before) fail('Credit package not found.', 'NOT_FOUND', 404);
+      if (before.archivedAt) fail('Archived credit packages cannot be edited.', 'PACKAGE_ARCHIVED', 409);
+      const creditPackage = await deps.billing.updateCreditPackage(id, {
+        ...before, ...patch, actorUserId: actor.user.id,
+      }, { client });
+      await deps.audit.insertAuditLog({
+        actorUserId: actor.user.id, eventType: 'credit_package.updated',
+        resourceType: 'credit_plan', resourceId: id,
+        beforeState: publicJson(before), afterState: publicJson(creditPackage),
+      }, { client });
+      return { status: 200, resourceId: id, body: { creditPackage } };
+    },
+  });
+};
+
+export const setCreditPackageStatus = async (identity, id, active, input, options = {}) => {
+  const { env = process.env, idempotencyKey, deps = dependencies } = options;
+  requireConfirmation(input);
+  return withSuperAdminMutation(identity, {
+    env, idempotencyKey, operation: `credit_package.${active ? 'activate' : 'deactivate'}`,
+    request: { id, active }, resourceType: 'credit_plan', deps,
+    work: async (client, actor) => {
+      const before = await deps.billing.findCreditPackageById(id, { client, forUpdate: true });
+      if (!before) fail('Credit package not found.', 'NOT_FOUND', 404);
+      if (before.archivedAt) fail('Archived credit packages cannot be activated or deactivated.', 'PACKAGE_ARCHIVED', 409);
+      const creditPackage = await deps.billing.setCreditPackageActive(
+        id, active, actor.user.id, { client },
+      );
+      await deps.audit.insertAuditLog({
+        actorUserId: actor.user.id,
+        eventType: `credit_package.${active ? 'activated' : 'deactivated'}`,
+        resourceType: 'credit_plan', resourceId: id,
+        beforeState: publicJson(before), afterState: publicJson(creditPackage),
+      }, { client });
+      return { status: 200, resourceId: id, body: { creditPackage } };
+    },
+  });
+};
+
+export const archiveCreditPackage = async (identity, id, input, options = {}) => {
+  const { env = process.env, idempotencyKey, deps = dependencies } = options;
+  requireConfirmation(input);
+  return withSuperAdminMutation(identity, {
+    env, idempotencyKey, operation: 'credit_package.archive', request: { id },
+    resourceType: 'credit_plan', deps,
+    work: async (client, actor) => {
+      const before = await deps.billing.findCreditPackageById(id, { client, forUpdate: true });
+      if (!before) fail('Credit package not found.', 'NOT_FOUND', 404);
+      if (before.archivedAt) fail('Credit package is already archived.', 'PACKAGE_ARCHIVED', 409);
+      const creditPackage = await deps.billing.archiveCreditPackage(id, actor.user.id, { client });
+      await deps.audit.insertAuditLog({
+        actorUserId: actor.user.id, eventType: 'credit_package.archived',
+        resourceType: 'credit_plan', resourceId: id,
+        beforeState: publicJson(before), afterState: publicJson(creditPackage),
+      }, { client });
+      return { status: 200, resourceId: id, body: { creditPackage } };
+    },
+  });
+};
+
+export const reorderCreditPackages = async (identity, input, options = {}) => {
+  const { env = process.env, idempotencyKey, deps = dependencies } = options;
+  requireConfirmation(input);
+  if (!Array.isArray(input?.items) || !input.items.length) {
+    fail('items must contain at least one package order.', 'INVALID_INPUT');
+  }
+  const items = input.items.map(item => ({
+    id: text(item?.id, 'package id', { max: 50 }),
+    displayOrder: displayOrder(item?.displayOrder),
+  }));
+  if (new Set(items.map(item => item.id)).size !== items.length) {
+    fail('Package ids must be unique.', 'INVALID_INPUT');
+  }
+  return withSuperAdminMutation(identity, {
+    env, idempotencyKey, operation: 'credit_package.reorder', request: { items },
+    resourceType: 'credit_plan', deps,
+    work: async (client, actor) => {
+      const currentById = new Map();
+      for (const item of [...items].sort((left, right) => left.id.localeCompare(right.id))) {
+        const current = await deps.billing.findCreditPackageById(item.id, { client, forUpdate: true });
+        if (!current) fail('Credit package not found.', 'NOT_FOUND', 404);
+        if (current.archivedAt) fail('Archived credit packages cannot be reordered.', 'PACKAGE_ARCHIVED', 409);
+        currentById.set(item.id, current);
+      }
+      const before = items.map(item => currentById.get(item.id));
+      const packages = [];
+      for (const item of items) {
+        packages.push(await deps.billing.reorderCreditPackage(
+          item.id, item.displayOrder, actor.user.id, { client },
+        ));
+      }
+      await deps.audit.insertAuditLog({
+        actorUserId: actor.user.id, eventType: 'credit_package.reordered',
+        resourceType: 'credit_plan',
+        beforeState: publicJson(before.map(item => ({ id: item.id, displayOrder: item.displayOrder }))),
+        afterState: publicJson(packages.map(item => ({ id: item.id, displayOrder: item.displayOrder }))),
+      }, { client });
+      return { status: 200, body: { creditPackages: packages } };
     },
   });
 };

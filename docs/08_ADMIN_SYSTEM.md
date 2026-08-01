@@ -1,5 +1,9 @@
 # Admin System
 
+> Product decision: internal health is owner-only System Status. Ban/unban and
+> the final operational UI are not implemented. Required owner capabilities are
+> listed in `18_PRODUCT_OWNER_DECISIONS_2026-08-01.md`.
+
 ## Purpose
 
 Describe the current administrative authorization, backend endpoints, UI exposure, and known gaps.

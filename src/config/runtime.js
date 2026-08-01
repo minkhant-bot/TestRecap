@@ -8,6 +8,7 @@ export const getStoragePaths = (env = process.env, projectRoot = process.cwd()) 
         return {
             root,
             uploads: path.join(root, 'uploads'),
+            paymentProofs: path.join(root, 'payment-proofs'),
             cache: path.join(root, 'cache'),
             output: path.join(root, 'output'),
             settings: root
@@ -17,6 +18,7 @@ export const getStoragePaths = (env = process.env, projectRoot = process.cwd()) 
     return {
         root,
         uploads: path.join(root, 'src', 'tmp'),
+        paymentProofs: path.join(root, 'data', 'payment-proofs'),
         cache: path.join(root, 'data', 'cache'),
         output: path.join(root, 'public', 'output'),
         settings: path.join(root, 'data')
@@ -24,7 +26,7 @@ export const getStoragePaths = (env = process.env, projectRoot = process.cwd()) 
 };
 
 export const ensureStoragePaths = paths => {
-    for (const directory of [paths.uploads, paths.cache, paths.output, paths.settings]) {
+    for (const directory of [paths.uploads, paths.paymentProofs, paths.cache, paths.output, paths.settings]) {
         fs.mkdirSync(directory, { recursive: true });
     }
     return paths;

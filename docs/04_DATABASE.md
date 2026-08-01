@@ -26,6 +26,9 @@ Document all current durable stores, schemas, ownership, and limitations.
 - `0001_p2_foundation.sql` creates the approved tables, constraints, indexes,
   append-only ledger/audit triggers, retained-financial deletion guards, and
   protected bootstrap Super Admin guard.
+- `0002_credit_package_management.sql` adds package bonus/note fields and a
+  database trigger that forbids deleting package records, preserving purchase
+  foreign keys and immutable purchase/ledger history.
 - `P2_BILLING_ENABLED=true` activates only the billing APIs and requires
   `DATABASE_URL`. Billing requests synchronize the authenticated Firebase
   identity into PostgreSQL. Financial mutations require PostgreSQL
@@ -35,7 +38,7 @@ Document all current durable stores, schemas, ownership, and limitations.
 - `P2_LIVE_JOB_BILLING_ENABLED=true` separately enables PostgreSQL job billing
   snapshots, reservations, ledger settlement/refund, and worker leases without
   replacing the JSON lifecycle store. It is disabled by default. Global role
-  cutover, object upload/download integration, backups, legacy backfill, and
+  cutover, proof-volume backup/restore verification, legacy backfill, and
   production activation remain pending.
 
 ### Known Issues
@@ -92,6 +95,7 @@ DATA_DIR/
   user-gemini-credentials.json
   encryption.key
   uploads/
+  payment-proofs/{ownerUuid}/{yyyy}/{mm}/{opaqueFileId}.{jpg|png|webp}
   cache/{jobId}/
   output/{jobId}.mp4
   output/{jobId}.mp3
@@ -107,6 +111,7 @@ Without `DATA_DIR`, local paths are repository-relative under `src/tmp`, `data/c
 - Auth profile snapshot: `src/services/authUserStore.js`
 - Legacy settings: `src/services/settings.js`
 - Runtime paths: `src/config/runtime.js`
+- Private payment-proof storage: `src/services/paymentProofStorage.js`
 
 ## Important Decisions
 
@@ -134,4 +139,5 @@ The following remain incomplete or gated after the P2.1–P2.3 implementation:
 - Keep roles separate from Trial/Normal/Pro plan assignments and entitlements.
 - Production-enable immutable job pricing/entitlement snapshots and transactionally linked reservations only after isolated verification.
 - Complete global role/authority cutover for users, roles, settings, and audit; billing-domain PostgreSQL authority is already gated.
-- Add backup/restore, integrity reconciliation, retention, private object storage, and recovery procedures.
+- Verify synchronized PostgreSQL/proof-volume backup and restore, integrity
+  reconciliation, retention, and recovery procedures.

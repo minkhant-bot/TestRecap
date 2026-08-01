@@ -1,14 +1,22 @@
 # TestRecap
 
+> The authoritative 2026-08-01 Product Owner decisions and evidence-status
+> labels are in `docs/18_PRODUCT_OWNER_DECISIONS_2026-08-01.md`.
+
 TestRecap is an authenticated AI movie-recap workspace with a durable,
 single-concurrency processing queue. Firebase Authentication provides
 email/password registration, login, logout, and persistent sessions.
+
+Blink's launch safety limit is 15:00 per source video. The backend rejects
+longer media before job creation and rechecks before queueing or credit
+reservation; the frontend provides immediate feedback. Billing remains in
+30-second blocks. Real near-15-minute E2E support is not yet verified.
 
 ## SaaS configuration
 
 Enable Email/Password authentication in Firebase and configure the variables
 listed in `.env.example`. Firebase Admin credentials stay server-side.
-`FIREBASE_ADMIN_UIDS` provides the initial admin bootstrap; all subsequent
+`FIREBASE_SUPER_ADMIN_UIDS` provides the initial super-admin bootstrap; all subsequent
 authorization uses backend-verified Firebase identities and custom claims.
 
 All project APIs require authentication. Users can access only jobs owned by
@@ -20,8 +28,10 @@ The FIFO queue, job records, workflow checkpoints, uploads, caches, and output
 artifacts then survive service restarts.
 
 Railway main is initially a test/staging deployment, not production-ready.
-PostgreSQL billing gates remain disabled until isolated native PostgreSQL
-verification passes; PostgreSQL restart persistence is not yet proven. The
+PostgreSQL billing gates remain disabled pending isolated Railway staging
+acceptance. The native PostgreSQL suites passed 3/3, including migrations and
+restart-persistence coverage. Production migration, backup/restore, and staging
+verification remain pending. The
 intended sole Product Owner/Super Admin is `min85639@gmail.com`, but enforcement
 and ban/unban persistence are not implemented.
 

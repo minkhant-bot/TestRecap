@@ -57,6 +57,8 @@ Describe the current automated tests, safe verification levels, important regres
    - Cancellation/deletion contracts.
    - Billing authentication, idempotency propagation, and structured
      PostgreSQL-Super-Admin denial.
+   - Authoritative 14:59/15:00 acceptance, 15:01 rejection, client-duration
+     bypass rejection, and no queue/reservation on rejection.
 
 4. **Media tests**
    - FFmpeg process timeout/abort.
@@ -87,6 +89,8 @@ Describe the current automated tests, safe verification levels, important regres
 - Download authorization.
 - Coordinated workspace/core deletion, owner mismatch, active-core blocking, orphan cleanup, and unsafe-artifact preflight.
 - Active-job quota concurrency, per-user isolation, terminal release, and legacy-route bypass prevention.
+- The 15:00 source limit at frontend selection, backend upload, queue recheck,
+  and direct API boundaries; 30-second billing calculations remain unchanged.
 - Rolling admission isolation, concurrency, restart recovery, expiry, compensation, legacy-route protection, and HTTP 429 contract.
 - Retention across linked records, legacy-only records, orphan workspace records, active-state preservation, and owner mismatches.
 

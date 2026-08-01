@@ -9,7 +9,6 @@ test('optional absent database preserves successful process health', async () =>
   assert.equal(result.httpStatus, 200);
   assert.equal(result.body.database.status, 'disabled');
 });
-
 test('required unavailable database fails readiness without exposing errors', async () => {
   const result = await getApplicationHealth({
     configuration: { enabled: true, required: true },
@@ -30,4 +29,3 @@ test('reachable database with current migrations is ready', async () => {
   assert.equal(result.httpStatus, 200);
   assert.equal(result.body.database.status, 'ready');
 });
-

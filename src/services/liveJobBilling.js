@@ -197,6 +197,7 @@ const transitionReservation = async (jobId, action, reason, repositories) =>
       }, { client });
     }
     await repositories.audit.insertAuditLog({
+      actorService: 'live_job_billing',
       subjectUserId: job.userId,
       eventType: `job.credits_${action === 'refund' ? 'refunded' : `${action}d`}`,
       resourceType: 'job', resourceId: jobId, afterState: { reason },

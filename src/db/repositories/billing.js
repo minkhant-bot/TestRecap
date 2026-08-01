@@ -46,6 +46,22 @@ const mapPurchase = row => row && ({
   bonusLedgerEntryId: row.bonus_ledger_entry_id,
   version: Number(row.version),
 });
+const mapCreditPackage = row => row && ({
+  id: row.id,
+  code: row.code,
+  name: row.name,
+  price: bigint(row.price_minor),
+  priceMinor: bigint(row.price_minor),
+  currency: row.currency,
+  creditAmount: bigint(row.credit_amount),
+  bonusCredits: bigint(row.bonus_credits ?? 0),
+  active: row.active,
+  displayOrder: row.display_order,
+  note: row.note ?? null,
+  archivedAt: row.archived_at,
+  createdAt: row.created_at,
+  updatedAt: row.updated_at,
+});
 
 export const listActivePlans = async ({ client = null, at = new Date() } = {}) => {
   const result = await databaseExecutor(client).query(
@@ -235,19 +251,72 @@ export const insertPromotion = async (promotion, { client }) =>
   ));
 
 export const upsertCreditPlan = async (plan, { client }) =>
-  firstRow(await client.query(
+  mapCreditPackage(firstRow(await client.query(
     `INSERT INTO credit_plans
-      (id,code,name,description,credit_amount,price_minor,currency,active,display_order,
+      (id,code,name,description,credit_amount,bonus_credits,price_minor,currency,active,display_order,note,
        created_by_user_id,updated_by_user_id)
-     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$10)
+     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$12)
      ON CONFLICT(code) DO UPDATE SET name=EXCLUDED.name,description=EXCLUDED.description,
-       credit_amount=EXCLUDED.credit_amount,price_minor=EXCLUDED.price_minor,
+       credit_amount=EXCLUDED.credit_amount,bonus_credits=EXCLUDED.bonus_credits,
+       price_minor=EXCLUDED.price_minor,note=EXCLUDED.note,
        currency=EXCLUDED.currency,active=EXCLUDED.active,display_order=EXCLUDED.display_order,
        updated_by_user_id=EXCLUDED.updated_by_user_id,updated_at=now()
+     WHERE credit_plans.archived_at IS NULL
      RETURNING *`,
     [randomUUID(), plan.code, plan.name, plan.description, String(plan.creditAmount),
-      String(plan.priceMinor), plan.currency, plan.active, plan.displayOrder, plan.actorUserId],
-  ));
+      String(plan.bonusCredits ?? 0), String(plan.priceMinor), plan.currency, plan.active,
+      plan.displayOrder, plan.note ?? null, plan.actorUserId],
+  )));
+
+export const insertCreditPackage = async (item, { client }) =>
+  mapCreditPackage(firstRow(await client.query(
+    `INSERT INTO credit_plans
+      (id,code,name,description,credit_amount,bonus_credits,price_minor,currency,
+       active,display_order,note,created_by_user_id,updated_by_user_id)
+     VALUES ($1,$2,$3,'',$4,$5,$6,$7,$8,$9,$10,$11,$11)
+     RETURNING *`,
+    [randomUUID(), item.code || `package-${randomUUID()}`, item.name,
+      String(item.creditAmount), String(item.bonusCredits), String(item.price),
+      item.currency, item.active, item.displayOrder, item.note, item.actorUserId],
+  )));
+
+export const findCreditPackageById = async (id, { client = null, forUpdate = false } = {}) =>
+  mapCreditPackage(firstRow(await databaseExecutor(client).query(
+    `SELECT * FROM credit_plans WHERE id=$1${forUpdate ? ' FOR UPDATE' : ''}`,
+    [id],
+  )));
+
+export const updateCreditPackage = async (id, item, { client }) =>
+  mapCreditPackage(firstRow(await client.query(
+    `UPDATE credit_plans SET name=$2,price_minor=$3,credit_amount=$4,
+       bonus_credits=$5,active=$6,display_order=$7,note=$8,currency=$9,
+       updated_by_user_id=$10,updated_at=now()
+     WHERE id=$1 AND archived_at IS NULL RETURNING *`,
+    [id, item.name, String(item.price), String(item.creditAmount),
+      String(item.bonusCredits), item.active, item.displayOrder, item.note,
+      item.currency, item.actorUserId],
+  )));
+
+export const setCreditPackageActive = async (id, active, actorUserId, { client }) =>
+  mapCreditPackage(firstRow(await client.query(
+    `UPDATE credit_plans SET active=$2,updated_by_user_id=$3,updated_at=now()
+     WHERE id=$1 AND archived_at IS NULL RETURNING *`,
+    [id, active, actorUserId],
+  )));
+
+export const archiveCreditPackage = async (id, actorUserId, { client }) =>
+  mapCreditPackage(firstRow(await client.query(
+    `UPDATE credit_plans SET active=false,archived_at=now(),updated_by_user_id=$2,
+       updated_at=now() WHERE id=$1 AND archived_at IS NULL RETURNING *`,
+    [id, actorUserId],
+  )));
+
+export const reorderCreditPackage = async (id, displayOrder, actorUserId, { client }) =>
+  mapCreditPackage(firstRow(await client.query(
+    `UPDATE credit_plans SET display_order=$2,updated_by_user_id=$3,updated_at=now()
+     WHERE id=$1 AND archived_at IS NULL RETURNING *`,
+    [id, displayOrder, actorUserId],
+  )));
 
 export const listCreditPlans = async ({ currency = null, includeInactive = false, client = null } = {}) => {
   const result = await databaseExecutor(client).query(
@@ -257,7 +326,7 @@ export const listCreditPlans = async ({ currency = null, includeInactive = false
      ORDER BY display_order,code`,
     [currency, includeInactive],
   );
-  return result.rows;
+  return result.rows.map(mapCreditPackage);
 };
 
 export const upsertBankAccount = async (bank, { client }) =>

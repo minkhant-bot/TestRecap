@@ -15,4 +15,5 @@ public/output
 *.srt
 *.log
 workflow-reference.zip
+blink-claude-ui-review.zip
 test_tts.wav.json

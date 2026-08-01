@@ -3,6 +3,7 @@ import test from 'node:test';
 import {
   BillingError,
   estimateCredits,
+  getMyScreenshotMetadata,
   listPlans,
 } from './billingFoundation.js';
 
@@ -69,3 +70,17 @@ test('credit estimate never silently changes BYOK to Blink-funded mode', async (
   );
 });
 
+test('payment proof metadata is concealed from a different normal user', async () => {
+  const deps = {
+    users: { ensureUser: async () => ({ id: 'requesting-user-id' }) },
+    billing: {
+      findScreenshotMetadata: async () => ({
+        id: 'proof-id', owner_user_id: 'different-user-id', object_key: 'private-key',
+      }),
+    },
+  };
+  await assert.rejects(
+    getMyScreenshotMetadata({ uid: 'requesting-user' }, 'proof-id', { env: enabledEnv, deps }),
+    error => error instanceof BillingError && error.code === 'NOT_FOUND' && error.status === 404,
+  );
+});

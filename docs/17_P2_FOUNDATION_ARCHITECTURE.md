@@ -1,5 +1,9 @@
 # P2 Foundation Architecture
 
+> The APIs/schema below describe authored implementation, not the latest product
+> workflow. `18_PRODUCT_OWNER_DECISIONS_2026-08-01.md` supersedes conflicting
+> Approve/Reject, package, correction, role, UI, and deployment language.
+
 ## Current ZIP handoff status (2026-07-31)
 
 P2.1, P2.2, and P2.3 implementation files are present in the working tree,
@@ -11,25 +15,23 @@ snapshot/reservation, explicit BYOK versus Blink-funded mode,
 settlement/release/refund, worker lease, checkpoint, and reconciliation
 integration. No commercial values are seeded.
 
-Implementation presence and verification are separate. Focused test files and
-PostgreSQL integration test files exist, but PostgreSQL execution requires an
-isolated TEST_DATABASE_URL; this document does not authorize claiming
-production or staging validation. Remaining activation blockers are private
-screenshot object storage/content verification, migration and global
+Implementation presence and verification are separate. The three native
+PostgreSQL integration suites passed using an isolated `TEST_DATABASE_URL`;
+this does not constitute production or staging validation. Private payment-proof upload, content
+validation, and authenticated streaming now use the persistent `DATA_DIR`.
+Remaining activation blockers include Railway volume verification, global
 role-authority cutover, backup/restore, reconciliation operations, and
 authenticated staging verification.
 
 ### Verification evidence boundary
 
-The focused live-billing unit set passed 36/36; the recorded full suite passed
-284 tests, failed 0, and skipped 3. The three native PostgreSQL integration
-tests (`src/db/postgres.integration.test.js`,
+The latest full Node inventory passed 327 tests, failed 0, and skipped 3. The
+three native PostgreSQL integration tests (`src/db/postgres.integration.test.js`,
 `src/services/billingFoundation.postgres.integration.test.js`, and
-`src/services/liveJobBilling.postgres.integration.test.js`) were authored but
-skipped because `TEST_DATABASE_URL` was unset. No successful native PostgreSQL
-run or PostgreSQL restart-persistence test is evidenced. Therefore reserve,
-settle, release, refund, retry, recovery, locking, transaction, concurrency,
-and duplicate-prevention behavior remain unproven against PostgreSQL.
+`src/services/liveJobBilling.postgres.integration.test.js`) passed 3/3 using an
+isolated `TEST_DATABASE_URL`. Migrations 0001 and 0002, PostgreSQL restart
+persistence, reserve, settle, release, refund, recovery, locking, transactions,
+concurrency, idempotency, and duplicate prevention were verified.
 
 The migration has no ban/unban persistence table. Ban/unban and operational
 Super Admin grant, deduction, refund, and reversal flows remain planned. The
@@ -49,8 +51,7 @@ PostgreSQL authority. Existing JSON/file persistence, Firebase-claim roles,
 encrypted BYOK storage, job execution, purchase, reservation, settlement, and UI
 flows remain unchanged.
 
-Migration `0001_p2_foundation.sql` contains no commercial seed values. Isolated
-PostgreSQL integration verification, production migration, bootstrap UID
+Migrations contain no commercial seed values. Production migration, bootstrap UID
 resolution, authority cutover, object storage, backups, and later P2 services
 remain pending.
 
@@ -68,7 +69,7 @@ mutations require PostgreSQL `super_admin`. No commercial values are seeded.
 Existing Firebase authorization outside financial routes, JSON job stores,
 encrypted BYOK data, and the Core AI Pipeline remain authoritative.
 
-This boundary does not implement object upload/download, live job billing
+This original boundary did not implement object upload/download, live job billing
 snapshots, reservations, settlement/release/refund, worker recovery, UI,
 subscriptions, partial refunds, or pending-purchase cancellation. Those remain
 in their later architecture phases.
@@ -116,8 +117,7 @@ export encoding, output quality, or the completed-output contract.
   outside the financial API, encrypted BYOK files, JSON job stores, the existing
   workspace/Core AI Pipeline, and the explicitly gated PostgreSQL billing
   foundation described above.
-- **Not implemented:** object upload/download for payment screenshots, global
-  PostgreSQL role cutover, UI activation, operational backup/restore and
+- **Not implemented:** global PostgreSQL role cutover, operational backup/restore and
   production activation, and the later APIs identified below.
 - Trial, Normal, and Pro are commercial plans. They are not recurring
   subscriptions unless a later approved requirement explicitly introduces
@@ -154,7 +154,10 @@ requiredCredits = billingBlocks * creditsPerBlock
 
 Duration must be finite and greater than zero. The backend must obtain or verify
 the authoritative media duration before reservation. A client-supplied duration
-is only a hint. Examples:
+is only a hint. Blink's launch safety maximum is 15:00: reject longer sources
+before queueing, processing, or reservation. This limit does not change the
+30-second billing formula and is not verified at the near-limit until a real
+near-15-minute E2E passes. Examples:
 
 | Source duration | Billing blocks |
 |---:|---:|
@@ -1226,8 +1229,10 @@ Implemented behind explicit billing activation with no seeded commercial values.
 
 Private screenshot lifecycle, credit packages, bank accounts, immutable
 snapshots, pending/rejected review, and retention controls.
-Metadata, catalog, snapshots, and review are implemented; private object
-upload/download, content verification, and retention operations remain pending.
+Metadata, catalog, snapshots, private multipart upload/authenticated streaming,
+content validation, and review are implemented. Only abandoned atomic temporary
+files are automatically cleaned; historical retention policy and operational
+backup/restore remain pending.
 
 ### P2.5 — Immutable ledger and balance projection
 
@@ -1264,7 +1269,7 @@ confirm the Core AI Pipeline and accepted output behavior remain unchanged.
 
 ## Required tests before activation
 
-- Real PostgreSQL migration and constraint tests.
+- Reconfirm PostgreSQL migrations and constraints against isolated staging resources.
 - Concurrent reservation tests using independent connections.
 - Ledger append-only and projection reconciliation tests.
 - Trial-grant and first-purchase-bonus idempotency/race tests.

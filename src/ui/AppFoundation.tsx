@@ -9,6 +9,7 @@ import { HistoryPage } from './pages/HistoryPage';
 import { ProjectDetailPage } from './pages/ProjectDetailPage';
 import { ProjectsPage } from './pages/ProjectsPage';
 import { SettingsPage } from './pages/SettingsPage';
+import { SuperAdminPage } from './pages/SuperAdminPage';
 import { UnauthorizedPage } from './pages/UnauthorizedPage';
 import { GeminiKeyProvider } from './workspace/GeminiKeyContext';
 import { useAuth } from '../auth/AuthProvider';
@@ -28,6 +29,11 @@ function ProjectsAccess() {
   return profile?.role === 'super_admin' ? <ProjectsPage /> : <Navigate to="/new-recap" replace />;
 }
 
+function SuperAdminAccess() {
+  const { profile } = useAuth();
+  return profile?.role === 'super_admin' ? <SuperAdminPage /> : <Navigate to="/new-recap" replace />;
+}
+
 export default function AppFoundation() {
   return (
     <Routes>
@@ -44,6 +50,7 @@ export default function AppFoundation() {
             <Route path="/history" element={<HistoryPage />} />
             <Route path="/buy-credits" element={<BuyCreditsPage />} />
             <Route path="/settings" element={<SettingsPage />} />
+            <Route path="/admin" element={<SuperAdminAccess />} />
           </Route>
       </Route>
       <Route path="*" element={<DefaultHome />} />

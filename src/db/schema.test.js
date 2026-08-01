@@ -4,6 +4,9 @@ import test from 'node:test';
 import { migrationsDirectory } from './migrations.js';
 
 const schema = fs.readFileSync(`${migrationsDirectory}/0001_p2_foundation.sql`, 'utf8');
+const packageMigration = fs.readFileSync(
+  `${migrationsDirectory}/0002_credit_package_management.sql`, 'utf8',
+);
 
 test('schema separates roles from commercial plans', () => {
   assert.match(schema, /role IN \('user', 'admin', 'super_admin'\)/);
@@ -29,4 +32,14 @@ test('bootstrap Super Admin and retained financial history have database protect
   assert.match(schema, /CREATE TRIGGER user_roles_protect_bootstrap/);
   assert.match(schema, /CREATE TRIGGER credit_purchase_requests_no_delete/);
   assert.match(schema, /CREATE TRIGGER credit_reservations_no_delete/);
+});
+
+test('credit packages retain historical references and support bonus, note, and archival', () => {
+  assert.match(packageMigration, /ADD COLUMN bonus_credits BIGINT NOT NULL DEFAULT 0/);
+  assert.match(packageMigration, /ADD COLUMN note TEXT/);
+  assert.match(packageMigration, /CREATE TRIGGER credit_plans_no_delete/);
+  assert.match(schema, /credit_plan_id UUID NOT NULL REFERENCES credit_plans\(id\)/);
+  assert.match(schema, /plan_name_snapshot/);
+  assert.match(schema, /purchase_credit_snapshot/);
+  assert.match(schema, /price_minor_snapshot/);
 });

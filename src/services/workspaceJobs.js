@@ -62,7 +62,12 @@ const publicJob = job => ({
     updatedAt: job.updatedAt,
     workerId: job.workerId,
     error: job.error,
-    retry: job.retry,
+    retry: {
+        attempts: job.retry?.attempts || 0,
+        maxAttempts: job.retry?.maxAttempts || 0,
+        lastAttemptAt: job.retry?.lastAttemptAt || null,
+        resumeStage: job.retry?.resumeStage || null
+    },
     recoveryCount: job.recoveryCount,
     audioDuration: job.audioDuration,
     extractionStartedAt: job.extractionStartedAt,
@@ -227,6 +232,54 @@ export const queueWorkspaceJob = (id, ownerUid) => {
         workerId: null,
         cancellationRequested: false
     });
+};
+
+export const retryFailedWorkspaceJob = (id, ownerUid, {
+    idempotencyKey, resumeStage, resumeProgress = 0
+}) => {
+    const job = jobs.get(id);
+    if (!job || job.ownerUid !== ownerUid) return null;
+    const key = String(idempotencyKey || '').trim();
+    if (!key || key.length > 150) {
+        const error = new Error('Idempotency-Key is required and must be at most 150 characters.');
+        error.code = 'IDEMPOTENCY_KEY_REQUIRED';
+        throw error;
+    }
+    if (['queued', 'processing'].includes(job.status)) {
+        if (job.retry?.lastIdempotencyKey === key) {
+            return { job: publicJob(job), replayed: true };
+        }
+        const error = new Error('This project is already queued or processing.');
+        error.code = 'JOB_ALREADY_ACTIVE';
+        throw error;
+    }
+    if (job.status !== 'failed') {
+        const error = new Error('Only failed projects can be retried.');
+        error.code = 'JOB_NOT_FAILED';
+        throw error;
+    }
+    assertWorkspaceJobQuota(ownerUid);
+    const now = new Date().toISOString();
+    const updated = updateInternal(id, {
+        status: 'queued',
+        stage: 'queued',
+        progress: Math.max(0, Math.min(99, Math.round(resumeProgress))),
+        queuedAt: now,
+        startedAt: null,
+        failedAt: null,
+        workerId: null,
+        error: null,
+        diagnostic: null,
+        cancellationRequested: false,
+        retry: {
+            ...job.retry,
+            attempts: (job.retry?.attempts || 0) + 1,
+            lastAttemptAt: now,
+            lastIdempotencyKey: key,
+            resumeStage
+        }
+    });
+    return { job: updated, replayed: false };
 };
 
 export const claimNextWorkspaceJob = workerId => {

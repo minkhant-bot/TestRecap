@@ -1,6 +1,10 @@
 import { randomUUID } from 'node:crypto';
 import { databaseExecutor } from './shared.js';
 
+const jsonParameter = value => value === null || value === undefined
+  ? null
+  : JSON.stringify(value);
+
 export const insertAuditLog = async (event, { client, id = randomUUID() } = {}) => {
   if (!client) throw new Error('Audit mutations require an existing transaction client.');
   const result = await client.query(
@@ -21,9 +25,9 @@ export const insertAuditLog = async (event, { client, id = randomUUID() } = {}) 
       event.eventType,
       event.resourceType,
       event.resourceId || null,
-      event.beforeState || null,
-      event.afterState || null,
-      event.metadata || {},
+      jsonParameter(event.beforeState),
+      jsonParameter(event.afterState),
+      jsonParameter(event.metadata || {}),
       event.networkRiskHash || null,
       event.deviceRiskHash || null,
     ],

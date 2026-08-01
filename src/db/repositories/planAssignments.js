@@ -26,4 +26,3 @@ export const findCurrentPlanAssignment = async (userId, { client = null, forUpda
     updatedAt: row.updated_at,
   };
 };
-

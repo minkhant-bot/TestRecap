@@ -91,7 +91,8 @@ export const continueWithCorePipeline = async ({
     transcriptPath,
     signal,
     isCancellationRequested = () => false,
-    onProgress
+    onProgress,
+    runPipeline = processRecapPipeline
 }) => {
     if (signal?.aborted) {
         throw Object.assign(new Error('Processing cancelled.'), { name: 'AbortError' });
@@ -100,30 +101,41 @@ export const continueWithCorePipeline = async ({
     if (existing?.status === 'complete') {
         return assertCompletedCoreOutput(job.id, existing.result);
     }
-    await prepareCorePipelineState({ job, audioPath, transcriptPath, signal });
-    if (!getJob(job.id)) {
+    if (!existing) {
+        await prepareCorePipelineState({ job, audioPath, transcriptPath, signal });
         createJob(job.id, {
             ownerUid: job.ownerUid,
             videoPath: job.storedPath,
             audioPath,
             originalFilename: job.filename
         });
+        updateJob(job.id, {
+            ownerUid: job.ownerUid,
+            videoPath: job.storedPath,
+            audioPath,
+            status: 'processing',
+            stageId: WORKFLOW_STAGE.GENERATE_TTS,
+            stageOutcome: null,
+            progress: 35,
+            error: null
+        });
+    } else {
+        // A workspace retry has already validated the persisted workflow-v2 state.
+        // Preserve its exact stageId (especially translate_burmese) so the existing
+        // pipeline checkpoint logic skips all earlier completed stages.
+        updateJob(job.id, {
+            ownerUid: job.ownerUid,
+            videoPath: job.storedPath,
+            audioPath,
+            status: 'processing',
+            error: null
+        });
     }
-    updateJob(job.id, {
-        ownerUid: job.ownerUid,
-        videoPath: job.storedPath,
-        audioPath,
-        status: 'processing',
-        stageId: WORKFLOW_STAGE.GENERATE_TTS,
-        stageOutcome: null,
-        progress: 35,
-        error: null
-    });
     mirrorCoreJob(job.id, onProgress);
     const monitor = setInterval(() => mirrorCoreJob(job.id, onProgress), 200);
     monitor.unref?.();
     try {
-        await processRecapPipeline(job.id, { signal, isCancellationRequested });
+        await runPipeline(job.id, { signal, isCancellationRequested });
     } finally {
         clearInterval(monitor);
         mirrorCoreJob(job.id, onProgress);

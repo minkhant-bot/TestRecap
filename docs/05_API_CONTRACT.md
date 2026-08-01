@@ -23,8 +23,9 @@ Describe the currently mounted HTTP contract, authorization boundaries, request 
 
 ### Planned or Placeholder
 
-- Private object upload/download APIs, UI activation, and production billing
-  activation remain pending.
+- Production billing activation and Railway proof-volume backup/restore
+  verification remain pending. Private multipart upload and authenticated
+  streaming are implemented against `DATA_DIR`.
 - P2 financial mutations require idempotency keys, PostgreSQL transaction boundaries, structured errors, and durable audit events.
 
 ### Known Issues
@@ -65,13 +66,15 @@ All paths below are prefixed with `/api` unless shown otherwise.
 
 | Method | Path | Purpose |
 |---|---|---|
-| GET | `/workspace/config` | Upload size and supported extensions |
-| POST | `/workspace/jobs` | Multipart upload; create pending job |
+| GET | `/workspace/config` | Upload size, 900-second duration limit, and supported extensions |
+| POST | `/workspace/jobs` | Multipart upload; authoritatively probe duration and create a pending job only at or below 15:00 |
 | GET | `/workspace/jobs` | List current user’s jobs |
 | GET | `/workspace/jobs/{jobId}` | Get owned job |
 | GET | `/workspace/jobs/{jobId}/source` | Stream owned source file |
 | POST | `/workspace/jobs/{jobId}/queue` | Persist effects and queue pending job |
 | GET | `/workspace/jobs/{jobId}/status` | Job plus queue position |
+| GET | `/workspace/jobs/{jobId}/retry` | Inspect owner-scoped failed-job recoverability without exposing private paths |
+| POST | `/workspace/jobs/{jobId}/retry` | Idempotently requeue one recoverable failed job from its validated checkpoint |
 | GET | `/workspace/jobs/{jobId}/events` | SSE snapshot/progress events |
 | POST | `/workspace/jobs/{jobId}/cancel` | Explicit cancellation request |
 | DELETE | `/workspace/jobs/{jobId}` | Delete a non-active workspace/core job and linked artifacts |
@@ -107,6 +110,21 @@ workspace job, immutable safe billing snapshot, and `queuePosition`. BYOK
 credential/quota failures use structured `BYOK_*` codes and never fall back to
 Blink-funded mode.
 
+Retry requires `Idempotency-Key` and returns HTTP 202 `RETRY_ACCEPTED` for the
+first failed-to-queued transition or HTTP 200 `RETRY_IDEMPOTENT_REPLAY` for the
+same request already queued/processing. A different concurrent key receives
+`JOB_ALREADY_ACTIVE`; non-failed jobs receive `JOB_NOT_FAILED`. Missing,
+corrupt, incompatible, or inactive-billing checkpoints fail closed with a
+structured `RETRY_*` code. Retry reuses the existing job ID, admission record,
+billing reservation, worker queue, lease acquisition, SSE channel, and output
+completion guard; it does not reserve credits again.
+
+The backend ignores client duration as authority. It probes the uploaded source
+before job creation and rechecks the stored source before queueing or billing
+reservation. Over 15:00 returns HTTP 422 with code `SOURCE_VIDEO_TOO_LONG` and
+message `Video is too long. Maximum supported duration is 15 minutes.` No job,
+queue entry, processing, or credit reservation is created by that rejection.
+
 Workspace upload admission permits at most two active jobs per user, where active means `pending`, `queued`, or `processing`. An exhausted quota returns HTTP 429:
 
 ```json
@@ -140,6 +158,7 @@ Workspace deletion returns HTTP 409 if either the workspace job or its linked co
 
 - `job.snapshot`
 - `queue.position_changed`
+- `job.retry_accepted`
 - `job.processing_started`
 - `job.cancellation_requested`
 - `stage.started`
@@ -178,7 +197,13 @@ User routes:
 - `POST /jobs/estimate` (non-authoritative estimate only; no reservation)
 - `GET /credits/balance`, `GET /credits/ledger`
 - `GET /credit-plans`, `GET /credit-plans/{id}/bank-accounts`
-- `POST /uploads/payment-screenshots/intents`
+- `GET /payment-proofs/config`
+- `POST /uploads/payment-screenshots/intents` (internal-compatible metadata intent)
+- `GET /uploads/payment-screenshots/{id}` and authenticated
+  `GET /uploads/payment-screenshots/{id}/content` for the owning user only
+- `POST /credit-purchase-requests/with-proof` using multipart fields
+  `creditPlanId`, `bankAccountId`, and one `proof` image; requires
+  `Idempotency-Key`
 - `POST/GET /credit-purchase-requests`, `GET /credit-purchase-requests/{id}`
 
 PostgreSQL-Super-Admin routes under `/admin/billing`:
@@ -186,11 +211,24 @@ PostgreSQL-Super-Admin routes under `/admin/billing`:
 - catalog, purchase list/approve/reject, plan and immutable policy creation;
 - credit-package, bank, package-bank-link, and promotion configuration;
 - Trial eligibility assessment and manual credit grant/deduction;
-- screenshot metadata read/verification, per-user balance/ledger, and audit reads.
+- private screenshot metadata read and authenticated content streaming at
+  `GET /screenshots/{id}/content`, per-user balance/ledger, and audit reads.
+- `POST /credit-packages`, `PATCH /credit-packages/{id}`;
+  `POST /credit-packages/{id}/activate|deactivate|archive`, and
+  `POST /credit-packages/reorder`. Each mutation requires `confirmed: true` and
+  `Idempotency-Key`; authorization is PostgreSQL `super_admin`.
 
-Screenshot intents create private object metadata and a server-generated object
-key only. They return no public or upload URL. A purchase requires a verified
-owned metadata record.
+`GET /credit-packages` is an alias of `GET /credit-plans` and returns only
+active, non-archived packages to authenticated normal users. Package `price` is
+stored as integer minor units; create also retains the existing required
+three-letter `currency` field.
+
+The multipart proof route validates JPEG, PNG, or WebP content server-side,
+stores it below private `DATA_DIR/payment-proofs`, completes the owned metadata,
+and creates the purchase as one retry-safe workflow. Content routes never expose
+the object key or a public path. A purchase requires a verified owned metadata
+record. The Owner still checks the bank outside Blink before using the separate,
+idempotent add-matching-credits action.
 
 ### Mounted legacy routes
 

@@ -51,7 +51,6 @@ export const getDatabaseReadiness = async ({
     };
   }
 };
-
 export const getApplicationHealth = async options => {
   const database = await getDatabaseReadiness(options);
   const blocking = database.required && !database.ready;
@@ -63,4 +62,3 @@ export const getApplicationHealth = async options => {
     },
   };
 };
-

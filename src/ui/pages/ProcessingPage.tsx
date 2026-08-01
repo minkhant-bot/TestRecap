@@ -1,15 +1,16 @@
-import { Check, ChevronDown, Circle, Download, LoaderCircle } from 'lucide-react';
+import { Check, Circle, Download, LoaderCircle } from 'lucide-react';
 import { useCallback, useEffect, useRef, useState } from 'react';
 import type { ReactNode } from 'react';
 import { Button, ErrorPanel, Skeleton, StatusBadge } from '../components';
 import { formatDuration } from '../workspace/format';
-import { cancelWorkspaceJob, getWorkspaceJobStatus } from '../workspace/api';
+import { WorkspaceApiError, cancelWorkspaceJob, getWorkspaceJobStatus, getWorkspaceRetryEligibility, retryWorkspaceJob } from '../workspace/api';
 import {
   getWorkflowStepState,
   getDisplayedProgress,
   WORKFLOW_STEPS,
 } from '../workspace/workflowPresentation';
 import type { WorkspaceJobStatus } from '../workspace/types';
+import type { WorkspaceRetryEligibility } from '../workspace/types';
 import type { UploadLifecycle } from './UploadPage';
 
 interface ProcessingStatusViewProps {
@@ -35,10 +36,13 @@ export function ProcessingStatusView({
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [cancelling, setCancelling] = useState(false);
+  const [retrying, setRetrying] = useState(false);
+  const [retryEligibility, setRetryEligibility] = useState<WorkspaceRetryEligibility | null>(null);
+  const [retryFeedback, setRetryFeedback] = useState<string | null>(null);
+  const retryKeyRef = useRef<{ jobId: string; key: string } | null>(null);
   const [mediaUrl, setMediaUrl] = useState<string | null>(null);
   const [mediaError, setMediaError] = useState<string | null>(null);
   const [mediaRetry, setMediaRetry] = useState(0);
-  const [expandedWorkflowJobId, setExpandedWorkflowJobId] = useState<string | null>(null);
   const pollingRef = useRef<number | null>(null);
 
   const refresh = useCallback(async () => {
@@ -93,6 +97,7 @@ export function ProcessingStatusView({
       'job.failed',
       'job.cancelled',
       'job.recovered',
+      'job.retry_accepted',
     ]) events.addEventListener(eventName, accept as EventListener);
     events.onerror = () => {
       if (pollingRef.current === null) {
@@ -107,6 +112,50 @@ export function ProcessingStatusView({
       }
     };
   }, [projectId, refresh]);
+
+  useEffect(() => {
+    if (!job || job.status !== 'failed') {
+      setRetryEligibility(null);
+      return;
+    }
+    let current = true;
+    setRetryEligibility(null);
+    void getWorkspaceRetryEligibility(job.id).then(result => {
+      if (current) setRetryEligibility(result);
+    }).catch(requestError => {
+      if (current) setRetryEligibility({
+        recoverable: false,
+        code: requestError instanceof WorkspaceApiError ? requestError.code : 'RETRY_CHECK_FAILED',
+        reason: requestError instanceof Error ? requestError.message : 'Retry availability could not be checked.',
+      });
+    });
+    return () => { current = false; };
+  }, [job?.id, job?.status, job?.updatedAt]);
+
+  const retryFailedJob = async () => {
+    if (!job || retrying || !retryEligibility?.recoverable) return;
+    setRetrying(true);
+    setRetryFeedback(null);
+    const current = retryKeyRef.current;
+    const key = current?.jobId === job.id ? current.key : crypto.randomUUID();
+    retryKeyRef.current = { jobId: job.id, key };
+    try {
+      const result = await retryWorkspaceJob(job.id, key);
+      setJob(previous => previous ? { ...previous, ...result.job } : result.job);
+      setRetryFeedback(result.replayed
+        ? 'This retry is already queued or processing.'
+        : `Retry accepted. Resuming from ${result.resumeStage?.replace(/_/g, ' ') || 'the validated checkpoint'}.`);
+    } catch (requestError) {
+      if (requestError instanceof WorkspaceApiError && requestError.code === 'JOB_ALREADY_ACTIVE') {
+        setRetryFeedback('This project is already queued or processing.');
+        await refresh();
+      } else {
+        setRetryFeedback(requestError instanceof Error ? requestError.message : 'Retry could not be requested.');
+      }
+    } finally {
+      setRetrying(false);
+    }
+  };
 
   useEffect(() => {
     if (job?.status !== 'completed') return;
@@ -143,11 +192,8 @@ export function ProcessingStatusView({
   const terminal = job ? ['completed', 'failed', 'cancelled'].includes(job.status) : false;
   const workflowStarted = Boolean(projectId || job);
   const showEditor = job?.status === 'pending' && setupContent;
-  useEffect(() => {
-    setExpandedWorkflowJobId(null);
-  }, [projectId, job?.status]);
 
-  const pipeline = workflowStarted ? (
+  const pipeline = (
     <section className="new-recap-workspace__pipeline" aria-label="Workflow">
       <ol className="processing-stages">
       {WORKFLOW_STEPS.map(stage => {
@@ -157,6 +203,7 @@ export function ProcessingStatusView({
         return (
           <li
             key={stage.id}
+            aria-current={active ? 'step' : undefined}
             className={active
               ? 'processing-stage processing-stage--active'
               : complete
@@ -183,13 +230,12 @@ export function ProcessingStatusView({
       })}
       </ol>
     </section>
-  ) : null;
+  );
 
   return (
-    <div className={`new-recap-workspace ${workflowStarted ? 'new-recap-workspace--active' : 'new-recap-workspace--upload-only'}`}>
+    <div className={`new-recap-workspace new-recap-workspace--active ${workflowStarted ? '' : 'new-recap-workspace--upload-only'}`}>
+      {pipeline}
       {!workflowStarted && <div className="new-recap-workspace__upload">{uploadContent}</div>}
-
-      {workflowStarted && job && !showEditor && job.status !== 'completed' && pipeline}
 
       {showEditor && (
         <section className="new-recap-workspace__editor">
@@ -261,13 +307,18 @@ export function ProcessingStatusView({
           <div className="new-recap-action-state new-recap-action-state--failed">
             <strong>Recap မအောင်မြင်ပါ</strong>
             <span>{job.error || 'ဤ Recap ကို ပြီးစီးအောင် မလုပ်ဆောင်နိုင်ပါ။'}</span>
-            <Button onClick={onReset}>ထပ်ကြိုးစားမည်</Button>
+            {retryEligibility === null ? <small>Checking validated recovery checkpoints…</small>
+              : retryEligibility.recoverable ? <>
+                <Button loading={retrying} disabled={retrying} onClick={() => void retryFailedJob()}>Retry recap</Button>
+                <small>Resume stage: {retryEligibility.resumeStage?.replace(/_/g, ' ')}</small>
+              </> : <small>{retryEligibility.reason || 'This failed project is not safely recoverable.'}</small>}
+            <Button variant="secondary" disabled={retrying} onClick={onReset}>Recap အသစ် စမည်</Button>
           </div>
         )}
         {job?.status === 'cancelled' && (
           <div className="new-recap-action-state">
             <strong>Recap ပယ်ဖျက်ပြီး</strong>
-            <Button onClick={onReset}>ထပ်ကြိုးစားမည်</Button>
+            <Button onClick={onReset}>Recap အသစ် စမည်</Button>
           </div>
         )}
         {job && ['queued', 'processing'].includes(job.status) && !terminal && (
@@ -292,20 +343,7 @@ export function ProcessingStatusView({
           </Button>
         )}
       </div>
-      {job?.status === 'completed' && (
-        <div className="completed-workflow-details">
-          <button
-            type="button"
-            aria-expanded={expandedWorkflowJobId === job.id}
-            onClick={() => setExpandedWorkflowJobId(current =>
-              current === job.id ? null : job.id)}
-          >
-            <span>View workflow details</span>
-            <ChevronDown className={expandedWorkflowJobId === job.id ? 'is-expanded' : ''} size={18} />
-          </button>
-          {expandedWorkflowJobId === job.id && pipeline}
-        </div>
-      )}
+      {retryFeedback && <div className="new-recap-retry-feedback" role="status" aria-live="polite">{retryFeedback}</div>}
       {error && <div className="workspace-upload-error" role="alert">{error}</div>}
       {loading && projectId && <div className="new-recap-workspace__loading"><LoaderCircle className="processing-spinner" size={18} />အခြေအနေ အပ်ဒိတ်လုပ်နေသည်…</div>}
       </section>}

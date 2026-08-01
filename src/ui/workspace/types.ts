@@ -22,6 +22,7 @@ export interface WorkspaceJob {
     attempts: number;
     maxAttempts: number;
     lastAttemptAt: string | null;
+    resumeStage: string | null;
   };
   recoveryCount: number;
   audioDuration: number | null;
@@ -34,6 +35,22 @@ export interface WorkspaceJob {
   audioUrl?: string | null;
   cancellationRequested: boolean;
   effects: VideoEffects;
+}
+
+export interface WorkspaceRetryEligibility {
+  recoverable: boolean;
+  resumeStage?: string;
+  resumeProgress?: number;
+  code?: string;
+  reason?: string;
+}
+
+export interface WorkspaceRetryResult {
+  status: 'accepted' | 'duplicate' | 'already_active';
+  replayed: boolean;
+  code: string;
+  resumeStage: string | null;
+  job: WorkspaceJobStatus;
 }
 
 export interface EffectRect {
@@ -77,5 +94,6 @@ export interface UploadConfiguration {
   configured: true;
   maxUploadSizeMb: number;
   maxUploadSizeBytes: number;
+  maxSourceDurationSeconds: number;
   supportedExtensions: string[];
 }

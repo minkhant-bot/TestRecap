@@ -1,5 +1,9 @@
 # Known Issues
 
+> Launch verification also requires a real near-15-minute E2E and isolated
+> native PostgreSQL. Blink's 15:00 safety limit is enforced before queueing,
+> processing, or credit reservation, but real near-limit support is unverified.
+
 ## Purpose
 
 Provide the current prioritized technical and production-risk register. Priorities reflect impact, not implementation order alone.
@@ -72,13 +76,15 @@ this real-E2E scope.
 
 1. Two job stores, status vocabularies, and queues coexist.
 2. JSON stores synchronously rewrite all state during progress.
-3. Admin UI is not connected to admin APIs.
-4. Credits remain a visual placeholder. PostgreSQL plans, Trial grants,
+3. Admin and Credits production screens are connected to the existing APIs;
+   authenticated staging behavior remains unverified.
+4. PostgreSQL plans, Trial grants,
    purchase review, immutable ledger/balance, bonus, adjustments, estimates,
    live reservations, settlement/release/refund, and worker recovery exist
    behind separate explicit gates; the UI, commercial configuration,
-   object adapter, production activation, and operational reconciliation remain
-   incomplete.
+   production activation and operational reconciliation remain incomplete. A
+   private single-replica `DATA_DIR` payment-proof adapter and authenticated
+   preview are implemented but not yet Railway volume/backup verified.
 5. Audit events are in-memory and incomplete.
 6. History reloads all jobs every three seconds.
 7. Each final effect performs a separate full H.264 encode.
@@ -91,10 +97,11 @@ this real-E2E scope.
     `TEST_DATABASE_URL`; it is not production migration, backup/restore, or
     staging verification.
 
-13. The three native PostgreSQL integration tests are authored but currently
-    skip when `TEST_DATABASE_URL` is unset. No PostgreSQL restart-persistence
-    run is evidenced. Ban/unban persistence is not implemented; planned
-    Super Admin ban/unban and operational credit reversal flows remain pending.
+13. The three native PostgreSQL integration suites passed using an isolated
+    `TEST_DATABASE_URL`, including restart-persistence coverage. This does not
+    replace production migration, backup/restore, or staging verification.
+    Ban/unban persistence is not implemented; planned Super Admin ban/unban and
+    operational credit reversal flows remain pending.
 
 #### P3 — Low
 
@@ -141,6 +148,6 @@ Repository state risk is independent of runtime behavior: the working applicatio
 
 Address issues in priority order with one approved scope at a time. For P2,
 follow `17_P2_FOUNDATION_ARCHITECTURE.md` and `14_ROADMAP.md`; missing
-accounting, settlement, object-storage, role-authority, or recovery guarantees
-block activation. Each implementation should add regression coverage and update
+accounting, settlement, proof-volume backup/restore, role-authority, or recovery
+guarantees block activation. Each implementation should add regression coverage and update
 `13_CHANGELOG.md` and affected architecture/API documents.

@@ -1,5 +1,10 @@
 # Roadmap
 
+> Sequencing is constrained by `18_PRODUCT_OWNER_DECISIONS_2026-08-01.md`:
+> finish docs/code/tests/config, preserve the verified native PostgreSQL baseline,
+> verify near-15-minute E2E, then stage on isolated Railway resources. Advanced
+> analytics is not a blocker.
+
 ## Purpose
 
 Record both the approved future product direction and the architect’s dependency-ordered remediation proposal. Approval of product direction does not approve implementation scope, delivery timing, or architecture changes.
@@ -11,7 +16,7 @@ Record both the approved future product direction and the architect’s dependen
 | Phase | Status |
 |---|---|
 | P1 — Core recap/beta hardening | Implemented for the verified 30-second flow; not fully production-validated. Long-duration and reliability verification is pending. |
-| P2 — Billing foundation/live integration | P2.1, P2.2, and P2.3 implementation exists behind inactive gates; unit-tested and native integration-test code authored, but real PostgreSQL execution is unverified. Production activation, object storage, backup/restore, reconciliation, and staging verification remain pending. |
+| P2 — Billing foundation/live integration | P2.1, P2.2, and P2.3 implementation exists behind inactive gates; unit tests and all three native PostgreSQL integration suites passed. Production activation, backup/restore, reconciliation operations, and staging verification remain pending. |
 | P3 — Lifecycle/authority consolidation | Not implemented; JSON workspace/core stores and Firebase role claims remain compatible authorities. |
 | P4 — Performance/scale | Not implemented; preserve workflow/output contracts before optimization. |
 | P5 — Future product expansion | No approved implementation scope; selectable voices and other expansion remain deferred. |

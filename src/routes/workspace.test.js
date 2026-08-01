@@ -2,9 +2,11 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import { randomUUID } from 'node:crypto';
 import test, { after } from 'node:test';
 import express from 'express';
 import { requireAuth, setAuthVerifierForTests } from '../middleware/auth.js';
+import { VIDEO_TOO_LONG_MESSAGE } from '../config/upload.js';
 
 const temporaryRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'testrecap-workspace-route-'));
 process.env.DATA_DIR = temporaryRoot;
@@ -21,6 +23,7 @@ const {
     updateJob: updateProcessingJob
 } = await import('../services/jobManager.js');
 const {
+    createWorkspaceJob,
     getWorkspaceJobInternal,
     listWorkspaceJobsForAdmission,
     updateWorkspaceJobInternal
@@ -40,7 +43,8 @@ setAuthVerifierForTests(async () => authenticatedUser);
 const app = express();
 app.use(express.json());
 app.use('/api/workspace', requireAuth, createWorkspaceRouter({
-    verifyKey: async () => ({ valid: geminiKeyValid })
+    verifyKey: async () => ({ valid: geminiKeyValid }),
+    readSourceDuration: async () => 123.45
 }));
 const server = await new Promise(resolve => {
     const listener = app.listen(0, '127.0.0.1', () => resolve(listener));
@@ -66,7 +70,121 @@ test('configuration exposes the configured limit and supported formats', async (
     assert.equal(config.configured, true);
     assert.equal(config.maxUploadSizeMb, 0.001);
     assert.equal(config.maxUploadSizeBytes, Math.floor(0.001 * 1024 * 1024));
+    assert.equal(config.maxSourceDurationSeconds, 900);
     assert.deepEqual(config.supportedExtensions, ['mp4', 'mkv', 'mov', 'avi', 'webm']);
+});
+
+test('authoritative upload duration accepts 14:59 and 15:00 but rejects 15:01', async () => {
+    for (const duration of [899, 900]) {
+        authenticatedUser = { ...owner, uid: `duration-${duration}` };
+        const durationApp = express();
+        durationApp.use(express.json());
+        durationApp.use('/api/workspace', requireAuth, createWorkspaceRouter({
+            verifyKey: async () => ({ valid: true }),
+            readSourceDuration: async () => duration
+        }));
+        const durationServer = await new Promise(resolve => {
+            const listener = durationApp.listen(0, '127.0.0.1', () => resolve(listener));
+        });
+        try {
+            const body = new FormData();
+            body.append('video', new Blob([Buffer.alloc(512)], { type: 'video/mp4' }), `${duration}.mp4`);
+            body.append('duration', '999999');
+            body.append('geminiApiKey', 'valid-key');
+            const response = await fetch(
+                `http://127.0.0.1:${durationServer.address().port}/api/workspace/jobs`,
+                { method: 'POST', headers: authenticated, body }
+            );
+            assert.equal(response.status, 201);
+            assert.equal((await response.json()).duration, duration);
+        } finally {
+            await new Promise(resolve => durationServer.close(resolve));
+        }
+    }
+
+    authenticatedUser = { ...owner, uid: 'duration-901' };
+    let reserveCalls = 0;
+    const rejectedApp = express();
+    rejectedApp.use(express.json());
+    rejectedApp.use('/api/workspace', requireAuth, createWorkspaceRouter({
+        verifyKey: async () => ({ valid: true }),
+        liveBillingEnabled: () => true,
+        readSourceDuration: async () => 901,
+        reserveBilling: async () => { reserveCalls += 1; }
+    }));
+    const rejectedServer = await new Promise(resolve => {
+        const listener = rejectedApp.listen(0, '127.0.0.1', () => resolve(listener));
+    });
+    try {
+        const body = new FormData();
+        body.append('video', new Blob([Buffer.alloc(512)], { type: 'video/mp4' }), 'too-long.mp4');
+        body.append('duration', '1');
+        const response = await fetch(
+            `http://127.0.0.1:${rejectedServer.address().port}/api/workspace/jobs`,
+            { method: 'POST', headers: authenticated, body }
+        );
+        assert.equal(response.status, 422);
+        assert.deepEqual(await response.json(), {
+            error: VIDEO_TOO_LONG_MESSAGE,
+            code: 'SOURCE_VIDEO_TOO_LONG'
+        });
+        assert.equal(reserveCalls, 0);
+        const jobs = await fetch(
+            `http://127.0.0.1:${rejectedServer.address().port}/api/workspace/jobs`,
+            { headers: authenticated }
+        );
+        assert.deepEqual(await jobs.json(), []);
+    } finally {
+        await new Promise(resolve => rejectedServer.close(resolve));
+        authenticatedUser = owner;
+    }
+});
+
+test('queue rechecks authoritative duration before queueing or reserving credits', async () => {
+    authenticatedUser = { ...owner, uid: 'queue-duration-owner' };
+    let probedDuration = 900;
+    let reserveCalls = 0;
+    const durationApp = express();
+    durationApp.use(express.json());
+    durationApp.use('/api/workspace', requireAuth, createWorkspaceRouter({
+        verifyKey: async () => ({ valid: true }),
+        liveBillingEnabled: () => true,
+        readSourceDuration: async () => probedDuration,
+        reserveBilling: async () => { reserveCalls += 1; }
+    }));
+    const durationServer = await new Promise(resolve => {
+        const listener = durationApp.listen(0, '127.0.0.1', () => resolve(listener));
+    });
+    try {
+        const body = new FormData();
+        body.append('video', new Blob([Buffer.alloc(512)], { type: 'video/mp4' }), 'boundary.mp4');
+        const uploaded = await fetch(
+            `http://127.0.0.1:${durationServer.address().port}/api/workspace/jobs`,
+            { method: 'POST', headers: authenticated, body }
+        );
+        assert.equal(uploaded.status, 201);
+        const job = await uploaded.json();
+
+        probedDuration = 901;
+        const queued = await fetch(
+            `http://127.0.0.1:${durationServer.address().port}/api/workspace/jobs/${job.id}/queue`,
+            {
+                method: 'POST',
+                headers: { ...authenticated, 'Content-Type': 'application/json' },
+                body: JSON.stringify({ billingMode: 'blink_funded', planCode: 'pro' })
+            }
+        );
+        assert.equal(queued.status, 422);
+        assert.deepEqual(await queued.json(), {
+            error: VIDEO_TOO_LONG_MESSAGE,
+            code: 'SOURCE_VIDEO_TOO_LONG'
+        });
+        assert.equal(reserveCalls, 0);
+        assert.equal(getWorkspaceJobInternal(job.id).status, 'pending');
+    } finally {
+        await new Promise(resolve => durationServer.close(resolve));
+        authenticatedUser = owner;
+    }
 });
 
 test('unsupported and oversized files are rejected without creating jobs', async () => {
@@ -406,7 +524,7 @@ test('valid upload creates a persistent pending job without activating processin
     assert.equal(job.progress, 0);
     assert.ok(job.createdAt);
     assert.ok(job.updatedAt);
-    assert.deepEqual(job.retry, { attempts: 0, maxAttempts: 0, lastAttemptAt: null });
+    assert.deepEqual(job.retry, { attempts: 0, maxAttempts: 0, lastAttemptAt: null, resumeStage: null });
     assert.equal(Object.hasOwn(job, 'storedPath'), false);
     assert.equal(listProcessingJobs().some(processingJob => processingJob.id === job.id), false);
 
@@ -545,5 +663,129 @@ test('live billing reservation is compensated when queue admission fails', async
         });
     } finally {
         await new Promise(resolve => liveServer.close(resolve));
+    }
+});
+
+test('failed workspace retry is owner-only, idempotent, concurrency-safe, and creates no billing reservation', async () => {
+    const retryOwner = { ...owner, uid: `retry-owner-${randomUUID()}` };
+    authenticatedUser = retryOwner;
+    const id = randomUUID();
+    const directory = path.join(temporaryRoot, 'uploads', 'workspace', id);
+    fs.mkdirSync(directory, { recursive: true });
+    const storedPath = path.join(directory, 'source.mp4');
+    fs.writeFileSync(storedPath, 'valid source');
+    createWorkspaceJob({
+        id, ownerUid: retryOwner.uid, filename: 'retry.mp4', fileSize: 12,
+        duration: 10, storedPath
+    });
+    updateWorkspaceJobInternal(id, {
+        status: 'failed', stage: 'failed', failedAt: new Date().toISOString(),
+        diagnostic: { stage: 'audio_extraction' }, error: 'Audio failed.'
+    });
+    let wakeCount = 0;
+    let reserveCount = 0;
+    const retryApp = express();
+    retryApp.use(express.json());
+    retryApp.use('/api/workspace', requireAuth, createWorkspaceRouter({
+        verifyKey: async () => ({ valid: true }),
+        readSourceDuration: async () => 10,
+        resolveGeminiKey: () => 'verified-key',
+        reserveBilling: async () => { reserveCount += 1; throw new Error('must not reserve'); },
+        worker: { wake: () => { wakeCount += 1; }, snapshot: () => ({}) },
+        publishQueue: () => undefined,
+        admission: {
+            consumeMutation: () => ({ allowed: true }),
+            withProcessingAdmission: (_uid, _jobId, operation) => operation({ idempotent: true })
+        }
+    }));
+    const retryServer = await new Promise(resolve => {
+        const listener = retryApp.listen(0, '127.0.0.1', () => resolve(listener));
+    });
+    const retryUrl = `http://127.0.0.1:${retryServer.address().port}/api/workspace`;
+    try {
+        const eligibility = await fetch(`${retryUrl}/jobs/${id}/retry`, { headers: authenticated });
+        assert.equal(eligibility.status, 200);
+        assert.deepEqual(await eligibility.json(), {
+            recoverable: true, resumeStage: 'audio_extraction', resumeProgress: 10
+        });
+
+        authenticatedUser = { ...owner, uid: `other-${randomUUID()}` };
+        const denied = await fetch(`${retryUrl}/jobs/${id}/retry`, {
+            method: 'POST', headers: { ...authenticated, 'Idempotency-Key': 'retry-denied' }
+        });
+        assert.equal(denied.status, 404);
+        assert.equal((await denied.json()).code, 'NOT_FOUND');
+        authenticatedUser = retryOwner;
+
+        const request = () => fetch(`${retryUrl}/jobs/${id}/retry`, {
+            method: 'POST', headers: { ...authenticated, 'Idempotency-Key': 'retry-same' }
+        });
+        const responses = await Promise.all([request(), request()]);
+        assert.deepEqual(responses.map(response => response.status).sort(), [200, 202]);
+        const payloads = await Promise.all(responses.map(response => response.json()));
+        assert.deepEqual(payloads.map(payload => payload.status).sort(), ['accepted', 'duplicate']);
+        assert.equal(getWorkspaceJobInternal(id).status, 'queued');
+        assert.equal(getWorkspaceJobInternal(id).retry.attempts, 1);
+        assert.equal(wakeCount, 1);
+        assert.equal(reserveCount, 0);
+
+        const alreadyActive = await fetch(`${retryUrl}/jobs/${id}/retry`, {
+            method: 'POST', headers: { ...authenticated, 'Idempotency-Key': 'different-key' }
+        });
+        assert.equal(alreadyActive.status, 409);
+        assert.equal((await alreadyActive.json()).code, 'JOB_ALREADY_ACTIVE');
+    } finally {
+        authenticatedUser = owner;
+        await new Promise(resolve => retryServer.close(resolve));
+    }
+});
+
+test('retry rejects non-failed jobs and reports missing recovery artifacts', async () => {
+    const retryOwner = { ...owner, uid: `retry-errors-${randomUUID()}` };
+    authenticatedUser = retryOwner;
+    const createRecord = (status, keepSource = true) => {
+        const id = randomUUID();
+        const directory = path.join(temporaryRoot, 'uploads', 'workspace', id);
+        fs.mkdirSync(directory, { recursive: true });
+        const storedPath = path.join(directory, 'source.mp4');
+        fs.writeFileSync(storedPath, 'valid source');
+        createWorkspaceJob({ id, ownerUid: retryOwner.uid, filename: `${id}.mp4`, fileSize: 12, duration: 10, storedPath });
+        if (status === 'failed') updateWorkspaceJobInternal(id, { status: 'failed', stage: 'failed', failedAt: new Date().toISOString() });
+        if (!keepSource) fs.unlinkSync(storedPath);
+        return id;
+    };
+    const pendingId = createRecord('pending');
+    const missingId = createRecord('failed', false);
+    const retryApp = express();
+    retryApp.use(express.json());
+    retryApp.use('/api/workspace', requireAuth, createWorkspaceRouter({
+        readSourceDuration: async () => 10,
+        resolveGeminiKey: () => 'verified-key',
+        worker: { wake: () => undefined, snapshot: () => ({}) },
+        publishQueue: () => undefined
+    }));
+    const retryServer = await new Promise(resolve => {
+        const listener = retryApp.listen(0, '127.0.0.1', () => resolve(listener));
+    });
+    const retryUrl = `http://127.0.0.1:${retryServer.address().port}/api/workspace`;
+    try {
+        const notFailed = await fetch(`${retryUrl}/jobs/${pendingId}/retry`, {
+            method: 'POST', headers: { ...authenticated, 'Idempotency-Key': 'pending' }
+        });
+        assert.equal(notFailed.status, 409);
+        assert.equal((await notFailed.json()).code, 'JOB_NOT_FAILED');
+        const eligibility = await fetch(`${retryUrl}/jobs/${missingId}/retry`, { headers: authenticated });
+        assert.equal(eligibility.status, 200);
+        const unavailable = await eligibility.json();
+        assert.equal(unavailable.recoverable, false);
+        assert.equal(unavailable.code, 'RETRY_ARTIFACT_MISSING');
+        const missing = await fetch(`${retryUrl}/jobs/${missingId}/retry`, {
+            method: 'POST', headers: { ...authenticated, 'Idempotency-Key': 'missing' }
+        });
+        assert.equal(missing.status, 422);
+        assert.equal((await missing.json()).code, 'RETRY_ARTIFACT_MISSING');
+    } finally {
+        authenticatedUser = owner;
+        await new Promise(resolve => retryServer.close(resolve));
     }
 });

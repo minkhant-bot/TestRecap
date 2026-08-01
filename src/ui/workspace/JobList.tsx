@@ -1,17 +1,20 @@
-import { ArrowUpRight, Clock3, FileVideo2, Trash2 } from 'lucide-react';
+import { ArrowUpRight, Clock3, FileVideo2, RotateCcw, Trash2 } from 'lucide-react';
 import { useNavigate } from 'react-router-dom';
 import { StatusBadge } from '../components';
 import { formatCreatedAt, formatDuration } from './format';
 import { getDisplayedProgress, getJobStatusLabel, getJobStatusTone } from './workflowPresentation';
-import type { WorkspaceJob } from './types';
+import type { WorkspaceJob, WorkspaceRetryEligibility } from './types';
 
 interface JobListProps {
   jobs: WorkspaceJob[];
   onDelete?: (job: WorkspaceJob) => void;
   compact?: boolean;
+  retryEligibility?: Record<string, WorkspaceRetryEligibility>;
+  retryingId?: string | null;
+  onRetry?: (job: WorkspaceJob) => void;
 }
 
-export function JobList({ jobs, onDelete, compact = false }: JobListProps) {
+export function JobList({ jobs, onDelete, compact = false, retryEligibility = {}, retryingId = null, onRetry }: JobListProps) {
   const navigate = useNavigate();
   const openJob = (job: WorkspaceJob) => {
     navigate(`/new-recap?job=${encodeURIComponent(job.id)}`);
@@ -70,7 +73,22 @@ export function JobList({ jobs, onDelete, compact = false }: JobListProps) {
                 ဖွင့်မည် <ArrowUpRight size={14} />
               </button>
             )}
+            {job.status === 'failed' && retryEligibility[job.id]?.recoverable && onRetry && (
+              <button
+                className="workspace-job__retry"
+                disabled={retryingId === job.id}
+                onClick={event => {
+                  event.stopPropagation();
+                  onRetry(job);
+                }}
+              >
+                <RotateCcw size={14} />{retryingId === job.id ? 'Requeueing…' : 'Retry'}
+              </button>
+            )}
           </div>
+          {job.status === 'failed' && retryEligibility[job.id] && !retryEligibility[job.id].recoverable && (
+            <small className="workspace-job__retry-note">{retryEligibility[job.id].reason || 'Not safely recoverable'}</small>
+          )}
           {onDelete && !['queued', 'processing'].includes(job.status) && (
             <button
               className="workspace-job__delete"

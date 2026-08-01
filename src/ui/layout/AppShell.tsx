@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import {
   Clock3,
   Coins,
@@ -10,6 +10,7 @@ import {
   PanelLeftOpen,
   Plus,
   Settings,
+  ShieldCheck,
   X,
 } from 'lucide-react';
 import { NavLink, Outlet, useNavigate } from 'react-router-dom';
@@ -19,24 +20,40 @@ import { Avatar, Button, Dropdown, DropdownItem } from '../components';
 const navigation = [
   { to: '/dashboard', label: 'ပင်မစာမျက်နှာ', icon: LayoutDashboard, superAdminOnly: true },
   { to: '/projects', label: 'ပရောဂျက်များ', icon: FolderOpen, superAdminOnly: true },
+  { to: '/admin', label: 'Super Admin', icon: ShieldCheck, superAdminOnly: true },
   { to: '/new-recap', label: 'Recap အသစ်', icon: Plus, userOnly: true },
   { to: '/history', label: 'မှတ်တမ်း', icon: Clock3 },
   { to: '/buy-credits', label: 'ခရက်ဒစ်', icon: Coins },
   { to: '/settings', label: 'ဆက်တင်များ', icon: Settings },
 ];
 
+interface BillingSummary {
+  credits: string | null;
+  plan: string | null;
+}
+
+const formatCreditBalance = (value: unknown) => {
+  if (typeof value === 'number' && Number.isSafeInteger(value) && value >= 0) {
+    return value.toLocaleString();
+  }
+  if (typeof value === 'string' && /^\d+$/.test(value)) {
+    return BigInt(value).toLocaleString();
+  }
+  return null;
+};
+
 function Brand({ compact = false, logoOnly = false }: { compact?: boolean; logoOnly?: boolean }) {
   return (
     <div className="ds-brand">
       {logoOnly ? (
-        <img className="ds-brand__logo" src="/assets/logo.svg" alt="TestRecap" />
+        <img className="ds-brand__logo" src="/assets/logo.svg" alt="Blink Automation" />
       ) : (
-        <span className="ds-brand__mark" aria-hidden="true">T</span>
+        <span className="ds-brand__mark" aria-hidden="true">B</span>
       )}
       {!logoOnly && !compact && (
         <span className="ds-brand__copy">
-          <strong>TestRecap</strong>
-          <small>AI ရုပ်ရှင်စတူဒီယို</small>
+          <strong>Blink</strong>
+          <small>Automation Studio</small>
         </span>
       )}
     </div>
@@ -67,18 +84,63 @@ export function AppShell() {
   const [mobileOpen, setMobileOpen] = useState(false);
   const [signingOut, setSigningOut] = useState(false);
   const [signOutError, setSignOutError] = useState(false);
+  const [billingSummary, setBillingSummary] = useState<BillingSummary>({ credits: null, plan: null });
+  const mobileMenuTrigger = useRef<HTMLButtonElement>(null);
+  const mobileMenuClose = useRef<HTMLButtonElement>(null);
   const { profile, logout } = useAuth();
   const navigate = useNavigate();
   const isSuperAdmin = profile?.role === 'super_admin';
   const availableNavigation = navigation.filter(item =>
     (!item.superAdminOnly || isSuperAdmin) && (!item.userOnly || !isSuperAdmin));
   const accountName = profile?.displayName || profile?.email || 'Google အကောင့်';
-  const roleLabel = profile?.role === 'super_admin' ? 'စီမံခန့်ခွဲသူ' : 'အသုံးပြုသူ';
-  const profileCredits = profile as (typeof profile & { creditBalance?: unknown; credits?: unknown });
-  const rawCreditBalance = profileCredits?.creditBalance ?? profileCredits?.credits;
-  const creditBalance = typeof rawCreditBalance === 'number' && Number.isFinite(rawCreditBalance)
-    ? Math.max(0, rawCreditBalance)
-    : 0;
+  const roleLabel = profile?.role === 'super_admin'
+    ? 'Owner / Super Admin'
+    : profile?.role === 'admin' ? 'Admin' : 'အသုံးပြုသူ';
+
+  useEffect(() => {
+    let active = true;
+    setBillingSummary({ credits: null, plan: null });
+    const loadBillingSummary = async () => {
+      const [balanceResponse, planResponse] = await Promise.all([
+        fetch('/api/credits/balance', { credentials: 'include' }),
+        fetch('/api/plans/me', { credentials: 'include' }),
+      ]);
+      if (!active || !balanceResponse.ok || !planResponse.ok) return;
+      const [balance, plan] = await Promise.all([balanceResponse.json(), planResponse.json()]);
+      if (!active) return;
+      setBillingSummary({
+        credits: formatCreditBalance(balance?.availableBalance),
+        plan: typeof plan?.planName === 'string' && plan.planName.trim() ? plan.planName.trim() : null,
+      });
+    };
+    void loadBillingSummary().catch(() => undefined);
+    return () => { active = false; };
+  }, [profile?.uid]);
+
+  useEffect(() => {
+    if (!mobileOpen) return;
+    const previousOverflow = document.body.style.overflow;
+    document.body.style.overflow = 'hidden';
+    const closeOnEscape = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') setMobileOpen(false);
+    };
+    window.addEventListener('keydown', closeOnEscape);
+    window.requestAnimationFrame(() => mobileMenuClose.current?.focus());
+    return () => {
+      document.body.style.overflow = previousOverflow;
+      window.removeEventListener('keydown', closeOnEscape);
+      mobileMenuTrigger.current?.focus();
+    };
+  }, [mobileOpen]);
+
+  useEffect(() => {
+    const mobileViewport = window.matchMedia('(max-width: 767px)');
+    const closeOnDesktop = (event: MediaQueryListEvent) => {
+      if (!event.matches) setMobileOpen(false);
+    };
+    mobileViewport.addEventListener('change', closeOnDesktop);
+    return () => mobileViewport.removeEventListener('change', closeOnDesktop);
+  }, []);
   const signOut = async () => {
     if (signingOut) return;
     setSigningOut(true);
@@ -139,22 +201,36 @@ export function AppShell() {
         </div>
       </aside>
 
-      {isSuperAdmin && mobileOpen && (
+      {mobileOpen && (
         <div className="ds-mobile-drawer" role="dialog" aria-modal="true" aria-label="လမ်းညွှန်">
           <button className="ds-mobile-drawer__scrim" aria-label="လမ်းညွှန် ပိတ်မည်" onClick={() => setMobileOpen(false)} />
           <div className="ds-mobile-drawer__panel">
             <div className="ds-mobile-drawer__header">
-              <Brand />
-              <button className="ds-topbar__icon" onClick={() => setMobileOpen(false)} aria-label="လမ်းညွှန် ပိတ်မည်">
+              <div>
+                <Brand />
+                {isSuperAdmin && <span className="ds-mobile-drawer__role">Owner / Super Admin</span>}
+              </div>
+              <button ref={mobileMenuClose} className="ds-topbar__icon" onClick={() => setMobileOpen(false)} aria-label="လမ်းညွှန် ပိတ်မည်">
                 <X size={20} />
               </button>
             </div>
             <Navigation items={availableNavigation} onNavigate={() => setMobileOpen(false)} />
             <div className="ds-mobile-account">
+              <button className="ds-mobile-billing" onClick={() => { setMobileOpen(false); navigate('/buy-credits'); }}>
+                <span>
+                  <small>ခရက်ဒစ်</small>
+                  <strong>{billingSummary.credits ?? '—'}</strong>
+                </span>
+                <span>
+                  <small>အစီအစဉ်</small>
+                  <strong>{billingSummary.plan ?? 'မဖွင့်ရသေး'}</strong>
+                </span>
+              </button>
               <div className="ds-mobile-account__identity">
                 <Avatar name={accountName} src={profile?.photoURL} size="sm" />
                 <span>
                   <strong>{accountName}</strong>
+                  <small>{profile?.email}</small>
                   <small>{roleLabel}</small>
                 </span>
               </div>
@@ -175,23 +251,24 @@ export function AppShell() {
       <div className="ds-app-frame">
         <header className="ds-topbar">
           <div className="ds-topbar__start">
-            {isSuperAdmin && (
-              <button className="ds-topbar__menu" onClick={() => setMobileOpen(true)} aria-label="လမ်းညွှန် ဖွင့်မည်">
-                <Menu size={20} />
-              </button>
-            )}
-            <div className="ds-topbar__mobile-brand"><Brand logoOnly={!isSuperAdmin} /></div>
+            <button ref={mobileMenuTrigger} className="ds-topbar__menu" onClick={() => setMobileOpen(true)} aria-label="လမ်းညွှန် ဖွင့်မည်">
+              <Menu size={20} />
+            </button>
+            <div className="ds-topbar__mobile-brand"><Brand /></div>
             <span className="ds-topbar__eyebrow">ဖန်တီးမှု အလုပ်နေရာ</span>
           </div>
           <div className="ds-topbar__actions">
             <button
               className="ds-credit-indicator"
               onClick={() => navigate('/buy-credits')}
-              aria-label={`ခရက်ဒစ် ${creditBalance}။ ခရက်ဒစ်စာမျက်နှာ ဖွင့်မည်`}
+              aria-label={`ခရက်ဒစ် ${billingSummary.credits ?? 'မရရှိနိုင်'}။ ခရက်ဒစ်စာမျက်နှာ ဖွင့်မည်`}
             >
               <Coins size={16} aria-hidden="true" />
-              <strong>{creditBalance}</strong>
+              <strong>{billingSummary.credits ?? '—'}</strong>
               <span>ခရက်ဒစ်</span>
+            </button>
+            <button className="ds-topbar__mobile-avatar" onClick={() => setMobileOpen(true)} aria-label="အကောင့်နှင့် လမ်းညွှန်မီနူး ဖွင့်မည်">
+              <Avatar name={accountName} src={profile?.photoURL} size="sm" />
             </button>
             <Dropdown
               trigger={({ open, onClick, ...aria }) => (
@@ -221,18 +298,6 @@ export function AppShell() {
         </main>
       </div>
 
-      <nav className="ds-bottom-nav" aria-label="မိုဘိုင်း လမ်းညွှန်">
-        {availableNavigation.map(({ to, label, icon: Icon }) => (
-          <NavLink
-            key={to}
-            to={to}
-            className={({ isActive }) => `ds-bottom-nav__item ${isActive ? 'ds-bottom-nav__item--active' : ''}`}
-          >
-            <Icon size={20} strokeWidth={1.8} aria-hidden="true" />
-            <span>{label}</span>
-          </NavLink>
-        ))}
-      </nav>
     </div>
   );
 }

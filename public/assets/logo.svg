@@ -1,16 +1,16 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="65 255 247 240" width="247" height="240">
   <defs>
     <linearGradient id="topGrad" x1="0%" y1="0%" x2="100%" y2="100%">
-      <stop offset="0%" stop-color="#8E52FF"/>
-      <stop offset="100%" stop-color="#7A3EF0"/>
+      <stop offset="0%" stop-color="#FFD27D"/>
+      <stop offset="100%" stop-color="#F2BC5B"/>
     </linearGradient>
     <linearGradient id="lavGrad" x1="0%" y1="0%" x2="100%" y2="100%">
-      <stop offset="0%" stop-color="#D2AEFF"/>
-      <stop offset="100%" stop-color="#BC94FE"/>
+      <stop offset="0%" stop-color="#FFE3A6"/>
+      <stop offset="100%" stop-color="#F5C86F"/>
     </linearGradient>
     <linearGradient id="darkGrad" x1="0%" y1="0%" x2="100%" y2="100%">
-      <stop offset="0%" stop-color="#6544D6"/>
-      <stop offset="100%" stop-color="#5230BE"/>
+      <stop offset="0%" stop-color="#DCA13B"/>
+      <stop offset="100%" stop-color="#B77A22"/>
     </linearGradient>
   </defs>
 

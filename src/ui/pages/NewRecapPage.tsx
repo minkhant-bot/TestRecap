@@ -66,7 +66,6 @@ export function NewRecapPage() {
       await queueWorkspaceJob(job.id, '', latestEffectsRef.current);
       setActiveJobId(job.id);
       setSubmittedJob(null);
-      window.scrollTo({ top: 0 });
       await refresh();
     } catch (requestError) {
       setStartError(requestError instanceof Error
@@ -90,12 +89,16 @@ export function NewRecapPage() {
     setStartError(null);
     setEffects(DEFAULT_VIDEO_EFFECTS);
     latestEffectsRef.current = DEFAULT_VIDEO_EFFECTS;
-    window.scrollTo({ top: 0 });
     void refresh();
   };
 
   return (
     <div className="ds-page-container workspace-page workspace-new-recap-page">
+      <header className="workspace-page-header new-recap-page-header">
+        <span className="workspace-eyebrow">Workspace</span>
+        <h1>New Recap</h1>
+        <p>ဗီဒီယိုတင်ခြင်းမှ export အထိ စာမျက်နှာခုန်ခြင်းမရှိဘဲ တစ်နေရာတည်းတွင် လုပ်ဆောင်ပါ။</p>
+      </header>
       <ProcessingStatusView
         projectId={activeJobId}
         onReset={resetView}

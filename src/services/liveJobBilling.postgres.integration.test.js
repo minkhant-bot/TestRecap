@@ -1,8 +1,7 @@
 import assert from 'node:assert/strict';
-import fs from 'node:fs';
 import test from 'node:test';
 import pg from 'pg';
-import { migrationsDirectory } from '../db/migrations.js';
+import { discoverMigrations } from '../db/migrations.js';
 import * as audit from '../db/repositories/auditLogs.js';
 import * as balances from '../db/repositories/balances.js';
 import * as jobs from '../db/repositories/jobs.js';
@@ -15,7 +14,9 @@ import * as leases from '../db/repositories/workerLeases.js';
 import {
   acquireLiveJobLease,
   handleLiveJobFailure,
+  listRecoverableLiveJobIds,
   releaseLiveJobLease,
+  releaseLiveJob,
   reserveLiveJob,
   settleLiveJob,
 } from './liveJobBilling.js';
@@ -34,7 +35,7 @@ integration('live billing uses real PostgreSQL locks, ledger compensation, and w
   await setup.connect();
   await setup.query(`CREATE SCHEMA ${schema}`);
   await setup.query(`SET search_path TO ${schema}`);
-  await setup.query(fs.readFileSync(`${migrationsDirectory}/0001_p2_foundation.sql`, 'utf8'));
+  for (const migration of discoverMigrations()) await setup.query(migration.sql);
   await setup.end();
   const pool = new pg.Pool({
     connectionString: url, max: 8, options: `-c search_path=${schema}`,
@@ -53,9 +54,27 @@ integration('live billing uses real PostgreSQL locks, ledger compensation, and w
       client.release();
     }
   };
+  const scopedJobs = {
+    ...jobs,
+    findBillingJob: (jobId, options = {}) => jobs.findBillingJob(jobId, {
+      ...options, client: options.client || pool,
+    }),
+    listRecoverableBillingJobs: (options = {}) => jobs.listRecoverableBillingJobs({
+      ...options, client: options.client || pool,
+    }),
+  };
+  const scopedLeases = {
+    ...leases,
+    heartbeatLease: (lease, options = {}) => leases.heartbeatLease(lease, {
+      ...options, client: options.client || pool,
+    }),
+    releaseLease: (lease, options = {}) => leases.releaseLease(lease, {
+      ...options, client: options.client || pool,
+    }),
+  };
   const repositories = {
-    transaction, audit, balances, jobs, ledger,
-    assignments, plans, reservations, users, leases,
+    transaction, audit, balances, jobs: scopedJobs, ledger,
+    assignments, plans, reservations, users, leases: scopedLeases,
   };
   const identity = { uid: 'live-user', email: 'live@example.test' };
   try {
@@ -64,19 +83,37 @@ integration('live billing uses real PostgreSQL locks, ledger compensation, and w
     }, { client: pool });
     const planId = '00000000-0000-4000-8000-000000000101';
     const policyId = '00000000-0000-4000-8000-000000000102';
+    const entitlementIds = [
+      '00000000-0000-4000-8000-000000000103',
+      '00000000-0000-4000-8000-000000000104',
+      '00000000-0000-4000-8000-000000000105',
+    ];
+    const assignmentId = '00000000-0000-4000-8000-000000000106';
     await pool.query(
-      `INSERT INTO plans(id,code,name,active) VALUES($1,'normal','Normal',true);
-       INSERT INTO plan_policy_versions
+      `INSERT INTO plans(id,code,name,active) VALUES($1,'normal','Normal',true)`,
+      [planId],
+    );
+    await pool.query(
+      `INSERT INTO plan_policy_versions
         (id,plan_id,version,billing_block_seconds,credits_per_block,
-         trial_allowance_credits,billing_mode,effective_from,active)
-       VALUES($2,$1,1,30,2,0,'byok','2026-01-01',true);
-       INSERT INTO plan_entitlements(policy_version_id,entitlement_key,enabled)
-       VALUES($2,'blur',false),($2,'flip',false),($2,'byok_mode',true);
-       INSERT INTO user_plan_assignments(user_id,plan_id,status,source)
-       VALUES($3,$1,'active','user_selection');
-       INSERT INTO credit_balance_accounts(user_id,posted_balance,reserved_balance)
-       VALUES($3,6,0)`,
+         trial_allowance_credits,billing_mode,effective_from,active,created_by_user_id)
+       VALUES($2,$1,1,30,2,0,'byok','2026-01-01',true,$3)`,
       [planId, policyId, user.id],
+    );
+    await pool.query(
+      `INSERT INTO plan_entitlements(id,policy_version_id,entitlement_key,enabled)
+       VALUES($2,$1,'blur',false),($3,$1,'flip',false),($4,$1,'byok_mode',true)`,
+      [policyId, ...entitlementIds],
+    );
+    await pool.query(
+      `INSERT INTO user_plan_assignments(id,user_id,plan_id,status,source,starts_at)
+       VALUES($1,$2,$3,'active','user_selection',now())`,
+      [assignmentId, user.id, planId],
+    );
+    await pool.query(
+      `INSERT INTO credit_balance_accounts(user_id,posted_balance,reserved_balance)
+       VALUES($1,6,0)`,
+      [user.id],
     );
     const base = {
       identity, sourceDurationSeconds: 61, requestedPlanCode: 'normal',
@@ -107,6 +144,7 @@ integration('live billing uses real PostgreSQL locks, ledger compensation, and w
     });
     assert.ok(firstLease);
     assert.equal(duplicateLease, null);
+    assert.ok((await listRecoverableLiveJobIds({ repositories })).includes(jobId));
     await releaseLiveJobLease(firstLease, { repositories });
     await settleLiveJob(jobId, { outputValidated: true }, { repositories });
     await handleLiveJobFailure(jobId, 'post_settlement_system_failure', { repositories });
@@ -117,6 +155,21 @@ integration('live billing uses real PostgreSQL locks, ledger compensation, and w
     const entries = await ledger.listLedgerEntries(user.id, { client: pool });
     assert.equal(entries.filter(item => item.entryType === 'settlement').length, 1);
     assert.equal(entries.filter(item => item.entryType === 'refund').length, 1);
+
+    const releasedJobId = '00000000-0000-4000-8000-000000000113';
+    await reserveLiveJob({
+      ...base, sourceDurationSeconds: 31, jobId: releasedJobId,
+      idempotencyKey: 'live-release',
+    }, { env, repositories });
+    await releaseLiveJob(releasedJobId, 'pre_provider_failure', { repositories });
+    await releaseLiveJob(releasedJobId, 'duplicate_delivery', { repositories });
+    const releasedReservation = await reservations.findReservationByJobId(
+      releasedJobId, { client: pool },
+    );
+    assert.equal(releasedReservation.status, 'released');
+    const afterRelease = await balances.findBalanceAccount(user.id, { client: pool });
+    assert.equal(afterRelease.postedBalance, 6n);
+    assert.equal(afterRelease.reservedBalance, 0n);
   } finally {
     await pool.end();
     const cleanup = new pg.Client({ connectionString: url });

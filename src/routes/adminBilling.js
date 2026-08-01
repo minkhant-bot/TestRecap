@@ -2,6 +2,7 @@ import express from 'express';
 import {
   BillingError,
   adjustCredits,
+  archiveCreditPackage,
   adminGetScreenshotMetadata,
   adminGetUserCredits,
   adminListCatalog,
@@ -12,14 +13,29 @@ import {
   configureCreditPlan,
   configurePlan,
   configurePromotion,
+  createCreditPackage,
   createPlanPolicy,
+  editCreditPackage,
   linkPackageBank,
   publicJson,
   reviewPurchase,
+  reorderCreditPackages,
+  setCreditPackageStatus,
   verifyScreenshot,
 } from '../services/billingFoundation.js';
+import { paymentProofStorage, PaymentProofStorageError } from '../services/paymentProofStorage.js';
 
 const idempotencyKey = req => req.get('Idempotency-Key');
+const publicProofMetadata = proof => ({
+  id: proof.id,
+  originalFilename: proof.originalFilename,
+  mimeType: proof.mimeType,
+  sizeBytes: String(proof.sizeBytes),
+  status: proof.status,
+  uploadedAt: proof.uploadedAt,
+  verifiedAt: proof.verifiedAt,
+});
+const structuredError = error => error instanceof BillingError || error instanceof PaymentProofStorageError;
 const handler = operation => async (req, res) => {
   try {
     const result = await operation(req);
@@ -29,10 +45,10 @@ const handler = operation => async (req, res) => {
     }
     return res.json(publicJson(result));
   } catch (error) {
-    const status = error instanceof BillingError ? error.status : 500;
+    const status = structuredError(error) ? error.status : 500;
     return res.status(status).json({
-      error: error instanceof BillingError ? error.message : 'Billing administration failed.',
-      code: error instanceof BillingError ? error.code : 'BILLING_OPERATION_FAILED',
+      error: structuredError(error) ? error.message : 'Billing administration failed.',
+      code: structuredError(error) ? error.code : 'BILLING_OPERATION_FAILED',
       requestId: req.requestId,
     });
   }
@@ -41,10 +57,39 @@ const handler = operation => async (req, res) => {
 export const createAdminBillingRouter = (service = {
   adminListCatalog, adminListPurchases, reviewPurchase, configurePlan, createPlanPolicy,
   configureCreditPlan, configureBank, linkPackageBank, configurePromotion,
+  createCreditPackage, editCreditPackage, setCreditPackageStatus,
+  archiveCreditPackage, reorderCreditPackages,
   adjustCredits, assessTrial, verifyScreenshot, adminGetScreenshotMetadata,
   adminGetUserCredits, adminListAudit,
-}) => {
+}, { proofStorage = paymentProofStorage } = {}) => {
   const router = express.Router();
+  const proofContentHandler = async (req, res) => {
+    try {
+      const metadata = await service.adminGetScreenshotMetadata(req.user, req.params.id);
+      if (metadata?.status !== 'verified') {
+        throw new PaymentProofStorageError('Payment proof upload is not complete.', {
+          code: 'PROOF_NOT_READY', status: 409,
+        });
+      }
+      const proof = await proofStorage.read(metadata);
+      res.set({
+        'Cache-Control': 'private, no-store',
+        'Content-Type': proof.mimeType,
+        'Content-Length': String(proof.sizeBytes),
+        'Content-Disposition': `${req.query.download === '1' ? 'attachment' : 'inline'}; filename="payment-proof.${proof.extension}"`,
+        'X-Content-Type-Options': 'nosniff',
+        'Content-Security-Policy': "default-src 'none'; sandbox",
+      });
+      return res.send(proof.buffer);
+    } catch (error) {
+      const status = structuredError(error) ? error.status : 500;
+      return res.status(status).json({
+        error: structuredError(error) ? error.message : 'Payment proof is unavailable.',
+        code: structuredError(error) ? error.code : 'PROOF_STORAGE_ERROR',
+        requestId: req.requestId,
+      });
+    }
+  };
   router.get('/catalog', handler(req => service.adminListCatalog(req.user)));
   router.get('/purchases', handler(req => service.adminListPurchases(req.user, {
     status: req.query.status || null,
@@ -64,6 +109,24 @@ export const createAdminBillingRouter = (service = {
     service.createPlanPolicy(req.user, req.params.code, req.body, {
       idempotencyKey: idempotencyKey(req),
     })));
+  router.post('/credit-packages', handler(req => service.createCreditPackage(
+    req.user, req.body, { idempotencyKey: idempotencyKey(req) },
+  )));
+  router.patch('/credit-packages/:id', handler(req => service.editCreditPackage(
+    req.user, req.params.id, req.body, { idempotencyKey: idempotencyKey(req) },
+  )));
+  router.post('/credit-packages/:id/activate', handler(req => service.setCreditPackageStatus(
+    req.user, req.params.id, true, req.body, { idempotencyKey: idempotencyKey(req) },
+  )));
+  router.post('/credit-packages/:id/deactivate', handler(req => service.setCreditPackageStatus(
+    req.user, req.params.id, false, req.body, { idempotencyKey: idempotencyKey(req) },
+  )));
+  router.post('/credit-packages/:id/archive', handler(req => service.archiveCreditPackage(
+    req.user, req.params.id, req.body, { idempotencyKey: idempotencyKey(req) },
+  )));
+  router.post('/credit-packages/reorder', handler(req => service.reorderCreditPackages(
+    req.user, req.body, { idempotencyKey: idempotencyKey(req) },
+  )));
   router.put('/credit-plans/:code', handler(req => service.configureCreditPlan(req.user, {
     ...req.body, code: req.params.code,
   }, { idempotencyKey: idempotencyKey(req) })));
@@ -89,8 +152,9 @@ export const createAdminBillingRouter = (service = {
     service.verifyScreenshot(req.user, req.params.id, {
       idempotencyKey: idempotencyKey(req),
     })));
-  router.get('/screenshots/:id', handler(req =>
-    service.adminGetScreenshotMetadata(req.user, req.params.id)));
+  router.get('/screenshots/:id', handler(async req =>
+    publicProofMetadata(await service.adminGetScreenshotMetadata(req.user, req.params.id))));
+  router.get('/screenshots/:id/content', proofContentHandler);
   router.get('/users/:uid/credits', handler(req =>
     service.adminGetUserCredits(req.user, req.params.uid)));
   router.get('/audit', handler(req => service.adminListAudit(req.user, {

@@ -12,7 +12,6 @@ function parsePositiveInteger(value, name, { defaultValue, maximum }) {
   }
   return resolved;
 }
-
 export function getAdmissionConfiguration(env = process.env) {
   const requireExplicit = env.NODE_ENV === 'production';
 
@@ -46,4 +45,3 @@ export function getAdmissionConfiguration(env = process.env) {
     ),
   });
 }
-

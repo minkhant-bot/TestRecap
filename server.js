@@ -17,6 +17,7 @@ import { admissionService } from './src/services/admissionControl.js';
 import { listWorkspaceJobsForAdmission } from './src/services/workspaceJobs.js';
 import { getDatabaseConfiguration, getRedactedDatabaseConfiguration } from './src/config/database.js';
 import { shutdownDatabase } from './src/db/client.js';
+import { paymentProofStorage } from './src/services/paymentProofStorage.js';
 
 const app = express();
 const storagePaths = ensureStoragePaths(getStoragePaths());
@@ -66,6 +67,13 @@ async function startServer() {
     ...getRedactedDatabaseConfiguration(databaseConfiguration)
   }));
   console.log(formatFasterWhisperStartupConfig(getFasterWhisperRuntimeConfig()));
+  const removedTemporaryProofs = await paymentProofStorage.cleanupTemporaryFiles();
+  if (removedTemporaryProofs.length) {
+    console.info(JSON.stringify({
+      event: 'payment_proof.temporary_cleanup',
+      removedCount: removedTemporaryProofs.length,
+    }));
+  }
   recoverStuckJobs();
   restoreQueuedJobs();
   admissionService.reconcileProcessingStarts([

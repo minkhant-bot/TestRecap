@@ -57,8 +57,9 @@ P2.1/P2.2/P2.3 rows above.
 - JSON/BYOK and PostgreSQL restart persistence are tested.
 - No ban/unban persistence schema exists. Planned ban/unban and Super Admin
   credit grant/deduction/refund/reversal UI and flows are not complete.
-- Never auto-run migrations or activate `DATABASE_REQUIRED`/role authority without
-  an approved, tested cutover.
+- Production startup now applies the approved checksummed migrations after HTTP
+  bind. This does not activate `DATABASE_REQUIRED`, billing gates, or PostgreSQL
+  role authority; those cutovers still require separate approval and testing.
 
 ## PostgreSQL Billing and Live Job Status (2026-07-31)
 

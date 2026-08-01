@@ -125,7 +125,7 @@ node --test                 # no npm test script exists
 npm run lint                # TypeScript validation
 npm run build               # production SPA bundle
 npm run db:status           # requires DATABASE_URL for PostgreSQL inspection
-npm run db:migrate          # controlled, forward-only migration; never automatic
+npm run db:migrate          # manual local forward migration; production startup also applies it
 ```
 
 Set Firebase, Gemini, upload, admission, and `DATA_DIR` values in the ignored

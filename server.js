@@ -18,6 +18,7 @@ import { listWorkspaceJobsForAdmission } from './src/services/workspaceJobs.js';
 import { getDatabaseConfiguration, getRedactedDatabaseConfiguration } from './src/config/database.js';
 import { shutdownDatabase } from './src/db/client.js';
 import { paymentProofStorage } from './src/services/paymentProofStorage.js';
+import { runStartupMigrations } from './src/services/startupDatabase.js';
 
 const app = express();
 const storagePaths = ensureStoragePaths(getStoragePaths());
@@ -100,24 +101,7 @@ async function startServer() {
   });
   console.log(`Server running on http://${host}:${port} (pid ${process.pid})`);
 
-  // These tasks are recoverable or operational background work. Start them
-  // only after the liveness endpoint is reachable, and do not make Railway's
-  // healthcheck wait for them.
-  setImmediate(() => {
-    void paymentProofStorage.cleanupTemporaryFiles()
-      .then(removedTemporaryProofs => {
-        if (removedTemporaryProofs.length) {
-          console.info(JSON.stringify({
-            event: 'payment_proof.temporary_cleanup',
-            removedCount: removedTemporaryProofs.length,
-          }));
-        }
-      })
-      .catch(error => console.error(JSON.stringify({
-        event: 'payment_proof.temporary_cleanup.failed',
-        message: error?.message || String(error),
-      })));
-
+  const startWorkspaceServices = () => {
     try {
       recoverStuckJobs();
       restoreQueuedJobs();
@@ -146,6 +130,50 @@ async function startServer() {
         message: error?.message || String(error),
       }));
     }
+  };
+
+  // Liveness is available before migrations and operational background work.
+  // Required migration failures stop the process; optional PostgreSQL cannot
+  // take down the existing file-backed Core AI service.
+  setImmediate(() => {
+    void paymentProofStorage.cleanupTemporaryFiles()
+      .then(removedTemporaryProofs => {
+        if (removedTemporaryProofs.length) {
+          console.info(JSON.stringify({
+            event: 'payment_proof.temporary_cleanup',
+            removedCount: removedTemporaryProofs.length,
+          }));
+        }
+      })
+      .catch(error => console.error(JSON.stringify({
+        event: 'payment_proof.temporary_cleanup.failed',
+        message: error?.message || String(error),
+      })));
+
+    void runStartupMigrations({ configuration: databaseConfiguration })
+      .then(result => {
+        console.info(JSON.stringify({
+          event: 'database.startup_migrations.complete',
+          attempted: result.attempted,
+          applied: result.applied,
+          reason: result.reason,
+        }));
+        startWorkspaceServices();
+      })
+      .catch(async error => {
+        console.error(JSON.stringify({
+          event: 'database.startup_migrations.failed',
+          required: databaseConfiguration.required,
+          message: error?.message || String(error),
+        }));
+        if (!databaseConfiguration.required) {
+          startWorkspaceServices();
+          return;
+        }
+        await new Promise(resolve => server.close(resolve));
+        await shutdownDatabase();
+        process.exitCode = 1;
+      });
   });
   let shuttingDown = false;
   const shutdown = async signal => {

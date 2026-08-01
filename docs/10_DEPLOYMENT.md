@@ -107,9 +107,11 @@ P2.1 PostgreSQL variables:
 - `P2_LIVE_JOB_BILLING_ENABLED`: defaults false, requires the billing gate, and
   separately gates live reservations, provider mode, settlement, and recovery.
 
-Run `npm run db:status` and then `npm run db:migrate` as a controlled operation.
-Migrations are checksummed and advisory-locked. Startup never auto-migrates and
-there is no destructive rollback command.
+Production startup automatically applies configured migrations after the HTTP
+server binds and before workspace processing starts. Migrations are checksummed
+and advisory-locked, so a restart is idempotent and concurrent startup is
+serialized. `npm run db:status` and `npm run db:migrate` remain available for
+manual inspection or local operation. There is no destructive rollback command.
 
 ### Persistent volume
 
@@ -137,6 +139,9 @@ pending records rather than deleting financial history.
   migration state. With `DATABASE_REQUIRED=true`, unavailable PostgreSQL or
   non-current migrations returns HTTP 503. Invalid required database
   configuration remains a fatal startup error before the server binds.
+- A required production database migration failure closes the server and exits
+  nonzero. An optional database migration failure is logged while the existing
+  file-backed Core AI service continues; neither behavior enables billing.
 - Docker health check uses Node `fetch`.
 - SIGINT/SIGTERM stops the workspace worker, closes HTTP, closes the PostgreSQL
   pool, then exits.

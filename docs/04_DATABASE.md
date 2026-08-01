@@ -117,8 +117,10 @@ Without `DATA_DIR`, local paths are repository-relative under `src/tmp`, `data/c
 
 - PostgreSQL is opt-in when `DATABASE_URL` is present. `DATABASE_REQUIRED=true`
   makes missing/invalid configuration and failed readiness blocking.
-- Migrations run only with `npm run db:migrate`; startup never auto-migrates.
-  Applied checksums are immutable and there is no ordinary rollback command.
+- Production startup applies configured migrations after HTTP bind and before
+  workspace processing starts. Local/manual operation remains available with
+  `npm run db:migrate`. Applied checksums are immutable, concurrent startup is
+  advisory-locked, and there is no ordinary rollback command.
 - JSON/file persistence remains authoritative until an explicitly tested domain
   cutover. The billing domain fails closed when disabled or unavailable and has
   no JSON dual-write or silent fallback.

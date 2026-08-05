@@ -32,12 +32,10 @@ import {
     WorkspaceRetryError
 } from '../services/workspaceRetry.js';
 import { verifyGeminiApiKey } from '../services/geminiKeyVerification.js';
-import {
-    deleteUserGeminiApiKey,
-    getUserGeminiApiKey,
-    hasUserGeminiApiKey,
-    setUserGeminiApiKey
-} from '../services/userGeminiKeys.js';
+// getUserGeminiApiKey remains for the dormant live-billing 'byok' plan mode
+// below (P2_LIVE_JOB_BILLING_ENABLED, currently off) -- not for any
+// user-facing personal-key management, which has been removed.
+import { getUserGeminiApiKey } from '../services/userGeminiKeys.js';
 import {
     admissionService,
     createMutationAdmissionMiddleware,
@@ -88,7 +86,11 @@ export const createWorkspaceRouter = ({
     releaseBilling = releaseLiveJob,
     worker = workspaceWorker,
     publishQueue = publishQueuePositions,
-    resolveGeminiKey = uid => getUserGeminiApiKey(uid) || process.env.GEMINI_API_KEY
+    // All authorized users process through the server-managed Gemini key;
+    // there is no personal-key fallback here (Product rule: users are never
+    // asked to provide/save/manage a personal Gemini key). Kept injectable
+    // so tests can stub it without touching process.env.
+    resolveServerGeminiKey = () => String(process.env.GEMINI_API_KEY || '').trim()
 } = {}) => {
     const router = express.Router();
     const admitMutation = endpoint => createMutationAdmissionMiddleware(admission, endpoint);
@@ -105,46 +107,6 @@ export const createWorkspaceRouter = ({
             maxSourceDurationSeconds: config.maxSourceDurationSeconds,
             supportedExtensions: config.supportedExtensions
         });
-    });
-
-    router.post('/gemini-key/verify', admitMutation('workspace.gemini-key.verify'), async (req, res) => {
-        const result = await verifyKey(req.body?.geminiApiKey);
-        if (result.valid) return res.json({ valid: true, model: result.model });
-        const providerMessage = result.providerError?.body?.error?.message || result.error;
-        if (result.retryable) {
-            return res.status(503).json({
-                error: providerMessage || 'Gemini API key verification is temporarily unavailable.',
-                providerError: result.providerError
-            });
-        }
-        return res.status(400).json({
-            error: providerMessage || 'The Gemini API key is invalid or has no compatible stable Flash model.',
-            providerError: result.providerError
-        });
-    });
-
-    router.get('/gemini-key', (req, res) => {
-        return res.json({ hasApiKey: hasUserGeminiApiKey(req.user.uid) });
-    });
-
-    router.put('/gemini-key', admitMutation('workspace.gemini-key.save'), async (req, res) => {
-        const apiKey = String(req.body?.geminiApiKey || '').trim();
-        const verification = await verifyKey(apiKey);
-        if (!verification.valid) {
-            const status = verification.retryable ? 503 : 400;
-            return res.status(status).json({
-                error: verification.providerError?.body?.error?.message ||
-                    verification.error ||
-                    'The Gemini API key could not be verified.'
-            });
-        }
-        setUserGeminiApiKey(req.user.uid, apiKey);
-        return res.json({ hasApiKey: true });
-    });
-
-    router.delete('/gemini-key', admitMutation('workspace.gemini-key.delete'), (req, res) => {
-        deleteUserGeminiApiKey(req.user.uid);
-        return res.json({ hasApiKey: false });
     });
 
     router.get('/jobs', (req, res) => {
@@ -224,11 +186,11 @@ export const createWorkspaceRouter = ({
             const internal = getWorkspaceJobInternal(req.params.jobId);
             const eligibility = requireRecoverableWorkspaceRetry(internal);
             validateSourceVideoDuration(await readSourceDuration(internal.storedPath));
-            const geminiApiKey = resolveGeminiKey(req.user.uid);
+            const geminiApiKey = resolveServerGeminiKey();
             if (!geminiApiKey) {
-                return res.status(422).json({
-                    error: 'A verified Gemini API key is required to retry this project.',
-                    code: 'BYOK_REQUIRED'
+                return res.status(503).json({
+                    error: 'Recap processing is temporarily unavailable due to a service configuration issue. Please try again later.',
+                    code: 'GEMINI_KEY_NOT_CONFIGURED'
                 });
             }
             const result = admission.withProcessingAdmission(
@@ -307,27 +269,30 @@ export const createWorkspaceRouter = ({
             const liveBilling = liveBillingEnabled();
             const requestedMode = String(req.body?.billingMode || '').trim();
             const requestedPlanCode = String(req.body?.planCode || '').trim();
+            // Outside live billing (the current default), every authorized user
+            // processes through the server-managed key -- there is no personal-key
+            // fallback and a missing/invalid key is a service configuration issue,
+            // never something the user is asked to fix.
             const geminiApiKey = liveBilling
                 ? requestedMode === 'byok'
                     ? getUserGeminiApiKey(req.user.uid)
                     : requestedMode === 'blink_funded'
                         ? String(process.env.GEMINI_API_KEY || '').trim()
                         : null
-                : req.body?.geminiApiKey ||
-                    req.headers['x-gemini-api-key'] ||
-                    getUserGeminiApiKey(req.user.uid) ||
-                    process.env.GEMINI_API_KEY;
+                : resolveServerGeminiKey();
             if (!geminiApiKey) {
+                if (!liveBilling) {
+                    return res.status(503).json({
+                        error: 'Recap processing is temporarily unavailable due to a service configuration issue. Please try again later.',
+                        code: 'GEMINI_KEY_NOT_CONFIGURED'
+                    });
+                }
                 const pro = requestedMode === 'blink_funded';
-                return res.status(liveBilling ? (pro ? 503 : 422) : 400).json({
-                    error: liveBilling
-                        ? pro
-                            ? 'Blink-funded Gemini processing is unavailable.'
-                            : 'A verified BYOK Gemini key is required.'
-                        : 'Enter a Gemini API key before processing.',
-                    ...(liveBilling ? {
-                        code: pro ? 'PLATFORM_PROVIDER_UNAVAILABLE' : 'BYOK_REQUIRED'
-                    } : {})
+                return res.status(pro ? 503 : 422).json({
+                    error: pro
+                        ? 'Blink-funded Gemini processing is unavailable.'
+                        : 'A verified BYOK Gemini key is required.',
+                    code: pro ? 'PLATFORM_PROVIDER_UNAVAILABLE' : 'BYOK_REQUIRED'
                 });
             }
             if (liveBilling && requestedMode === 'byok') {
@@ -559,18 +524,28 @@ export const createWorkspaceRouter = ({
                 });
             }
 
+            // All authorized users process through the server-managed key -- there
+            // is no personal-key fallback. A missing or invalid server key is a
+            // service configuration issue, blocked here safely and reported
+            // without exposing the key or blaming the user.
             const liveBilling = liveBillingEnabled();
-            const geminiApiKey = liveBilling ? null : req.body?.geminiApiKey ||
-                getUserGeminiApiKey(req.user.uid) || process.env.GEMINI_API_KEY;
+            const geminiApiKey = liveBilling ? null : resolveServerGeminiKey();
             if (!liveBilling) {
+                if (!geminiApiKey) {
+                    removeIfPresent(file.path);
+                    return res.status(503).json({
+                        error: 'Recap creation is temporarily unavailable due to a service configuration issue. Please try again later.',
+                        code: 'GEMINI_KEY_NOT_CONFIGURED'
+                    });
+                }
                 const verification = await verifyKey(geminiApiKey);
                 if (!verification.valid) {
                     removeIfPresent(file.path);
-                    const status = verification.retryable ? 503 : 400;
-                    const message = verification.retryable
-                        ? 'Gemini API key verification is temporarily unavailable.'
-                        : 'Verify a valid Gemini API key before creating a recap.';
-                    return res.status(status).json({ error: message });
+                    const status = verification.retryable ? 503 : 500;
+                    return res.status(status).json({
+                        error: 'Recap creation is temporarily unavailable due to a service configuration issue. Please try again later.',
+                        code: 'GEMINI_KEY_INVALID'
+                    });
                 }
             }
 

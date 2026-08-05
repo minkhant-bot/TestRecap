@@ -12,6 +12,9 @@ const temporaryRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'testrecap-workspace
 process.env.DATA_DIR = temporaryRoot;
 process.env.MAX_UPLOAD_SIZE_MB = '0.001';
 process.env.WORKSPACE_JOB_STORE_PATH = path.join(temporaryRoot, 'workspace-jobs.json');
+// All authorized users process through this single server-managed key --
+// there is no personal-key UI or fallback left in the route handlers.
+process.env.GEMINI_API_KEY = 'server-managed-test-key';
 
 const { createWorkspaceRouter } = await import('./workspace.js');
 const {
@@ -37,13 +40,13 @@ const owner = {
     status: 'active'
 };
 let authenticatedUser = owner;
-let geminiKeyValid = true;
+let serverGeminiKeyValid = true;
 setAuthVerifierForTests(async () => authenticatedUser);
 
 const app = express();
 app.use(express.json());
 app.use('/api/workspace', requireAuth, createWorkspaceRouter({
-    verifyKey: async () => ({ valid: geminiKeyValid }),
+    verifyKey: async () => ({ valid: serverGeminiKeyValid }),
     readSourceDuration: async () => 123.45
 }));
 const server = await new Promise(resolve => {
@@ -90,7 +93,6 @@ test('authoritative upload duration accepts 14:59 and 15:00 but rejects 15:01', 
             const body = new FormData();
             body.append('video', new Blob([Buffer.alloc(512)], { type: 'video/mp4' }), `${duration}.mp4`);
             body.append('duration', '999999');
-            body.append('geminiApiKey', 'valid-key');
             const response = await fetch(
                 `http://127.0.0.1:${durationServer.address().port}/api/workspace/jobs`,
                 { method: 'POST', headers: authenticated, body }
@@ -210,59 +212,136 @@ test('unsupported and oversized files are rejected without creating jobs', async
     assert.deepEqual(await jobs.json(), []);
 });
 
-test('invalid Gemini API key creates no job or History record', async () => {
-    geminiKeyValid = false;
+test('an invalid server-managed Gemini key blocks job creation with a service configuration error, not a user-facing key prompt', async () => {
+    serverGeminiKeyValid = false;
     const body = new FormData();
     body.append('video', new Blob([Buffer.alloc(512)], { type: 'video/mp4' }), 'movie.mp4');
-    body.append('geminiApiKey', 'invalid-key');
     const uploaded = await fetch(`${baseUrl}/jobs`, {
         method: 'POST',
         headers: authenticated,
         body
     });
-    assert.equal(uploaded.status, 400);
+    assert.equal(uploaded.status, 500);
+    const payload = await uploaded.json();
+    assert.equal(payload.code, 'GEMINI_KEY_INVALID');
+    assert.doesNotMatch(payload.error, /enter|provide|your.*key/i);
     const history = await fetch(`${baseUrl}/jobs`, { headers: authenticated });
     assert.deepEqual(await history.json(), []);
-    geminiKeyValid = true;
+    serverGeminiKeyValid = true;
 });
 
-test('Gemini API key persistence is encrypted, user-scoped, and never returned', async () => {
-    const saved = await fetch(`${baseUrl}/gemini-key`, {
-        method: 'PUT',
-        headers: { ...authenticated, 'Content-Type': 'application/json' },
-        body: JSON.stringify({ geminiApiKey: 'persisted-user-secret' })
-    });
-    assert.equal(saved.status, 200);
-    assert.deepEqual(await saved.json(), { hasApiKey: true });
+test('no personal Gemini API key surface remains reachable', async () => {
+    for (const request of [
+        () => fetch(`${baseUrl}/gemini-key`, { headers: authenticated }),
+        () => fetch(`${baseUrl}/gemini-key`, {
+            method: 'PUT', headers: { ...authenticated, 'Content-Type': 'application/json' },
+            body: JSON.stringify({ geminiApiKey: 'anything' })
+        }),
+        () => fetch(`${baseUrl}/gemini-key`, { method: 'DELETE', headers: authenticated }),
+        () => fetch(`${baseUrl}/gemini-key/verify`, {
+            method: 'POST', headers: { ...authenticated, 'Content-Type': 'application/json' },
+            body: JSON.stringify({ geminiApiKey: 'anything' })
+        }),
+    ]) {
+        assert.equal((await request()).status, 404);
+    }
+});
 
-    const available = await fetch(`${baseUrl}/gemini-key`, { headers: authenticated });
-    assert.deepEqual(await available.json(), { hasApiKey: true });
-
-    const credentialStore = fs.readFileSync(
-        path.join(temporaryRoot, 'user-gemini-credentials.json'),
-        'utf8'
-    );
-    assert.doesNotMatch(credentialStore, /persisted-user-secret/);
-    assert.match(credentialStore, /workspace-owner/);
-
-    authenticatedUser = { ...owner, uid: 'different-owner' };
-    const otherUser = await fetch(`${baseUrl}/gemini-key`, { headers: authenticated });
-    assert.deepEqual(await otherUser.json(), { hasApiKey: false });
+test('normal users and Owner/Super Admin both process through the server-managed key, with no personal key required or accepted', async () => {
+    for (const identity of [
+        { ...owner, uid: `normal-${randomUUID()}`, role: 'user' },
+        { ...owner, uid: `owner-${randomUUID()}`, role: 'super_admin' },
+    ]) {
+        authenticatedUser = identity;
+        const body = new FormData();
+        body.append('video', new Blob([Buffer.alloc(512)], { type: 'video/mp4' }), `${identity.role}.mp4`);
+        const uploaded = await fetch(`${baseUrl}/jobs`, {
+            method: 'POST', headers: authenticated, body
+        });
+        assert.equal(uploaded.status, 201, `${identity.role} upload must succeed via the server-managed key alone`);
+        const job = await uploaded.json();
+        const queued = await fetch(`${baseUrl}/jobs/${job.id}/queue`, {
+            method: 'POST',
+            headers: { ...authenticated, 'Content-Type': 'application/json' },
+            body: JSON.stringify({ effects: {} })
+        });
+        assert.equal(queued.status, 202, `${identity.role} queueing must succeed via the server-managed key alone`);
+        await fetch(`${baseUrl}/jobs/${job.id}/cancel`, { method: 'POST', headers: authenticated });
+        await fetch(`${baseUrl}/jobs/${job.id}`, { method: 'DELETE', headers: authenticated });
+    }
     authenticatedUser = owner;
+});
 
-    const removed = await fetch(`${baseUrl}/gemini-key`, {
-        method: 'DELETE',
-        headers: authenticated
+test('a missing server-managed Gemini key blocks job creation, queueing, and retry with a 503 service configuration error', async () => {
+    const unconfiguredOwner = { ...owner, uid: `unconfigured-${randomUUID()}` };
+    authenticatedUser = unconfiguredOwner;
+    let configuredKey = 'server-managed-test-key';
+    const unconfiguredApp = express();
+    unconfiguredApp.use(express.json());
+    unconfiguredApp.use('/api/workspace', requireAuth, createWorkspaceRouter({
+        verifyKey: async () => ({ valid: true }),
+        readSourceDuration: async () => 10,
+        resolveServerGeminiKey: () => configuredKey
+    }));
+    const unconfiguredServer = await new Promise(resolve => {
+        const listener = unconfiguredApp.listen(0, '127.0.0.1', () => resolve(listener));
     });
-    assert.deepEqual(await removed.json(), { hasApiKey: false });
-    const unavailable = await fetch(`${baseUrl}/gemini-key`, { headers: authenticated });
-    assert.deepEqual(await unavailable.json(), { hasApiKey: false });
+    const unconfiguredUrl = `http://127.0.0.1:${unconfiguredServer.address().port}/api/workspace`;
+    try {
+        configuredKey = '';
+        const blockedUpload = await fetch(`${unconfiguredUrl}/jobs`, {
+            method: 'POST', headers: authenticated,
+            body: (() => {
+                const body = new FormData();
+                body.append('video', new Blob([Buffer.alloc(512)], { type: 'video/mp4' }), 'unconfigured.mp4');
+                return body;
+            })()
+        });
+        assert.equal(blockedUpload.status, 503);
+        assert.equal((await blockedUpload.json()).code, 'GEMINI_KEY_NOT_CONFIGURED');
+        assert.deepEqual(
+            await (await fetch(`${unconfiguredUrl}/jobs`, { headers: authenticated })).json(), []
+        );
+
+        configuredKey = 'server-managed-test-key';
+        const uploaded = await fetch(`${unconfiguredUrl}/jobs`, {
+            method: 'POST', headers: authenticated,
+            body: (() => {
+                const body = new FormData();
+                body.append('video', new Blob([Buffer.alloc(512)], { type: 'video/mp4' }), 'reconfigured.mp4');
+                return body;
+            })()
+        });
+        assert.equal(uploaded.status, 201);
+        const job = await uploaded.json();
+
+        configuredKey = '';
+        const blockedQueue = await fetch(`${unconfiguredUrl}/jobs/${job.id}/queue`, {
+            method: 'POST',
+            headers: { ...authenticated, 'Content-Type': 'application/json' },
+            body: JSON.stringify({ effects: {} })
+        });
+        assert.equal(blockedQueue.status, 503);
+        assert.equal((await blockedQueue.json()).code, 'GEMINI_KEY_NOT_CONFIGURED');
+        assert.equal(getWorkspaceJobInternal(job.id).status, 'pending');
+
+        updateWorkspaceJobInternal(job.id, {
+            status: 'failed', stage: 'failed', failedAt: new Date().toISOString()
+        });
+        const blockedRetry = await fetch(`${unconfiguredUrl}/jobs/${job.id}/retry`, {
+            method: 'POST', headers: { ...authenticated, 'Idempotency-Key': 'unconfigured-retry' }
+        });
+        assert.equal(blockedRetry.status, 503);
+        assert.equal((await blockedRetry.json()).code, 'GEMINI_KEY_NOT_CONFIGURED');
+    } finally {
+        authenticatedUser = owner;
+        await new Promise(resolve => unconfiguredServer.close(resolve));
+    }
 });
 
 const uploadVideo = (filename = 'movie.mp4') => {
     const body = new FormData();
     body.append('video', new Blob([Buffer.alloc(512)], { type: 'video/mp4' }), filename);
-    body.append('geminiApiKey', 'valid-key');
     return fetch(`${baseUrl}/jobs`, {
         method: 'POST',
         headers: authenticated,
@@ -507,7 +586,6 @@ test('valid upload creates a persistent pending job without activating processin
     const body = new FormData();
     body.append('video', new Blob([Buffer.alloc(512)], { type: 'video/mp4' }), 'movie.mp4');
     body.append('duration', '123.45');
-    body.append('geminiApiKey', 'valid-key');
     const uploaded = await fetch(`${baseUrl}/jobs`, {
         method: 'POST',
         headers: authenticated,
@@ -550,8 +628,7 @@ test('valid upload creates a persistent pending job without activating processin
         method: 'POST',
         headers: {
             ...authenticated,
-            'content-type': 'application/json',
-            'x-gemini-api-key': 'test-gemini-key'
+            'content-type': 'application/json'
         },
         body: JSON.stringify({
             effects: {
@@ -607,7 +684,7 @@ test('live billing reservation is compensated when queue admission fails', async
         readSourceDuration: async () => 61,
         reserveBilling: async () => ({
             snapshot: {
-                planCode: 'normal', billingMode: 'byok',
+                planCode: 'pro', billingMode: 'blink_funded',
                 billingBlocks: '3', totalCredits: '6', billingStatus: 'reserved'
             }
         }),
@@ -629,11 +706,6 @@ test('live billing reservation is compensated when queue admission fails', async
     });
     const liveUrl = `http://127.0.0.1:${liveServer.address().port}/api/workspace`;
     try {
-        await fetch(`${liveUrl}/gemini-key`, {
-            method: 'PUT',
-            headers: { ...authenticated, 'Content-Type': 'application/json' },
-            body: JSON.stringify({ geminiApiKey: 'verified-byok-key' })
-        });
         const body = new FormData();
         body.append('video', new Blob([Buffer.alloc(512)], { type: 'video/mp4' }), 'billed.mp4');
         const upload = await fetch(`${liveUrl}/jobs`, {
@@ -649,7 +721,7 @@ test('live billing reservation is compensated when queue admission fails', async
                 'Idempotency-Key': 'route-live-1'
             },
             body: JSON.stringify({
-                planCode: 'normal', billingMode: 'byok', effects: {}
+                planCode: 'pro', billingMode: 'blink_funded', effects: {}
             })
         });
         assert.equal(queued.status, 500);
@@ -689,7 +761,7 @@ test('failed workspace retry is owner-only, idempotent, concurrency-safe, and cr
     retryApp.use('/api/workspace', requireAuth, createWorkspaceRouter({
         verifyKey: async () => ({ valid: true }),
         readSourceDuration: async () => 10,
-        resolveGeminiKey: () => 'verified-key',
+        resolveServerGeminiKey: () => 'verified-key',
         reserveBilling: async () => { reserveCount += 1; throw new Error('must not reserve'); },
         worker: { wake: () => { wakeCount += 1; }, snapshot: () => ({}) },
         publishQueue: () => undefined,
@@ -760,7 +832,7 @@ test('retry rejects non-failed jobs and reports missing recovery artifacts', asy
     retryApp.use(express.json());
     retryApp.use('/api/workspace', requireAuth, createWorkspaceRouter({
         readSourceDuration: async () => 10,
-        resolveGeminiKey: () => 'verified-key',
+        resolveServerGeminiKey: () => 'verified-key',
         worker: { wake: () => undefined, snapshot: () => ({}) },
         publishQueue: () => undefined
     }));

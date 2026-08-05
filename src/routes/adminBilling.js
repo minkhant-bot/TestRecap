@@ -38,6 +38,21 @@ const publicProofMetadata = proof => ({
   verifiedAt: proof.verifiedAt,
 });
 const structuredError = error => error instanceof BillingError || error instanceof PaymentProofStorageError;
+// Structured (BillingError/PaymentProofStorageError) failures are expected
+// business responses already carried in the JSON body -- only the generic
+// branch below (an unrecognized exception, e.g. a raw PostgreSQL error) is
+// logged here, since that's the case where the client-facing message is
+// deliberately flattened to a generic string and the real cause would
+// otherwise never reach Railway logs. Never logged to the client response.
+const logUnstructuredError = (req, error) => console.error(JSON.stringify({
+  event: 'billing.admin.request_failed',
+  requestId: req.requestId,
+  method: req.method,
+  route: req.originalUrl,
+  code: error?.code || null,
+  message: error?.message || String(error),
+  stack: error?.stack || null,
+}));
 const handler = operation => async (req, res) => {
   try {
     const result = await operation(req);
@@ -47,6 +62,7 @@ const handler = operation => async (req, res) => {
     }
     return res.json(publicJson(result));
   } catch (error) {
+    if (!structuredError(error)) logUnstructuredError(req, error);
     const status = structuredError(error) ? error.status : 500;
     return res.status(status).json({
       error: structuredError(error) ? error.message : 'Billing administration failed.',
@@ -84,6 +100,7 @@ export const createAdminBillingRouter = (service = {
       });
       return res.send(proof.buffer);
     } catch (error) {
+      if (!structuredError(error)) logUnstructuredError(req, error);
       const status = structuredError(error) ? error.status : 500;
       return res.status(status).json({
         error: structuredError(error) ? error.message : 'Payment proof is unavailable.',

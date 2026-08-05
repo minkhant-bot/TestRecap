@@ -366,6 +366,127 @@ test('credit-package administration routes delegate every supported action', asy
   }
 });
 
+const captureConsoleError = () => {
+  const original = console.error;
+  const calls = [];
+  console.error = (...args) => calls.push(args);
+  return { calls, restore: () => { console.error = original; } };
+};
+
+test('an unstructured PostgreSQL error on an admin billing route is logged server-side with SQLSTATE/message/stack, but the client only sees the generic message', async t => {
+  const capture = captureConsoleError();
+  t.after(capture.restore);
+  const dbError = new Error('relation "credit_plans" does not exist');
+  dbError.code = '42P01';
+  const { server, baseUrl } = await startServer({
+    userService: emptyUserService,
+    adminService: {
+      ...emptyAdminService,
+      adminListCatalog: async () => { throw dbError; },
+    },
+  });
+  t.after(() => new Promise(resolve => server.close(resolve)));
+
+  const response = await fetch(`${baseUrl}/admin/billing/catalog`, { headers: { Cookie: '__session=valid' } });
+  const body = await response.json();
+
+  assert.equal(response.status, 500);
+  assert.equal(body.error, 'Billing administration failed.');
+  assert.equal(body.code, 'BILLING_OPERATION_FAILED');
+  assert.equal(JSON.stringify(body).includes('credit_plans'), false, 'the raw PostgreSQL message must never reach the client');
+  assert.equal(JSON.stringify(body).includes('42P01'), false, 'the raw SQLSTATE must never reach the client');
+
+  assert.equal(capture.calls.length, 1);
+  const logged = JSON.parse(capture.calls[0][0]);
+  assert.equal(logged.event, 'billing.admin.request_failed');
+  assert.equal(logged.code, '42P01');
+  assert.equal(logged.message, 'relation "credit_plans" does not exist');
+  assert.match(logged.stack, /Error: relation "credit_plans" does not exist/);
+  assert.equal(logged.route, '/admin/billing/catalog');
+  assert.equal(logged.method, 'GET');
+});
+
+test('an unstructured error on a user-facing billing route is logged server-side but not exposed to the client', async t => {
+  const capture = captureConsoleError();
+  t.after(capture.restore);
+  const dbError = new Error('cannot execute INSERT in a read-only transaction');
+  dbError.code = '25006';
+  const { server, baseUrl } = await startServer({
+    userService: { ...emptyUserService, getBalance: async () => { throw dbError; } },
+    adminService: emptyAdminService,
+  });
+  t.after(() => new Promise(resolve => server.close(resolve)));
+
+  const response = await fetch(`${baseUrl}/credits/balance`, { headers: { Cookie: '__session=valid' } });
+  const body = await response.json();
+
+  assert.equal(response.status, 500);
+  assert.equal(body.error, 'Billing operation failed.');
+  assert.equal(JSON.stringify(body).includes('read-only transaction'), false);
+
+  assert.equal(capture.calls.length, 1);
+  const logged = JSON.parse(capture.calls[0][0]);
+  assert.equal(logged.event, 'billing.request_failed');
+  assert.equal(logged.code, '25006');
+  assert.equal(logged.message, 'cannot execute INSERT in a read-only transaction');
+});
+
+test('a structured BillingError never triggers server-side logging (expected business responses stay quiet)', async t => {
+  const capture = captureConsoleError();
+  t.after(capture.restore);
+  const { server, baseUrl } = await startServer({
+    userService: emptyUserService,
+    adminService: {
+      ...emptyAdminService,
+      adminListCatalog: async () => {
+        throw new BillingError('Owner (Super Admin) authority is required.', { code: 'SUPER_ADMIN_REQUIRED', status: 403 });
+      },
+    },
+  });
+  t.after(() => new Promise(resolve => server.close(resolve)));
+
+  const response = await fetch(`${baseUrl}/admin/billing/catalog`, { headers: { Cookie: '__session=valid' } });
+  assert.equal(response.status, 403);
+  assert.equal(capture.calls.length, 0, 'a normal, structured business error must not be logged as a server fault');
+});
+
+test('unstructured errors on both proof-content routes (user and admin) are logged with SQLSTATE/message/stack', async t => {
+  const capture = captureConsoleError();
+  t.after(capture.restore);
+  const dbError = new Error('permission denied for table uploaded_files');
+  dbError.code = '42501';
+
+  const userSide = await startServer({
+    userService: { ...emptyUserService, getMyScreenshotMetadata: async () => { throw dbError; } },
+    adminService: emptyAdminService,
+  });
+  t.after(() => new Promise(resolve => userSide.server.close(resolve)));
+  const userResponse = await fetch(`${userSide.baseUrl}/uploads/payment-screenshots/${proofId}/content`, {
+    headers: { Cookie: '__session=valid' },
+  });
+  assert.equal(userResponse.status, 500);
+  assert.equal((await userResponse.json()).code, 'PROOF_STORAGE_ERROR');
+
+  const adminSide = await startServer({
+    userService: emptyUserService,
+    adminService: { ...emptyAdminService, adminGetScreenshotMetadata: async () => { throw dbError; } },
+    authenticatedIdentity: { uid: 'owner', role: 'super_admin' },
+  });
+  t.after(() => new Promise(resolve => adminSide.server.close(resolve)));
+  const adminResponse = await fetch(`${adminSide.baseUrl}/admin/billing/screenshots/${proofId}/content`, {
+    headers: { Cookie: '__session=valid' },
+  });
+  assert.equal(adminResponse.status, 500);
+  assert.equal((await adminResponse.json()).code, 'PROOF_STORAGE_ERROR');
+
+  assert.equal(capture.calls.length, 2);
+  for (const call of capture.calls) {
+    const logged = JSON.parse(call[0]);
+    assert.equal(logged.code, '42501');
+    assert.equal(logged.message, 'permission denied for table uploaded_files');
+  }
+});
+
 test('normal-user package route delegates active-package listing', async () => {
   const calls = [];
   const { server, baseUrl } = await startServer({

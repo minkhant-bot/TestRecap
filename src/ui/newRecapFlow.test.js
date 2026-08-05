@@ -116,7 +116,7 @@ test('subtitle and blur setup happens on the uploaded (pending) job before expli
 
   assert.match(page, /job\?\.status === 'pending'/);
   assert.match(page, /VideoEffectsEditor/);
-  assert.match(page, /queueWorkspaceJob\(job\.id, '', latestEffectsRef\.current\)/);
+  assert.match(page, /queueWorkspaceJob\(job\.id, latestEffectsRef\.current\)/);
   assert.match(editor, /burnSubtitlesEnabled: false/);
   assert.match(editor, /blurEnabled: false/);
   assert.match(editor, /colorGrading: 'original'/);
@@ -174,9 +174,9 @@ test('Color Grading and Flip Video are optional effects persisted with the pendi
   assert.match(editor, /effects-editor__video--flipped/);
   assert.match(app, /\.effects-editor__video--flipped \{ transform: scaleX\(-1\); \}/);
   assert.match(editor, /effects-editor__media-controls/);
-  assert.match(page, /queueWorkspaceJob\(job\.id, '', latestEffectsRef\.current\)/);
+  assert.match(page, /queueWorkspaceJob\(job\.id, latestEffectsRef\.current\)/);
   assert.match(page, /latestEffectsRef\.current = nextEffects;[\s\S]*setEffects\(nextEffects\)/);
-  assert.match(api, /const body = \{ geminiApiKey, effects \}/);
+  assert.match(api, /const body = \{ effects \}/);
   assert.match(api, /body: JSON\.stringify\(body\)/);
   assert.match(backend, /AUTO_COLOR_FILTER = 'eq=contrast=1\.03:saturation=1\.04:gamma=1\.01'/);
   assert.match(backend, /'-vf', 'hflip'/);
@@ -254,14 +254,22 @@ test('Interaction Rule audit: History delete confirmation is a popup Dialog, not
   assert.doesNotMatch(history, /\{deleting && \(\s*<div className="panel"/);
 });
 
-test('Interaction Rule audit: New Recap Gemini-key setup is a popup Dialog, and the approved completed-video preview stays untouched', () => {
+test('personal Gemini API key feature is fully removed from user-facing UI; all authorized users rely on the server-managed key', () => {
   const page = read('./pages/NewRecapPage.tsx');
-  assert.match(page, /import \{ Button, Dialog, Input \}/);
-  assert.match(page, /<Dialog\s*\n\s*open=\{keySetupOpen && !hasApiKey\}/);
-  assert.match(page, /busy=\{savingKey\}/);
-  assert.doesNotMatch(page, /\{keySetupOpen && !hasApiKey\} && \(\s*<div className="panel">/);
+  const settings = read('./pages/SettingsPage.tsx');
+  const foundation = read('./AppFoundation.tsx');
+  const workspaceApi = read('./workspace/api.ts');
+  const uploadPanel = read('./workspace/useUploadPanel.ts');
+
+  for (const source of [page, settings, foundation, workspaceApi, uploadPanel]) {
+    assert.doesNotMatch(source, /GeminiKey|geminiApiKey|hasApiKey|gemini-key/i,
+      'no personal Gemini API key state, prop, or endpoint may remain in user-facing code');
+  }
+  assert.equal(fs.existsSync(new URL('./workspace/GeminiKeyContext.tsx', import.meta.url)), false,
+    'GeminiKeyContext must be deleted, not merely unused');
+
   // CLAUDE.md exception: the completed-video preview experience is
-  // explicitly excluded from this audit and must never become a Dialog.
+  // explicitly excluded from any UI audit and must never become a Dialog.
   const completedBlock = page.slice(page.indexOf("job?.status === 'completed' && !job.expired"));
   const completedSection = completedBlock.slice(0, completedBlock.indexOf('failed'));
   assert.doesNotMatch(completedSection, /<Dialog/);

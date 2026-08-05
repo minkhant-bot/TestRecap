@@ -1,9 +1,8 @@
-import { useEffect, useRef, useState } from 'react';
+import { useRef, useState } from 'react';
 import { useSearchParams } from 'react-router-dom';
-import { Button, Dialog, Input } from '../components';
+import { Button } from '../components';
 import { formatDuration, formatFileSize } from '../workspace/format';
 import { queueWorkspaceJob } from '../workspace/api';
-import { useGeminiKey } from '../workspace/GeminiKeyContext';
 import { useJobStatus } from '../workspace/useJobStatus';
 import { useUploadPanel } from '../workspace/useUploadPanel';
 import type { WorkspaceJob, WorkspaceJobStatus, VideoEffects } from '../workspace/types';
@@ -63,26 +62,15 @@ function Pipeline({ job, uploadState }: { job: WorkspaceJobStatus | null; upload
  * NewRecap — idle/upload screen, matches the reference's NewRecap layout
  * ---------------------------------------------------------------------- */
 function NewRecapUpload({
-  uploadPanel, onFileChosen, geminiKeyMissing, onOpenKeySetup, limitReached,
+  uploadPanel, onFileChosen, limitReached,
 }: {
   uploadPanel: ReturnType<typeof useUploadPanel>;
   onFileChosen(files: File[]): void;
-  geminiKeyMissing: boolean;
-  onOpenKeySetup(): void;
   limitReached: boolean;
 }) {
   const inputRef = useRef<HTMLInputElement>(null);
   const [dragging, setDragging] = useState(false);
   const { configuration, configurationError, videos, state, error, progress, cancelUpload } = uploadPanel;
-
-  if (geminiKeyMissing) {
-    return (
-      <div className="alert error">
-        <b>Recap ဖန်တီးရန် Gemini API Key ထည့်ပေးပါ။</b>
-        <div style={{ marginTop: 10 }}><Button onClick={onOpenKeySetup}>API Key ထည့်မည်</Button></div>
-      </div>
-    );
-  }
 
   if (limitReached) {
     return (
@@ -179,14 +167,9 @@ function NewRecapUpload({
 export function NewRecapPage() {
   const [searchParams, setSearchParams] = useSearchParams();
   const { jobs, loading, refresh } = useWorkspaceJobs();
-  const { hasApiKey, loading: keyLoading, saveApiKey } = useGeminiKey();
   const [activeJobId, setActiveJobId] = useState<string | null>(() => searchParams.get('job'));
   const [starting, setStarting] = useState(false);
   const [startError, setStartError] = useState<string | null>(null);
-  const [keySetupOpen, setKeySetupOpen] = useState(false);
-  const [draftKey, setDraftKey] = useState('');
-  const [savingKey, setSavingKey] = useState(false);
-  const [keyError, setKeyError] = useState<string | null>(null);
   const [effects, setEffects] = useState<VideoEffects>(DEFAULT_VIDEO_EFFECTS);
   const latestEffectsRef = useRef<VideoEffects>(DEFAULT_VIDEO_EFFECTS);
 
@@ -197,37 +180,18 @@ export function NewRecapPage() {
     setActiveJobId(job.id);
     setSearchParams({ job: job.id }, { replace: true });
   };
-  const uploadPanel = useUploadPanel('', handleUploadComplete);
+  const uploadPanel = useUploadPanel(handleUploadComplete);
   // Single source of truth for the active job: real REST fetch + SSE
   // subscription (see useJobStatus), same as the rest of the app.
   const status = useJobStatus(activeJobId);
   const job = status.job;
-
-  useEffect(() => {
-    if (!keyLoading && !hasApiKey) setKeySetupOpen(true);
-    if (hasApiKey) setKeySetupOpen(false);
-  }, [hasApiKey, keyLoading]);
-
-  const saveKey = async () => {
-    setSavingKey(true);
-    setKeyError(null);
-    try {
-      await saveApiKey(draftKey);
-      setDraftKey('');
-      setKeySetupOpen(false);
-    } catch (error) {
-      setKeyError(error instanceof Error ? error.message : 'Gemini API Key ကို သိမ်း၍ မရပါ။');
-    } finally {
-      setSavingKey(false);
-    }
-  };
 
   const beginProcessing = async () => {
     if (!job) return;
     setStarting(true);
     setStartError(null);
     try {
-      await queueWorkspaceJob(job.id, '', latestEffectsRef.current);
+      await queueWorkspaceJob(job.id, latestEffectsRef.current);
       await refresh();
     } catch (requestError) {
       setStartError(requestError instanceof Error ? requestError.message : 'ဤ Recap ကို စတင်လုပ်ဆောင်၍ မရပါ။');
@@ -260,38 +224,16 @@ export function NewRecapPage() {
       </div>
 
       {!job && (
-        keyLoading || loading ? (
+        loading ? (
           <div className="panel uploadpanel">…</div>
         ) : (
           <NewRecapUpload
             uploadPanel={uploadPanel}
-            geminiKeyMissing={!hasApiKey}
-            onOpenKeySetup={() => setKeySetupOpen(true)}
             limitReached={activeLimitReached}
             onFileChosen={files => void uploadPanel.validateAndUpload(files)}
           />
         )
       )}
-
-      <Dialog
-        open={keySetupOpen && !hasApiKey}
-        onClose={() => { if (!savingKey) setKeySetupOpen(false); }}
-        busy={savingKey}
-        title="Gemini API Key လိုအပ်ပါသည်"
-      >
-        <p className="muted">ပထမဆုံး Recap ဖန်တီးရန် Gemini API Key ထည့်ပေးပါ။</p>
-        <Input
-          label="Gemini API Key"
-          type="password"
-          autoComplete="off"
-          value={draftKey}
-          onChange={event => { setDraftKey(event.target.value); setKeyError(null); }}
-        />
-        {keyError && <div className="alert error" role="alert" style={{ whiteSpace: 'pre-wrap' }}>{keyError}</div>}
-        <div className="row wrap" style={{ marginTop: 12 }}>
-          <Button loading={savingKey} disabled={!draftKey.trim() || savingKey} onClick={() => void saveKey()}>သိမ်းပြီး ဆက်လုပ်မည်</Button>
-        </div>
-      </Dialog>
 
       {job?.status === 'pending' && (
         <div className="panel">

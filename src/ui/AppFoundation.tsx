@@ -9,7 +9,6 @@ import { HistoryPage } from './pages/HistoryPage';
 import { SettingsPage } from './pages/SettingsPage';
 import { SuperAdminPage } from './pages/SuperAdminPage';
 import { UnauthorizedPage } from './pages/UnauthorizedPage';
-import { GeminiKeyProvider } from './workspace/GeminiKeyContext';
 import { useAuth } from '../auth/AuthProvider';
 
 function DefaultHome() {
@@ -29,7 +28,7 @@ export default function AppFoundation() {
       <Route path="/login" element={<LoginPage />} />
       <Route path="/unauthorized" element={<UnauthorizedPage />} />
       <Route element={<ProtectedRoute />}>
-        <Route element={<GeminiKeyProvider><AppShell /></GeminiKeyProvider>}>
+        <Route element={<AppShell />}>
             <Route path="/new-recap" element={<NewRecapPage />} />
             <Route path="/history" element={<HistoryPage />} />
             <Route path="/buy-credits" element={<BuyCreditsPage />} />

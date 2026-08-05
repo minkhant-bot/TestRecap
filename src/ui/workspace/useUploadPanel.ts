@@ -26,7 +26,7 @@ const readDuration = (file: File) => new Promise<number | null>(resolve => {
 // Real upload validation/XHR-progress logic, extracted out of what used to
 // be UploadPage.tsx's UploadPanel component so the new screen can render it
 // however BlinkAutomationFull_v2.jsx's NewRecap screen shape requires.
-export function useUploadPanel(geminiApiKey: string, onComplete: (job: WorkspaceJob) => void) {
+export function useUploadPanel(onComplete: (job: WorkspaceJob) => void) {
   const [configuration, setConfiguration] = useState<UploadConfiguration | null>(null);
   const [configurationError, setConfigurationError] = useState<string | null>(null);
   const [videos, setVideos] = useState<SelectedVideo[]>([]);
@@ -52,7 +52,7 @@ export function useUploadPanel(geminiApiKey: string, onComplete: (job: Workspace
       for (let index = 0; index < selected.length; index += 1) {
         const video = selected[index];
         const job = await new Promise<WorkspaceJob>((resolve, reject) => {
-          cancelRef.current = uploadWorkspaceJob(video.file, video.duration, geminiApiKey, {
+          cancelRef.current = uploadWorkspaceJob(video.file, video.duration, {
             onProgress: fileProgress => setProgress(Math.round(
               ((index + (fileProgress / 100)) / selected.length) * 100,
             )),

@@ -27,68 +27,6 @@ const parseResponse = async <T>(response: Response): Promise<T> => {
 export const getUploadConfiguration = async () =>
   parseResponse<UploadConfiguration>(await fetch('/api/workspace/config', { credentials: 'include' }));
 
-interface GeminiProviderError {
-  httpStatus: number;
-  httpStatusText?: string;
-  body: {
-    error?: {
-      code?: number | string;
-      status?: string;
-      message?: string;
-    };
-  } | string | null;
-  rawBody: string;
-}
-
-export const verifyGeminiApiKey = async (geminiApiKey: string) => {
-  const response = await fetch('/api/workspace/gemini-key/verify', {
-    method: 'POST',
-    credentials: 'include',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ geminiApiKey }),
-  });
-  const payload = await response.json().catch(() => ({})) as {
-    valid?: true;
-    model?: string;
-    error?: string;
-    providerError?: GeminiProviderError;
-  };
-  if (response.ok) return payload as { valid: true; model: string };
-
-  const provider = payload.providerError;
-  if (provider) {
-    const googleError = typeof provider.body === 'object' && provider.body
-      ? provider.body.error
-      : undefined;
-    throw new Error([
-      `HTTP status: ${provider.httpStatus}${provider.httpStatusText ? ` ${provider.httpStatusText}` : ''}`,
-      `Error code: ${googleError?.code ?? 'not provided'}`,
-      `Provider status: ${googleError?.status ?? 'not provided'}`,
-      `Message: ${googleError?.message ?? payload.error ?? 'not provided'}`,
-      `Complete Google response: ${provider.rawBody}`,
-    ].join('\n'));
-  }
-  throw new Error(payload.error || `Verification endpoint returned HTTP ${response.status}.`);
-};
-
-export const getGeminiApiKeyAvailability = async () =>
-  parseResponse<{ hasApiKey: boolean }>(await fetch('/api/workspace/gemini-key', {
-    credentials: 'include',
-  }));
-
-export const saveGeminiApiKey = async (geminiApiKey: string) =>
-  parseResponse<{ hasApiKey: true }>(await fetch('/api/workspace/gemini-key', {
-    method: 'PUT',
-    credentials: 'include',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ geminiApiKey }),
-  }));
-
-export const deleteGeminiApiKey = async () =>
-  parseResponse<{ hasApiKey: false }>(await fetch('/api/workspace/gemini-key', {
-    method: 'DELETE',
-    credentials: 'include',
-  }));
 
 export const listWorkspaceJobs = async () =>
   parseResponse<WorkspaceJob[]>(await fetch('/api/workspace/jobs', { credentials: 'include' }));
@@ -122,8 +60,8 @@ export const retryWorkspaceJob = async (jobId: string, idempotencyKey: string) =
     },
   ));
 
-export const queueWorkspaceJob = async (jobId: string, geminiApiKey: string, effects?: VideoEffects) => {
-  const body = { geminiApiKey, effects };
+export const queueWorkspaceJob = async (jobId: string, effects?: VideoEffects) => {
+  const body = { effects };
   const url = `/api/workspace/jobs/${encodeURIComponent(jobId)}/queue`;
   try {
     return parseResponse<WorkspaceJobStatus>(await fetch(url, {
@@ -161,7 +99,6 @@ interface UploadCallbacks {
 export const uploadWorkspaceJob = (
   file: File,
   duration: number | null,
-  geminiApiKey: string,
   callbacks: UploadCallbacks,
 ) => {
   const request = new XMLHttpRequest();
@@ -188,7 +125,6 @@ export const uploadWorkspaceJob = (
 
   const body = new FormData();
   body.append('video', file);
-  body.append('geminiApiKey', geminiApiKey);
   if (duration !== null) body.append('duration', String(duration));
   request.send(body);
   return () => request.abort();

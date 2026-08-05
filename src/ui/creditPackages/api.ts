@@ -34,6 +34,30 @@ export interface CreditPackageAuditEvent {
   resource_id: string | null;
 }
 
+export interface CommercialPlan {
+  id: string;
+  code: 'trial' | 'normal' | 'pro';
+  name: string;
+  description: string;
+  active: boolean;
+  displayOrder: number;
+  archivedAt: string | null;
+}
+
+export interface BankAccount {
+  id: string;
+  code: string;
+  bank_name: string;
+  account_name: string;
+  account_number: string;
+  branch: string | null;
+  currency: string;
+  instructions: string;
+  active: boolean;
+  display_order: number;
+  archived_at: string | null;
+}
+
 const parseResponse = async <T>(response: Response): Promise<T> => {
   const payload = await response.json().catch(() => ({})) as { error?: string; code?: string };
   if (response.status === 401) {
@@ -47,7 +71,7 @@ const parseResponse = async <T>(response: Response): Promise<T> => {
   return payload as T;
 };
 
-const mutation = <T>(path: string, method: 'POST' | 'PATCH', body: unknown) =>
+const mutation = <T>(path: string, method: 'POST' | 'PATCH' | 'PUT', body: unknown) =>
   fetch(path, {
     method,
     credentials: 'include',
@@ -61,12 +85,13 @@ const mutation = <T>(path: string, method: 'POST' | 'PATCH', body: unknown) =>
 export const listActiveCreditPackages = async () =>
   parseResponse<CreditPackage[]>(await fetch('/api/credit-packages', { credentials: 'include' }));
 
-export const listManagedCreditPackages = async () => {
-  const catalog = await parseResponse<{ creditPlans: CreditPackage[] }>(
-    await fetch('/api/admin/billing/catalog', { credentials: 'include' }),
-  );
-  return catalog.creditPlans;
-};
+interface AdminCatalog { commercialPlans: CommercialPlan[]; creditPlans: CreditPackage[]; banks: BankAccount[] }
+const getAdminCatalog = async () =>
+  parseResponse<AdminCatalog>(await fetch('/api/admin/billing/catalog', { credentials: 'include' }));
+
+export const listManagedCreditPackages = async () => (await getAdminCatalog()).creditPlans;
+export const listManagedPlans = async () => (await getAdminCatalog()).commercialPlans;
+export const listManagedBankAccounts = async () => (await getAdminCatalog()).banks;
 
 export const listCreditPackageAudit = async () =>
   parseResponse<CreditPackageAuditEvent[]>(await fetch(
@@ -105,4 +130,74 @@ export const reorderCreditPackages = (items: Array<{ id: string; displayOrder: n
     '/api/admin/billing/credit-packages/reorder',
     'POST',
     { confirmed: true, items },
+  );
+
+export interface PlanConfigInput {
+  name: string;
+  description: string;
+  active: boolean;
+  displayOrder: number;
+}
+
+export const configurePlan = (code: 'trial' | 'pro', input: PlanConfigInput) =>
+  mutation<{ plan: CommercialPlan }>(`/api/admin/billing/plans/${code}`, 'PUT', input);
+
+// Rule #4 (frozen): Trial is BYOK-only with no Blur/Flip; Pro is
+// Blink-funded with Blur/Flip. These entitlement flags and the billing mode
+// are derived from the plan code, never owner-editable, so this form can
+// never submit a policy that violates that frozen rule.
+const FROZEN_POLICY_SHAPE: Record<'trial' | 'pro', {
+  billingMode: string; trialAllowanceCredits: number;
+  entitlements: Array<{ key: string; enabled: boolean }>;
+}> = {
+  trial: {
+    billingMode: 'byok',
+    trialAllowanceCredits: 12,
+    entitlements: [
+      { key: 'blur', enabled: false },
+      { key: 'flip', enabled: false },
+      { key: 'byok_mode', enabled: true },
+      { key: 'blink_funded_mode', enabled: false },
+    ],
+  },
+  pro: {
+    billingMode: 'blink_funded',
+    trialAllowanceCredits: 0,
+    entitlements: [
+      { key: 'blur', enabled: true },
+      { key: 'flip', enabled: true },
+      { key: 'byok_mode', enabled: false },
+      { key: 'blink_funded_mode', enabled: true },
+    ],
+  },
+};
+
+export const createPlanPolicy = (code: 'trial' | 'pro', input: { version: number; creditsPerBlock: number }) =>
+  mutation<{ policy: unknown }>(`/api/admin/billing/plans/${code}/policies`, 'POST', {
+    version: input.version,
+    creditsPerBlock: input.creditsPerBlock,
+    active: true,
+    effectiveFrom: new Date().toISOString(),
+    ...FROZEN_POLICY_SHAPE[code],
+  });
+
+export interface BankConfigInput {
+  bankName: string;
+  accountName: string;
+  accountNumber: string;
+  branch: string | null;
+  currency: string;
+  instructions: string;
+  active: boolean;
+  displayOrder: number;
+}
+
+export const configureBank = (code: string, input: BankConfigInput) =>
+  mutation<{ bank: BankAccount }>(`/api/admin/billing/banks/${encodeURIComponent(code)}`, 'PUT', input);
+
+export const linkPackageBank = (creditPlanId: string, bankAccountId: string, active: boolean) =>
+  mutation<{ link: unknown }>(
+    `/api/admin/billing/credit-plans/${encodeURIComponent(creditPlanId)}/banks/${encodeURIComponent(bankAccountId)}`,
+    'PUT',
+    { active },
   );

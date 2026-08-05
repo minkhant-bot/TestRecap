@@ -14,6 +14,7 @@ import {
   usersRepository,
 } from '../db/repositories/index.js';
 import { hasUserGeminiApiKey } from './userGeminiKeys.js';
+import { getFirebaseAdminAuth, toUserProfile } from './firebaseAdmin.js';
 
 // Rule #2 (frozen): Trial is always exactly 12 credits (1 credit = 30s of
 // uploaded/source video, existing block system unchanged) and always expires
@@ -116,6 +117,38 @@ const dependencies = {
   users: usersRepository,
   hasByok: hasUserGeminiApiKey,
   trialRequests: trialRequestsRepository,
+  // Firebase is the authoritative identity source; PostgreSQL's users row is
+  // only ever created lazily (on someone's own first billing-touching
+  // request). An admin acting on a target uid who hasn't done that yet must
+  // still resolve to the real, stable Firebase identity -- never a
+  // fabricated or unverified row.
+  resolveFirebaseUser: async uid => {
+    try {
+      return toUserProfile(await getFirebaseAdminAuth().getUser(uid));
+    } catch {
+      return null;
+    }
+  },
+};
+
+// Synchronizes a Firebase-authoritative target uid into PostgreSQL on
+// demand: reuses the existing row if this admin, or the target themself,
+// already caused one to be created (ensureUser upserts by firebase_uid, so
+// this never creates a duplicate); otherwise looks the uid up in Firebase
+// and creates the row from that real profile. Returns null only when the
+// uid does not exist in Firebase at all.
+const ensureTargetUser = async (firebaseUid, { client, deps }) => {
+  const existing = await deps.users.findUserByFirebaseUid(firebaseUid, { client });
+  if (existing) return existing;
+  const profile = await deps.resolveFirebaseUser(firebaseUid);
+  if (!profile) return null;
+  return deps.users.ensureUser({
+    firebaseUid: profile.uid,
+    email: profile.email || null,
+    displayName: profile.displayName || '',
+    photoUrl: profile.photoURL || '',
+    status: profile.status === 'disabled' ? 'disabled' : 'active',
+  }, { client });
 };
 
 const requireEnabled = (env = process.env) => {
@@ -894,7 +927,7 @@ export const adjustCredits = async (identity, input, {
     env, idempotencyKey, operation: `credits.manual_${direction}`,
     request: { userId, amount, direction, reason }, resourceType: 'credit_ledger', deps,
     work: async (client, actor) => {
-      const target = await deps.users.findUserByFirebaseUid(userId, { client });
+      const target = await ensureTargetUser(userId, { client, deps });
       if (!target) fail('Target user not found.', 'NOT_FOUND', 404);
       const targetUser = target;
       await deps.balances.ensureBalanceAccountForUpdate(targetUser.id, { client });
@@ -1227,6 +1260,18 @@ export const linkPackageBank = async (identity, input, options = {}) => {
     env, idempotencyKey, operation: 'credit_plan.bank.link', request,
     resourceType: 'credit_plan_bank_account', deps,
     work: async (client, actor) => {
+      const [creditPlan, bank] = await Promise.all([
+        deps.billing.findCreditPlanById(request.creditPlanId, { client }),
+        deps.billing.findBankAccountById(request.bankAccountId, { client }),
+      ]);
+      if (!creditPlan) fail('Credit package not found.', 'NOT_FOUND', 404);
+      if (!bank) fail('Bank account not found.', 'NOT_FOUND', 404);
+      if (creditPlan.currency !== bank.currency) {
+        fail(
+          `Bank account currency (${bank.currency}) must match the package currency (${creditPlan.currency}).`,
+          'BANK_CURRENCY_MISMATCH', 422,
+        );
+      }
       const link = await deps.billing.linkCreditPlanBank({
         ...request, actorUserId: actor.user.id,
       }, { client });
@@ -1352,7 +1397,7 @@ export const adminGetUserCredits = async (identity, firebaseUid, {
   return deps.transaction(async client => {
     const actor = await ensureActor(identity, { client, deps });
     await requireSuperAdmin(actor, { client, deps });
-    const target = await deps.users.findUserByFirebaseUid(firebaseUid, { client });
+    const target = await ensureTargetUser(firebaseUid, { client, deps });
     if (!target) fail('Target user not found.', 'NOT_FOUND', 404);
     const [balance, entries] = await Promise.all([
       deps.balances.findBalanceAccount(target.id, { client }),

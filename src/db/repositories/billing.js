@@ -340,6 +340,16 @@ export const listCreditPlans = async ({ currency = null, includeInactive = false
   return result.rows.map(mapCreditPackage);
 };
 
+export const findCreditPlanById = async (id, { client = null } = {}) =>
+  mapCreditPackage(firstRow(await databaseExecutor(client).query(
+    `SELECT * FROM credit_plans WHERE id=$1`, [id],
+  )));
+
+export const findBankAccountById = async (id, { client = null } = {}) =>
+  firstRow(await databaseExecutor(client).query(
+    `SELECT * FROM bank_accounts WHERE id=$1`, [id],
+  ));
+
 export const upsertBankAccount = async (bank, { client }) =>
   firstRow(await client.query(
     `INSERT INTO bank_accounts

@@ -10,7 +10,7 @@ const identities = {
     super: { uid: 'super-a', role: 'super_admin' }
 };
 
-const startServer = async updateAccess => {
+const startServer = async (updateAccess, { recordDurableAudit } = {}) => {
     const app = express();
     app.use(express.json());
     app.use(createRequireAuth({
@@ -19,7 +19,8 @@ const startServer = async updateAccess => {
     app.use('/admin', createAdminRouter({
         listUsers: async () => [],
         updateAccess,
-        serializeUser: user => user
+        serializeUser: user => user,
+        ...(recordDurableAudit ? { recordDurableAudit } : {})
     }));
     const server = await new Promise(resolve => {
         const listener = app.listen(0, '127.0.0.1', () => resolve(listener));
@@ -73,6 +74,36 @@ test('admin mutation routes use server identity and preserve policy status and c
         });
         assert.equal(allowedSuper.status, 200);
         assert.equal(calls[1].actor, identities.super);
+    } finally {
+        await new Promise(resolve => server.close(resolve));
+    }
+});
+
+test('role/status changes are durably audited on success and never on a denied attempt', async () => {
+    const durableAuditCalls = [];
+    const { server, baseUrl } = await startServer(async input => {
+        if (input.actor.role !== 'super_admin') {
+            const error = new Error('Only super administrators may change roles.');
+            error.code = 'ROLE_CHANGE_REQUIRES_SUPER_ADMIN';
+            error.status = 403;
+            throw error;
+        }
+        return { uid: input.uid, role: input.role, status: input.status };
+    }, {
+        recordDurableAudit: async event => { durableAuditCalls.push(event); },
+    });
+    try {
+        const denied = await patchUser(baseUrl, 'admin', 'target', { role: 'admin', status: 'active' });
+        assert.equal(denied.status, 403);
+        assert.equal(durableAuditCalls.length, 0, 'a denied mutation must never be recorded as if it happened');
+
+        const allowed = await patchUser(baseUrl, 'super', 'target', { role: 'admin', status: 'active' });
+        assert.equal(allowed.status, 200);
+        assert.equal(durableAuditCalls.length, 1);
+        assert.deepEqual(durableAuditCalls[0], {
+            type: 'admin.user.updated',
+            details: { actorUid: 'super-a', targetUid: 'target', role: 'admin', status: 'active' },
+        });
     } finally {
         await new Promise(resolve => server.close(resolve));
     }

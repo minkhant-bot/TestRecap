@@ -9,9 +9,10 @@ import {
   type ScreenshotMetadata, type SystemStatus,
 } from '../admin/api';
 import {
-  archiveCreditPackage, createCreditPackage, editCreditPackage, listCreditPackageAudit,
-  listManagedCreditPackages, reorderCreditPackages, setCreditPackageActive,
-  type CreditPackage, type CreditPackageAuditEvent, type CreditPackageInput,
+  archiveCreditPackage, configureBank, configurePlan, createCreditPackage, createPlanPolicy,
+  editCreditPackage, linkPackageBank, listCreditPackageAudit, listManagedBankAccounts,
+  listManagedCreditPackages, listManagedPlans, reorderCreditPackages, setCreditPackageActive,
+  type BankAccount, type CommercialPlan, type CreditPackage, type CreditPackageAuditEvent, type CreditPackageInput,
 } from '../creditPackages/api';
 import { purchaseTotalCredits, type PurchaseRequest, type TrialRequest } from '../billing/api';
 import { Button, ConfirmBody, Dialog, EmptyState, ErrorPanel, Input, Skeleton, StatCard, Tabs } from '../components';
@@ -54,6 +55,54 @@ const validationError = (draft: PackageDraft) => {
   if (!Number.isSafeInteger(values.creditAmount) || values.creditAmount < 1) return 'Credit amount must be a positive integer.';
   if (!Number.isSafeInteger(values.bonusCredits) || values.bonusCredits < 0) return 'Bonus credits must be a non-negative integer.';
   if (!Number.isSafeInteger(values.displayOrder) || values.displayOrder < 0) return 'Display order must be a non-negative integer.';
+  return null;
+};
+
+interface PlanDraft {
+  name: string; description: string; active: boolean; displayOrder: string;
+  creditsPerBlock: string; version: string;
+}
+const PLAN_LABEL: Record<'trial' | 'pro', string> = { trial: 'Trial', pro: 'Pro' };
+const emptyPlanDraft = (code: 'trial' | 'pro'): PlanDraft => ({
+  name: PLAN_LABEL[code], description: '', active: true, displayOrder: '0',
+  creditsPerBlock: '1', version: '1',
+});
+const planDraftFromExisting = (plan: CommercialPlan): PlanDraft => ({
+  name: plan.name, description: plan.description, active: plan.active,
+  displayOrder: String(plan.displayOrder), creditsPerBlock: '1', version: '1',
+});
+const planValidationError = (draft: PlanDraft) => {
+  if (!draft.name.trim()) return 'Plan name is required.';
+  const displayOrder = Number(draft.displayOrder);
+  const creditsPerBlock = Number(draft.creditsPerBlock);
+  const version = Number(draft.version);
+  if (!Number.isSafeInteger(displayOrder) || displayOrder < 0) return 'Display order must be a non-negative integer.';
+  if (!Number.isSafeInteger(creditsPerBlock) || creditsPerBlock < 1) return 'Credits per 30-second block must be a positive integer.';
+  if (!Number.isSafeInteger(version) || version < 1) return 'Policy version must be a positive integer.';
+  return null;
+};
+
+interface BankDraft {
+  code: string; bankName: string; accountName: string; accountNumber: string;
+  branch: string; currency: string; instructions: string; active: boolean; displayOrder: string;
+}
+const emptyBankDraft = (): BankDraft => ({
+  code: '', bankName: '', accountName: '', accountNumber: '',
+  branch: '', currency: 'MMK', instructions: '', active: true, displayOrder: '0',
+});
+const bankDraftFromExisting = (bank: BankAccount): BankDraft => ({
+  code: bank.code, bankName: bank.bank_name, accountName: bank.account_name,
+  accountNumber: bank.account_number, branch: bank.branch ?? '', currency: bank.currency,
+  instructions: bank.instructions, active: bank.active, displayOrder: String(bank.display_order),
+});
+const bankValidationError = (draft: BankDraft) => {
+  if (!draft.code.trim()) return 'Bank code is required.';
+  if (!draft.bankName.trim()) return 'Bank name is required.';
+  if (!draft.accountName.trim()) return 'Account name is required.';
+  if (!draft.accountNumber.trim()) return 'Account number is required.';
+  if (!/^[A-Z]{3}$/.test(draft.currency.trim().toUpperCase())) return 'Currency must be a 3-letter uppercase code.';
+  const displayOrder = Number(draft.displayOrder);
+  if (!Number.isSafeInteger(displayOrder) || displayOrder < 0) return 'Display order must be a non-negative integer.';
   return null;
 };
 
@@ -136,6 +185,24 @@ export function SuperAdminPage() {
   const [auditLoading, setAuditLoading] = useState(false);
   const [packageAuditError, setPackageAuditError] = useState<string | null>(null);
 
+  const [plans, setPlans] = useState<CommercialPlan[]>([]);
+  const [plansLoading, setPlansLoading] = useState(true);
+  const [plansError, setPlansError] = useState<string | null>(null);
+  const [planEditing, setPlanEditing] = useState<'trial' | 'pro' | null>(null);
+  const [planDraft, setPlanDraft] = useState<PlanDraft>(emptyPlanDraft('trial'));
+  const [planMutating, setPlanMutating] = useState(false);
+  const [planFormError, setPlanFormError] = useState<string | null>(null);
+
+  const [banks, setBanks] = useState<BankAccount[]>([]);
+  const [banksLoading, setBanksLoading] = useState(true);
+  const [banksError, setBanksError] = useState<string | null>(null);
+  const [bankEditing, setBankEditing] = useState<BankAccount | 'new' | null>(null);
+  const [bankDraft, setBankDraft] = useState<BankDraft>(emptyBankDraft());
+  const [bankMutating, setBankMutating] = useState(false);
+  const [bankFormError, setBankFormError] = useState<string | null>(null);
+  const [linkPackageChoice, setLinkPackageChoice] = useState<Record<string, string>>({});
+  const [linkingBankId, setLinkingBankId] = useState<string | null>(null);
+
   const { jobs: recentJobs, loading: jobsLoading } = useWorkspaceJobs(5);
 
   const load = useCallback(async () => {
@@ -189,6 +256,32 @@ export function SuperAdminPage() {
   }, []);
 
   useEffect(() => { void loadPackages(); }, [loadPackages]);
+
+  const loadPlans = useCallback(async () => {
+    setPlansLoading(true);
+    setPlansError(null);
+    try {
+      setPlans(await listManagedPlans());
+    } catch (error) {
+      setPlansError(requestError(error));
+    } finally {
+      setPlansLoading(false);
+    }
+  }, []);
+  useEffect(() => { void loadPlans(); }, [loadPlans]);
+
+  const loadBanks = useCallback(async () => {
+    setBanksLoading(true);
+    setBanksError(null);
+    try {
+      setBanks(await listManagedBankAccounts());
+    } catch (error) {
+      setBanksError(requestError(error));
+    } finally {
+      setBanksLoading(false);
+    }
+  }, []);
+  useEffect(() => { void loadBanks(); }, [loadBanks]);
 
   useEffect(() => () => {
     if (proofUrl) URL.revokeObjectURL(proofUrl);
@@ -328,6 +421,84 @@ export function SuperAdminPage() {
     [packages],
   );
   const reorderablePackages = sortedPackages.filter(item => !item.archivedAt);
+
+  const openPlanConfig = (code: 'trial' | 'pro') => {
+    const existing = plans.find(item => item.code === code);
+    setPlanDraft(existing ? planDraftFromExisting(existing) : emptyPlanDraft(code));
+    setPlanFormError(null);
+    setPlanEditing(code);
+  };
+  const submitPlanForm = async (event: FormEvent) => {
+    event.preventDefault();
+    if (!planEditing) return;
+    const invalid = planValidationError(planDraft);
+    if (invalid) { setPlanFormError(invalid); return; }
+    setPlanFormError(null);
+    setPlanMutating(true);
+    try {
+      await configurePlan(planEditing, {
+        name: planDraft.name.trim(), description: planDraft.description.trim(),
+        active: planDraft.active, displayOrder: Number(planDraft.displayOrder),
+      });
+      await createPlanPolicy(planEditing, {
+        version: Number(planDraft.version), creditsPerBlock: Number(planDraft.creditsPerBlock),
+      });
+      setFeedback({ tone: 'success', title: `${PLAN_LABEL[planEditing]} plan configured`, message: `${planDraft.creditsPerBlock} credits per 30-second block.` });
+      setPlanEditing(null);
+      await loadPlans();
+    } catch (requestFailure) {
+      setPlanFormError(requestError(requestFailure));
+    } finally {
+      setPlanMutating(false);
+    }
+  };
+
+  const openBankCreate = () => {
+    setBankDraft(emptyBankDraft());
+    setBankFormError(null);
+    setBankEditing('new');
+  };
+  const openBankEdit = (bank: BankAccount) => {
+    setBankDraft(bankDraftFromExisting(bank));
+    setBankFormError(null);
+    setBankEditing(bank);
+  };
+  const submitBankForm = async (event: FormEvent) => {
+    event.preventDefault();
+    const invalid = bankValidationError(bankDraft);
+    if (invalid) { setBankFormError(invalid); return; }
+    setBankFormError(null);
+    setBankMutating(true);
+    try {
+      await configureBank(bankDraft.code.trim(), {
+        bankName: bankDraft.bankName.trim(), accountName: bankDraft.accountName.trim(),
+        accountNumber: bankDraft.accountNumber.trim(), branch: bankDraft.branch.trim() || null,
+        currency: bankDraft.currency.trim().toUpperCase(), instructions: bankDraft.instructions.trim(),
+        active: bankDraft.active, displayOrder: Number(bankDraft.displayOrder),
+      });
+      setFeedback({ tone: 'success', title: 'Bank account saved', message: `${bankDraft.bankName}: ${bankDraft.currency.toUpperCase()}.` });
+      setBankEditing(null);
+      await loadBanks();
+    } catch (requestFailure) {
+      setBankFormError(requestError(requestFailure));
+    } finally {
+      setBankMutating(false);
+    }
+  };
+  const linkBankToPackage = async (bank: BankAccount, active: boolean) => {
+    const packageId = linkPackageChoice[bank.id];
+    if (!packageId) return;
+    setLinkingBankId(bank.id);
+    try {
+      await linkPackageBank(packageId, bank.id, active);
+      const packageName = packages.find(item => item.id === packageId)?.name ?? 'package';
+      setFeedback({ tone: 'success', title: active ? 'Bank linked' : 'Bank unlinked', message: `${bank.bank_name} · ${packageName}.` });
+    } catch (requestFailure) {
+      setFeedback({ tone: 'danger', title: 'Bank link was not updated', message: requestError(requestFailure) });
+    } finally {
+      setLinkingBankId(null);
+    }
+  };
 
   const filteredUsers = useMemo(() => filterUsers(users, usersQuery), [users, usersQuery]);
   const visibleUsers = filteredUsers.slice(0, usersVisibleCount);
@@ -552,35 +723,88 @@ export function SuperAdminPage() {
   // Rule #1 (frozen): no eligibility questionnaire — just a pending request
   // the Owner approves. Approval grants exactly 12 credits, expiring in 120
   // hours (handled entirely server-side).
-  const trialContent = trialRequestsLoading ? <Skeleton height="16rem" /> : trialRequestsError ? <ErrorPanel title="Trial requests are unavailable" description={trialRequestsError} action={{ label: 'Try again', onClick: () => void loadTrialRequests() }} /> : trialRequests.length === 0 ? <EmptyState title="No pending Trial requests" /> : (
-    <>
-      <div className="adminTable">{trialRequests.map(request => (
-        <div className="adminRow" key={request.id}>
-          <div><strong>{request.userDisplayName || request.userEmail || 'Google user'}</strong><small>{request.userEmail}</small></div>
-          <span>Requested {new Date(request.requestedAt).toLocaleString()}</span>
-          <span><i className="statusDot warn" />Pending review</span>
-          <div className="adminActions">
-            <Button disabled={approvingTrialId !== null} onClick={() => setTrialToApprove(request)}>Approve Trial</Button>
-          </div>
+  const planConfigPanel = (
+    <div className="panel" style={{ marginBottom: 16 }}>
+      <h3 style={{ marginTop: 0 }}>Trial / Pro plan configuration</h3>
+      {plansLoading ? <Skeleton height="4rem" /> : plansError ? (
+        <ErrorPanel title="Plan configuration is unavailable" description={plansError} action={{ label: 'Try again', onClick: () => void loadPlans() }} />
+      ) : (
+        <div className="adminTable">
+          {(['trial', 'pro'] as const).map(code => {
+            const plan = plans.find(item => item.code === code);
+            return (
+              <div className="adminRow" key={code}>
+                <div><strong>{PLAN_LABEL[code]}</strong><small>{plan ? plan.name : 'Not configured yet'}</small></div>
+                <span><i className={`statusDot ${plan?.active ? '' : 'warn'}`} />{plan?.active ? 'Active' : plan ? 'Inactive' : 'Not configured'}</span>
+                <div className="adminActions">
+                  <Button variant="secondary" onClick={() => openPlanConfig(code)}>{plan ? 'Edit' : 'Configure'}</Button>
+                </div>
+              </div>
+            );
+          })}
         </div>
-      ))}</div>
-
-      <Dialog
-        open={trialToApprove !== null}
-        onClose={() => { if (!approvingTrialId) setTrialToApprove(null); }}
-        busy={approvingTrialId !== null}
-        title="Approve Trial?"
-      >
-        {trialToApprove && (
-          <ConfirmBody
-            description={`Grants ${trialToApprove.userDisplayName || trialToApprove.userEmail} exactly 12 credits, expiring in 120 hours. This can only happen once per account.`}
-            busy={approvingTrialId !== null}
-            confirmLabel="Confirm approval"
-            onConfirm={() => void confirmApproveTrial(trialToApprove)}
-            onCancel={() => setTrialToApprove(null)}
-          />
-        )}
+      )}
+      <Dialog open={planEditing !== null} onClose={() => { if (!planMutating) setPlanEditing(null); }} busy={planMutating} title={planEditing ? `Configure ${PLAN_LABEL[planEditing]} plan` : 'Configure plan'}>
+        <form onSubmit={event => void submitPlanForm(event)}>
+          {planFormError && <div className="alert error" role="alert" style={{ marginBottom: 12 }}>{planFormError}</div>}
+          <Input label="Name" value={planDraft.name} maxLength={100} required onChange={event => setPlanDraft({ ...planDraft, name: event.target.value })} />
+          <label className="field">
+            <span>Description (optional)</span>
+            <textarea value={planDraft.description} maxLength={1000} rows={2} onChange={event => setPlanDraft({ ...planDraft, description: event.target.value })} />
+          </label>
+          <div className="packageFormGrid">
+            <Input label="Credits per 30-second block" type="number" min="1" step="1" value={planDraft.creditsPerBlock} required onChange={event => setPlanDraft({ ...planDraft, creditsPerBlock: event.target.value })} />
+            <Input label="Policy version" type="number" min="1" step="1" value={planDraft.version} required onChange={event => setPlanDraft({ ...planDraft, version: event.target.value })} />
+            <Input label="Display order" type="number" min="0" step="1" value={planDraft.displayOrder} required onChange={event => setPlanDraft({ ...planDraft, displayOrder: event.target.value })} />
+          </div>
+          <p className="hint">{planEditing === 'trial' ? 'BYOK only -- Blur and Flip stay off for Trial.' : 'Blink-funded -- Blur and Flip are included for Pro.'} This is fixed by product rule and is not editable here.</p>
+          <label className="checkline">
+            <input type="checkbox" checked={planDraft.active} onChange={event => setPlanDraft({ ...planDraft, active: event.target.checked })} />
+            Active
+          </label>
+          <div className="row wrap" style={{ marginTop: 12 }}>
+            <Button type="submit" loading={planMutating} disabled={planMutating}>Save plan</Button>
+            <Button type="button" variant="ghost" disabled={planMutating} onClick={() => setPlanEditing(null)}>Cancel</Button>
+          </div>
+        </form>
       </Dialog>
+    </div>
+  );
+
+  const trialContent = (
+    <>
+      {planConfigPanel}
+      {trialRequestsLoading ? <Skeleton height="16rem" /> : trialRequestsError ? <ErrorPanel title="Trial requests are unavailable" description={trialRequestsError} action={{ label: 'Try again', onClick: () => void loadTrialRequests() }} /> : trialRequests.length === 0 ? <EmptyState title="No pending Trial requests" /> : (
+        <>
+          <div className="adminTable">{trialRequests.map(request => (
+            <div className="adminRow" key={request.id}>
+              <div><strong>{request.userDisplayName || request.userEmail || 'Google user'}</strong><small>{request.userEmail}</small></div>
+              <span>Requested {new Date(request.requestedAt).toLocaleString()}</span>
+              <span><i className="statusDot warn" />Pending review</span>
+              <div className="adminActions">
+                <Button disabled={approvingTrialId !== null} onClick={() => setTrialToApprove(request)}>Approve Trial</Button>
+              </div>
+            </div>
+          ))}</div>
+
+          <Dialog
+            open={trialToApprove !== null}
+            onClose={() => { if (!approvingTrialId) setTrialToApprove(null); }}
+            busy={approvingTrialId !== null}
+            title="Approve Trial?"
+          >
+            {trialToApprove && (
+              <ConfirmBody
+                description={`Grants ${trialToApprove.userDisplayName || trialToApprove.userEmail} exactly 12 credits, expiring in 120 hours. This can only happen once per account.`}
+                busy={approvingTrialId !== null}
+                confirmLabel="Confirm approval"
+                onConfirm={() => void confirmApproveTrial(trialToApprove)}
+                onCancel={() => setTrialToApprove(null)}
+              />
+            )}
+          </Dialog>
+        </>
+      )}
     </>
   );
 
@@ -726,6 +950,77 @@ export function SuperAdminPage() {
               : <ol className="adminAuditList">{audit.slice(0, 20).map(event => (
                 <li key={event.id}><div><strong>{event.event_type.replace('credit_package.', '').replace(/_/g, ' ')}</strong><small>{new Date(event.occurred_at).toLocaleString()} · Actor: {event.actor_user_id}</small></div></li>
               ))}</ol>}
+      </Dialog>
+
+      <div className="panel" style={{ marginTop: 16 }}>
+        <div className="row wrap between" style={{ marginBottom: 14 }}>
+          <h3 style={{ margin: 0 }}>Bank accounts</h3>
+          <Button onClick={openBankCreate}>Create bank account</Button>
+        </div>
+        {banksLoading ? <Skeleton height="8rem" /> : banksError ? (
+          <ErrorPanel title="Bank accounts are unavailable" description={banksError} action={{ label: 'Try again', onClick: () => void loadBanks() }} />
+        ) : banks.length === 0 ? <EmptyState title="No bank accounts yet" action={{ label: 'Create bank account', onClick: openBankCreate }} /> : (
+          <div className="adminTable">
+            {banks.map(bank => {
+              const matchingPackages = packages.filter(item => item.currency === bank.currency && !item.archivedAt);
+              return (
+                <div className="adminRow" key={bank.id} style={bank.archived_at ? { opacity: 0.6 } : undefined}>
+                  <div><strong>{bank.bank_name}</strong><small>{bank.account_name} · {bank.account_number} · {bank.currency}</small></div>
+                  <span><i className={`statusDot ${bank.active ? '' : 'warn'}`} />{bank.active ? 'Active' : 'Inactive'}</span>
+                  <div className="adminActions">
+                    <select
+                      value={linkPackageChoice[bank.id] ?? ''}
+                      onChange={event => setLinkPackageChoice({ ...linkPackageChoice, [bank.id]: event.target.value })}
+                      disabled={matchingPackages.length === 0}
+                    >
+                      <option value="">{matchingPackages.length === 0 ? `No ${bank.currency} packages` : 'Select package…'}</option>
+                      {matchingPackages.map(item => <option key={item.id} value={item.id}>{item.name}</option>)}
+                    </select>
+                    <Button
+                      variant="secondary"
+                      disabled={!linkPackageChoice[bank.id] || linkingBankId === bank.id}
+                      onClick={() => void linkBankToPackage(bank, true)}
+                    >Link</Button>
+                    <Button
+                      variant="ghost"
+                      disabled={!linkPackageChoice[bank.id] || linkingBankId === bank.id}
+                      onClick={() => void linkBankToPackage(bank, false)}
+                    >Unlink</Button>
+                    <Button variant="secondary" onClick={() => openBankEdit(bank)}>Edit</Button>
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+        )}
+        <p className="hint" style={{ marginTop: 10 }}>Only packages in the same currency as a bank account can be linked to it — there is no currency conversion.</p>
+      </div>
+
+      <Dialog open={bankEditing !== null} onClose={() => { if (!bankMutating) setBankEditing(null); }} busy={bankMutating} title={bankEditing === 'new' ? 'Create bank account' : 'Edit bank account'}>
+        <form onSubmit={event => void submitBankForm(event)}>
+          {bankFormError && <div className="alert error" role="alert" style={{ marginBottom: 12 }}>{bankFormError}</div>}
+          <Input label="Bank code" value={bankDraft.code} maxLength={50} required disabled={bankEditing !== 'new'} onChange={event => setBankDraft({ ...bankDraft, code: event.target.value })} />
+          <Input label="Bank name" value={bankDraft.bankName} maxLength={100} required onChange={event => setBankDraft({ ...bankDraft, bankName: event.target.value })} />
+          <div className="packageFormGrid">
+            <Input label="Account name" value={bankDraft.accountName} maxLength={100} required onChange={event => setBankDraft({ ...bankDraft, accountName: event.target.value })} />
+            <Input label="Account number" value={bankDraft.accountNumber} maxLength={100} required onChange={event => setBankDraft({ ...bankDraft, accountNumber: event.target.value })} />
+            <Input label="Branch (optional)" value={bankDraft.branch} maxLength={100} onChange={event => setBankDraft({ ...bankDraft, branch: event.target.value })} />
+            <Input label="Currency code" value={bankDraft.currency} minLength={3} maxLength={3} required onChange={event => setBankDraft({ ...bankDraft, currency: event.target.value.toUpperCase() })} />
+            <Input label="Display order" type="number" min="0" step="1" value={bankDraft.displayOrder} required onChange={event => setBankDraft({ ...bankDraft, displayOrder: event.target.value })} />
+          </div>
+          <label className="field">
+            <span>Instructions (optional)</span>
+            <textarea value={bankDraft.instructions} maxLength={1000} rows={3} onChange={event => setBankDraft({ ...bankDraft, instructions: event.target.value })} />
+          </label>
+          <label className="checkline">
+            <input type="checkbox" checked={bankDraft.active} onChange={event => setBankDraft({ ...bankDraft, active: event.target.checked })} />
+            Active
+          </label>
+          <div className="row wrap" style={{ marginTop: 12 }}>
+            <Button type="submit" loading={bankMutating} disabled={bankMutating}>Save bank account</Button>
+            <Button type="button" variant="ghost" disabled={bankMutating} onClick={() => setBankEditing(null)}>Cancel</Button>
+          </div>
+        </form>
       </Dialog>
     </>
   );

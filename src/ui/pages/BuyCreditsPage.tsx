@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState, useRef } from 'react';
+import { useCallback, useEffect, useMemo, useState, useRef } from 'react';
 import { Button, Dialog, EmptyState, ErrorPanel, Skeleton, Tabs } from '../components';
 import { listActiveCreditPackages, type CreditPackage } from '../creditPackages/api';
 import {
@@ -178,6 +178,7 @@ export function BuyCreditsPage() {
   const [requestingTrial, setRequestingTrial] = useState(false);
   const [trialRequestError, setTrialRequestError] = useState<string | null>(null);
   const [activityTab, setActivityTab] = useState<'ledger' | 'requests'>('ledger');
+  const [currencyFilter, setCurrencyFilter] = useState<string | null>(null);
 
   const loadPackages = useCallback(async () => {
     setLoading(true);
@@ -194,6 +195,24 @@ export function BuyCreditsPage() {
   }, []);
 
   useEffect(() => { void loadPackages(); }, [loadPackages]);
+
+  // Owner-created packages stay in whichever currency they were created in
+  // -- no conversion, ever. This only filters which already-separate records
+  // are displayed; it never merges or converts between them.
+  const availableCurrencies = useMemo(
+    () => [...new Set(packages.map(item => item.currency))].sort(),
+    [packages],
+  );
+  useEffect(() => {
+    if (availableCurrencies.length === 0) return;
+    if (!currencyFilter || !availableCurrencies.includes(currencyFilter)) {
+      setCurrencyFilter(availableCurrencies[0]);
+    }
+  }, [availableCurrencies, currencyFilter]);
+  const visiblePackages = useMemo(
+    () => packages.filter(item => item.currency === currencyFilter),
+    [packages, currencyFilter],
+  );
 
   const loadBilling = useCallback(async () => {
     setBillingLoading(true);
@@ -400,8 +419,24 @@ export function BuyCreditsPage() {
           ) : packages.length === 0 ? (
             <EmptyState title="လက်ရှိ ရရှိနိုင်သော ပက်ကေ့ချ် မရှိသေးပါ" />
           ) : (
+            <>
+              {availableCurrencies.length > 1 && (
+                <div className="row wrap" role="tablist" aria-label="Package currency" style={{ marginBottom: 14, gap: 8 }}>
+                  {availableCurrencies.map(currency => (
+                    <button
+                      key={currency}
+                      type="button"
+                      role="tab"
+                      aria-selected={currencyFilter === currency}
+                      className={`btn ${currencyFilter === currency ? 'accent' : 'ghost'}`}
+                      onClick={() => setCurrencyFilter(currency)}
+                    >{currency}</button>
+                  ))}
+                </div>
+              )}
+              {visiblePackages.length === 0 ? <EmptyState title={`No ${currencyFilter ?? ''} packages yet`} /> : (
             <div className="pricegrid">
-              {packages.map(item => {
+              {visiblePackages.map(item => {
                 const totalCredits = packageTotalCredits(item);
                 const minutes = formatProcessingMinutes(totalCredits);
                 const hasBonus = BigInt(item.bonusCredits) > 0n;
@@ -424,6 +459,8 @@ export function BuyCreditsPage() {
                 );
               })}
             </div>
+              )}
+            </>
           )}
 
           {billing && (

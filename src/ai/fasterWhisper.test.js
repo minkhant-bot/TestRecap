@@ -9,7 +9,9 @@ import {
     getFasterWhisperRuntimeConfig,
     invokeFasterWhisper,
     transcribeWithFasterWhisper,
-    validateSourceTranscript
+    validateSourceTranscript,
+    WHISPER_CPU_THREADS_ABSOLUTE_MAX,
+    WHISPER_CPU_THREADS_DEFAULT_CEILING
 } from './fasterWhisper.js';
 
 test('Railway CPU defaults use small int8 with one worker and bounded detected threads', () => {
@@ -39,6 +41,43 @@ test('Railway CPU variables override defaults without oversubscribing detected C
     assert.equal(configured.ompNumThreads, 2);
     assert.equal(configured.beamSize, 5);
     assert.equal(configured.cacheDirectory, '/data/models');
+});
+
+test('WHISPER_CPU_THREADS_MAX defaults to the previous hardcoded ceiling of 4 when unset', () => {
+    assert.equal(WHISPER_CPU_THREADS_DEFAULT_CEILING, 4);
+    const defaults = getFasterWhisperRuntimeConfig({}, 16);
+    assert.equal(defaults.cpuThreads, 4, 'an unset ceiling must reproduce the prior hardcoded behavior exactly');
+});
+
+test('a valid WHISPER_CPU_THREADS_MAX raises the ceiling so more detected CPUs can be used', () => {
+    const raised = getFasterWhisperRuntimeConfig({
+        WHISPER_CPU_THREADS_MAX: '8',
+        WHISPER_CPU_THREADS: '8'
+    }, 16);
+    assert.equal(raised.cpuThreads, 8);
+    assert.equal(raised.ompNumThreads, 8);
+});
+
+test('an invalid or unsafe WHISPER_CPU_THREADS_MAX falls back to the safe default ceiling', () => {
+    for (const unsafe of ['0', '-8', 'not-a-number', '', undefined]) {
+        const config = getFasterWhisperRuntimeConfig({ WHISPER_CPU_THREADS_MAX: unsafe, WHISPER_CPU_THREADS: '32' }, 32);
+        assert.equal(config.cpuThreads, 4, `unsafe value ${JSON.stringify(unsafe)} must fall back to the default ceiling`);
+    }
+});
+
+test('WHISPER_CPU_THREADS_MAX cannot exceed the absolute sanity cap, and the real CPU count still applies', () => {
+    assert.equal(WHISPER_CPU_THREADS_ABSOLUTE_MAX, 64);
+    const oversized = getFasterWhisperRuntimeConfig({
+        WHISPER_CPU_THREADS_MAX: '999999',
+        WHISPER_CPU_THREADS: '999999'
+    }, 128);
+    assert.equal(oversized.cpuThreads, 64, 'the ceiling itself must never exceed the absolute sanity cap');
+
+    const belowHostCpus = getFasterWhisperRuntimeConfig({
+        WHISPER_CPU_THREADS_MAX: '999999',
+        WHISPER_CPU_THREADS: '999999'
+    }, 6);
+    assert.equal(belowHostCpus.cpuThreads, 6, 'the real detected CPU count still clamps usage even when the ceiling is raised');
 });
 
 const fakeChild = ({ stdout = '', stderr = '', code = 0, close = true } = {}) => {

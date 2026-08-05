@@ -239,6 +239,42 @@ test('History rows show live progress and status for every terminal/active state
   assert.match(history, /window\.scrollTo\(\{ top: 0, left: 0, behavior: 'auto' \}\)/);
 });
 
+test('Interaction Rule audit: History delete confirmation is a popup Dialog, not an inline expanding panel', () => {
+  const history = read('./pages/HistoryPage.tsx');
+  assert.match(history, /import \{ ConfirmBody, Dialog,/, 'must use the shared Dialog/ConfirmBody pattern');
+  assert.match(history, /<Dialog\s+open=\{deleting !== null\}/);
+  assert.match(history, /busy=\{deleteBusy\}/);
+  assert.match(history, /<ConfirmBody\b[\s\S]*?dangerous/, 'delete is destructive and must be visually distinct');
+  // Original approved Burmese copy must be preserved, not silently
+  // replaced by the shared component's English defaults.
+  assert.match(history, /confirmLabel="ဖျက်မည်"/);
+  assert.match(history, /cancelLabel="ပယ်ဖျက်မည်"/);
+  // The old inline expanding panel is gone: no more conditionally-rendered
+  // "panel" pushing the page down for this action.
+  assert.doesNotMatch(history, /\{deleting && \(\s*<div className="panel"/);
+});
+
+test('Interaction Rule audit: New Recap Gemini-key setup is a popup Dialog, and the approved completed-video preview stays untouched', () => {
+  const page = read('./pages/NewRecapPage.tsx');
+  assert.match(page, /import \{ Button, Dialog, Input \}/);
+  assert.match(page, /<Dialog\s*\n\s*open=\{keySetupOpen && !hasApiKey\}/);
+  assert.match(page, /busy=\{savingKey\}/);
+  assert.doesNotMatch(page, /\{keySetupOpen && !hasApiKey\} && \(\s*<div className="panel">/);
+  // CLAUDE.md exception: the completed-video preview experience is
+  // explicitly excluded from this audit and must never become a Dialog.
+  const completedBlock = page.slice(page.indexOf("job?.status === 'completed' && !job.expired"));
+  const completedSection = completedBlock.slice(0, completedBlock.indexOf('failed'));
+  assert.doesNotMatch(completedSection, /<Dialog/);
+  assert.match(completedSection, /videoBox--portrait/, 'preview markup itself must be unchanged');
+});
+
+test('Interaction Rule audit: SuperAdminPage reuses the shared ConfirmBody instead of a local duplicate', () => {
+  const admin = read('./pages/SuperAdminPage.tsx');
+  assert.doesNotMatch(admin, /function ConfirmBody\(/, 'must not redefine ConfirmBody locally now that it is shared');
+  assert.match(admin, /import \{ Button, ConfirmBody, Dialog,/);
+  assert.ok((admin.match(/<ConfirmBody\b/g) || []).length >= 7, 'every existing confirm dialog must keep using the shared component');
+});
+
 test('mobile shell is a bottom nav bar (not a drawer), reachable via real routing and billing APIs', () => {
   const shell = read('./layout/AppShell.tsx');
   const app = read('./styles/app.css');

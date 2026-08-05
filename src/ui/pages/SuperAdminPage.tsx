@@ -14,7 +14,7 @@ import {
   type CreditPackage, type CreditPackageAuditEvent, type CreditPackageInput,
 } from '../creditPackages/api';
 import { purchaseTotalCredits, type PurchaseRequest, type TrialRequest } from '../billing/api';
-import { Button, Dialog, EmptyState, ErrorPanel, Input, Skeleton, StatCard, Tabs } from '../components';
+import { Button, ConfirmBody, Dialog, EmptyState, ErrorPanel, Input, Skeleton, StatCard, Tabs } from '../components';
 import { JobList } from '../workspace/JobList';
 import { useWorkspaceJobs } from '../workspace/useWorkspaceJobs';
 
@@ -82,21 +82,6 @@ const ROLE_OPTIONS: AdminUser['role'][] = ['user', 'admin', 'super_admin'];
 
 // Confirmation body rendered inside a Dialog — the Dialog itself supplies
 // the title, close control, and backdrop/scroll-lock chrome.
-function ConfirmBody({ description, dangerous, busy, onConfirm, onCancel, confirmLabel = 'Confirm' }: {
-  description?: string; dangerous?: boolean; busy: boolean;
-  onConfirm(): void; onCancel(): void; confirmLabel?: string;
-}) {
-  return (
-    <>
-      {description && <p className="muted">{description}</p>}
-      <div className="row wrap" style={{ marginTop: 12 }}>
-        <Button variant={dangerous ? 'danger' : 'primary'} loading={busy} onClick={onConfirm}>{confirmLabel}</Button>
-        <Button variant="ghost" disabled={busy} onClick={onCancel}>Cancel</Button>
-      </div>
-    </>
-  );
-}
-
 export function SuperAdminPage() {
   const { profile } = useAuth();
   const [tab, setTab] = useState<TabId>('overview');

@@ -18,6 +18,8 @@ export function useJobStatus(projectId: string | null) {
   const [mediaUrl, setMediaUrl] = useState<string | null>(null);
   const [mediaError, setMediaError] = useState<string | null>(null);
   const [mediaRetry, setMediaRetry] = useState(0);
+  const [downloading, setDownloading] = useState(false);
+  const [downloadError, setDownloadError] = useState<string | null>(null);
   const pollingRef = useRef<number | null>(null);
 
   const refresh = useCallback(async () => {
@@ -145,6 +147,36 @@ export function useJobStatus(projectId: string | null) {
     }
   };
 
+  // Independent of the inline preview fetch below: Download must remain
+  // available whenever the stored, authoritative job.videoUrl is valid,
+  // even when the preview blob fetch has failed (e.g. a transient network
+  // error) -- the two must never share one failure state. Always uses
+  // job.videoUrl verbatim; never derives or fabricates a fallback path.
+  const downloadVideo = async (filename: string) => {
+    if (!job?.videoUrl || downloading) return;
+    setDownloading(true);
+    setDownloadError(null);
+    let objectUrl: string | null = null;
+    try {
+      const response = await fetch(job.videoUrl, { credentials: 'include' });
+      if (!response.ok) throw new Error(`ဒေါင်းလုဒ်ရယူမှု HTTP ${response.status} ပြန်လာပါသည်။`);
+      const blob = await response.blob();
+      if (!blob.size) throw new Error('ဒေါင်းလုဒ်လုပ်ရန် ဗီဒီယိုတွင် အချက်အလက်မရှိပါ။');
+      objectUrl = URL.createObjectURL(blob);
+      const link = document.createElement('a');
+      link.href = objectUrl;
+      link.download = filename;
+      document.body.appendChild(link);
+      link.click();
+      link.remove();
+    } catch (requestError) {
+      setDownloadError(requestError instanceof Error ? requestError.message : 'ဒေါင်းလုဒ်လုပ်၍မရပါ။');
+    } finally {
+      if (objectUrl) URL.revokeObjectURL(objectUrl);
+      setDownloading(false);
+    }
+  };
+
   useEffect(() => {
     if (job?.status !== 'completed') return;
     if (!job.videoUrl) {
@@ -180,6 +212,7 @@ export function useJobStatus(projectId: string | null) {
   return {
     job, loading, error, cancelling, retrying, retryEligibility, retryFeedback,
     mediaUrl, mediaError, setMediaRetry: () => setMediaRetry(value => value + 1),
+    downloading, downloadError, downloadVideo,
     cancelJob, retryFailedJob,
   };
 }

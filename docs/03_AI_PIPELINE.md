@@ -15,6 +15,8 @@ Owned uploaded video
   → Faster-Whisper small/CPU transcription
       beam size 3, word timestamps, VAD,
       condition_on_previous_text=false
+      (CPU threads overridable by WHISPER_CPU_THREADS, capped by
+      WHISPER_CPU_THREADS_MAX, default ceiling 4)
   → Validate Whisper timestamps against the real WAV duration
   → Gemini text translation to Burmese in batches of 40
       input/output contain index and text only
@@ -30,6 +32,7 @@ Owned uploaded video
   → Merge authoritative timeline records using the ZIP 0.75s/12s rules
   → Select scene boundaries while retaining original Whisper visual windows
   → Render 1080x1920, 30fps MPEG-TS segments with crop, speed, and freeze padding
+      (encoder threads overridable by FFMPEG_VIDEO_THREADS, default 2)
   → Concatenate video with TTS-only AAC audio, loudnorm, and faststart
   → Verify streams and A/V drift within 0.3s
   → Optional final speed adjustment (ADJUST_FINAL_SPEED stage; atempo/setpts

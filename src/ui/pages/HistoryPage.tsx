@@ -1,7 +1,6 @@
 import { useEffect, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
-import { X } from 'lucide-react';
-import { Button, EmptyState, ErrorPanel, Skeleton } from '../components';
+import { ConfirmBody, Dialog, EmptyState, ErrorPanel, Skeleton } from '../components';
 import { deleteWorkspaceJob, getWorkspaceRetryEligibility, retryWorkspaceJob } from '../workspace/api';
 import { JobList } from '../workspace/JobList';
 import type { WorkspaceJob, WorkspaceRetryEligibility } from '../workspace/types';
@@ -85,19 +84,22 @@ export function HistoryPage() {
       {!loading && !error && jobs.length > 0 && <JobList jobs={jobs} onDelete={setDeleting} retryEligibility={retryEligibility} retryingId={retryingId} onRetry={job => void retryJob(job)} />}
       {retryError && <div className="alert error" role="alert">{retryError}</div>}
 
-      {deleting && (
-        <div className="panel" style={{ marginTop: 16 }}>
-          <div className="row between">
-            <strong>Recap ကို ဖျက်မလား? — {deleting.filename}</strong>
-            <button className="btn ghost iconBtn" aria-label="Cancel" onClick={() => !deleteBusy && setDeleting(null)}><X size={16} aria-hidden="true" /></button>
-          </div>
-          {deleteError && <div className="alert error" role="alert" style={{ marginTop: 10 }}>{deleteError}</div>}
-          <div className="row wrap" style={{ marginTop: 12 }}>
-            <Button variant="danger" loading={deleteBusy} onClick={() => void confirmDelete()}>ဖျက်မည်</Button>
-            <Button variant="ghost" disabled={deleteBusy} onClick={() => setDeleting(null)}>ပယ်ဖျက်မည်</Button>
-          </div>
-        </div>
-      )}
+      <Dialog
+        open={deleting !== null}
+        onClose={() => { if (!deleteBusy) setDeleting(null); }}
+        busy={deleteBusy}
+        title={deleting ? `Recap ကို ဖျက်မလား? — ${deleting.filename}` : 'Recap ကို ဖျက်မလား?'}
+      >
+        {deleteError && <div className="alert error" role="alert" style={{ marginBottom: 10 }}>{deleteError}</div>}
+        <ConfirmBody
+          dangerous
+          busy={deleteBusy}
+          confirmLabel="ဖျက်မည်"
+          cancelLabel="ပယ်ဖျက်မည်"
+          onConfirm={() => void confirmDelete()}
+          onCancel={() => setDeleting(null)}
+        />
+      </Dialog>
     </>
   );
 }

@@ -5,6 +5,8 @@ import path from 'node:path';
 import test from 'node:test';
 import { WORKFLOW_VERSION } from '../domain/workflow.js';
 import {
+    FFMPEG_VIDEO_THREADS_DEFAULT,
+    FFMPEG_VIDEO_THREADS_MAX,
     MAX_AV_DRIFT_SECONDS,
     TIMELINE_ALGORITHM_VERSION,
     buildConcatManifest,
@@ -14,6 +16,7 @@ import {
     getJobOutputPaths,
     getSegmentPath,
     mapRecordsChronologically,
+    resolveFfmpegVideoThreads,
     validateFinalMedia,
     validateTimelineManifest
 } from './sceneRebuild.js';
@@ -47,6 +50,26 @@ test('versioned artifact schema clamps visual speed to the ZIP 0.35x-100x range'
     assert.equal(manifest.algorithmVersion, TIMELINE_ALGORITHM_VERSION);
     assert.equal(manifest.segments[0].playback_rate, 0.35);
     assert.equal(validateTimelineManifest(manifest, 8, 1), manifest);
+});
+
+test('FFMPEG_VIDEO_THREADS falls back to the previous hardcoded default of 2 when unset', () => {
+    assert.equal(FFMPEG_VIDEO_THREADS_DEFAULT, 2);
+    assert.equal(resolveFfmpegVideoThreads({}), 2);
+});
+
+test('a valid FFMPEG_VIDEO_THREADS environment override is used', () => {
+    assert.equal(resolveFfmpegVideoThreads({ FFMPEG_VIDEO_THREADS: '6' }), 6);
+});
+
+test('an invalid or unsafe FFMPEG_VIDEO_THREADS falls back to the safe default', () => {
+    for (const unsafe of ['0', '-4', 'not-a-number', '', undefined]) {
+        assert.equal(resolveFfmpegVideoThreads({ FFMPEG_VIDEO_THREADS: unsafe }), 2, `unsafe value ${JSON.stringify(unsafe)} must fall back to the default`);
+    }
+});
+
+test('FFMPEG_VIDEO_THREADS cannot exceed the sanity cap of 32', () => {
+    assert.equal(FFMPEG_VIDEO_THREADS_MAX, 32);
+    assert.equal(resolveFfmpegVideoThreads({ FFMPEG_VIDEO_THREADS: '999' }), 32);
 });
 
 test('segment render command restores portrait crop, freeze padding, 30fps, and MPEG-TS', () => {

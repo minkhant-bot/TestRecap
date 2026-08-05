@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from 'react';
 import { useSearchParams } from 'react-router-dom';
-import { Button, Input } from '../components';
+import { Button, Dialog, Input } from '../components';
 import { formatDuration, formatFileSize } from '../workspace/format';
 import { queueWorkspaceJob } from '../workspace/api';
 import { useGeminiKey } from '../workspace/GeminiKeyContext';
@@ -273,23 +273,25 @@ export function NewRecapPage() {
         )
       )}
 
-      {keySetupOpen && !hasApiKey && (
-        <div className="panel">
-          <h3 style={{ marginTop: 0 }}>Gemini API Key လိုအပ်ပါသည်</h3>
-          <p className="muted">ပထမဆုံး Recap ဖန်တီးရန် Gemini API Key ထည့်ပေးပါ။</p>
-          <Input
-            label="Gemini API Key"
-            type="password"
-            autoComplete="off"
-            value={draftKey}
-            onChange={event => { setDraftKey(event.target.value); setKeyError(null); }}
-          />
-          {keyError && <div className="alert error" role="alert" style={{ whiteSpace: 'pre-wrap' }}>{keyError}</div>}
-          <div className="row wrap" style={{ marginTop: 12 }}>
-            <Button loading={savingKey} disabled={!draftKey.trim() || savingKey} onClick={() => void saveKey()}>သိမ်းပြီး ဆက်လုပ်မည်</Button>
-          </div>
+      <Dialog
+        open={keySetupOpen && !hasApiKey}
+        onClose={() => { if (!savingKey) setKeySetupOpen(false); }}
+        busy={savingKey}
+        title="Gemini API Key လိုအပ်ပါသည်"
+      >
+        <p className="muted">ပထမဆုံး Recap ဖန်တီးရန် Gemini API Key ထည့်ပေးပါ။</p>
+        <Input
+          label="Gemini API Key"
+          type="password"
+          autoComplete="off"
+          value={draftKey}
+          onChange={event => { setDraftKey(event.target.value); setKeyError(null); }}
+        />
+        {keyError && <div className="alert error" role="alert" style={{ whiteSpace: 'pre-wrap' }}>{keyError}</div>}
+        <div className="row wrap" style={{ marginTop: 12 }}>
+          <Button loading={savingKey} disabled={!draftKey.trim() || savingKey} onClick={() => void saveKey()}>သိမ်းပြီး ဆက်လုပ်မည်</Button>
         </div>
-      )}
+      </Dialog>
 
       {job?.status === 'pending' && (
         <div className="panel">
@@ -357,8 +359,17 @@ export function NewRecapPage() {
               </div>
               <div className="row wrap">
                 {status.mediaUrl && <a className="btn" href={status.mediaUrl} target="_blank" rel="noreferrer">Preview</a>}
-                {status.mediaUrl && <a className="btn accent" href={status.mediaUrl} download={`${job.filename.replace(/\.[^.]+$/, '')}-recap.mp4`}>Download Video</a>}
+                {job.videoUrl && (
+                  <button
+                    className="btn accent"
+                    disabled={status.downloading}
+                    onClick={() => void status.downloadVideo(`${job.filename.replace(/\.[^.]+$/, '')}-recap.mp4`)}
+                  >
+                    {status.downloading ? 'ဒေါင်းလုဒ်လုပ်နေသည်...' : 'Download Video'}
+                  </button>
+                )}
               </div>
+              {status.downloadError && <div className="alert error" role="alert" style={{ marginTop: 8 }}>{status.downloadError}</div>}
             </div>
             <p className="hint" style={{ marginTop: 12 }}>Completed videos are available for 24 hours.</p>
           </div>

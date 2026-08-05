@@ -11,6 +11,12 @@ export const WHISPER_TIMESTAMP_OVERLAP_TOLERANCE_SECONDS = 0.05;
 export const WHISPER_TIMESTAMP_END_CLAMP_SECONDS = 1.5;
 export const FASTER_WHISPER_MODEL = 'small';
 export const DEFAULT_TRANSCRIPTION_TIMEOUT_MS = 30 * 60 * 1000;
+// Prior hardcoded ceiling, kept as the safe fallback so an unset
+// WHISPER_CPU_THREADS_MAX reproduces exactly the previous behavior.
+export const WHISPER_CPU_THREADS_DEFAULT_CEILING = 4;
+// Sanity bound on the ceiling itself, independent of the real detected CPU
+// count (which always applies as a second clamp below).
+export const WHISPER_CPU_THREADS_ABSOLUTE_MAX = 64;
 
 const positiveInteger = (value, fallback) => {
     const parsed = Number.parseInt(value, 10);
@@ -19,7 +25,11 @@ const positiveInteger = (value, fallback) => {
 
 export const getFasterWhisperRuntimeConfig = (env = process.env, detectedCpuCount = os.cpus().length) => {
     const cpuCount = Math.max(1, detectedCpuCount || 1);
-    const safeThreadLimit = Math.min(cpuCount, 4);
+    const configuredCeiling = Math.min(
+        positiveInteger(env.WHISPER_CPU_THREADS_MAX, WHISPER_CPU_THREADS_DEFAULT_CEILING),
+        WHISPER_CPU_THREADS_ABSOLUTE_MAX
+    );
+    const safeThreadLimit = Math.min(cpuCount, configuredCeiling);
     const cpuThreads = Math.min(positiveInteger(env.WHISPER_CPU_THREADS, safeThreadLimit), safeThreadLimit);
     return {
         model: env.WHISPER_MODEL || FASTER_WHISPER_MODEL,

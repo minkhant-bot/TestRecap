@@ -6,7 +6,22 @@ export const TIMELINE_ALGORITHM_VERSION = 'sawaungthin-authoritative-timeline-v1
 export const MIN_VISUAL_PLAYBACK_RATE = 0.35;
 export const MAX_VISUAL_PLAYBACK_RATE = 100;
 export const MAX_AV_DRIFT_SECONDS = 0.3;
-export const FFMPEG_VIDEO_THREADS = 2;
+// Prior hardcoded value, kept as the safe fallback so an unset
+// FFMPEG_VIDEO_THREADS reproduces exactly the previous behavior.
+export const FFMPEG_VIDEO_THREADS_DEFAULT = 2;
+// Sanity bound so a misconfigured value can't request an unreasonable
+// thread count; ffmpeg itself further self-limits to available cores.
+export const FFMPEG_VIDEO_THREADS_MAX = 32;
+
+export const resolveFfmpegVideoThreads = (env = process.env) => {
+    const parsed = Number.parseInt(env.FFMPEG_VIDEO_THREADS, 10);
+    if (Number.isInteger(parsed) && parsed > 0) {
+        return Math.min(parsed, FFMPEG_VIDEO_THREADS_MAX);
+    }
+    return FFMPEG_VIDEO_THREADS_DEFAULT;
+};
+
+export const FFMPEG_VIDEO_THREADS = resolveFfmpegVideoThreads();
 
 const finite = (value, label) => {
     const number = Number(value);

@@ -92,6 +92,16 @@ Default local binding: `http://0.0.0.0:3000`.
 - `FIREBASE_SUPER_ADMIN_UIDS`: comma-separated Firebase UIDs for protected initial super-admin bootstrap
 - Optional server Gemini fallback: `GEMINI_API_KEY`
 - Whisper: model/device/compute/threads/workers/beam/cache settings
+- Optional CPU-bound pipeline tuning (all fall back to the prior hardcoded
+  defaults when unset, so leaving them blank reproduces existing behavior;
+  see `.env.example` for the full description of each):
+  `WHISPER_CPU_THREADS` (default 4), `WHISPER_CPU_THREADS_MAX` (ceiling on
+  the above, default 4, absolute max 64), `OMP_NUM_THREADS` (default:
+  resolved `WHISPER_CPU_THREADS`), `FFMPEG_VIDEO_THREADS` (scene-segment
+  render and final speed-adjustment encoder threads, default 2, max 32),
+  `TTS_CONCURRENCY` (concurrent Edge-TTS requests per job, default 3, max
+  20). Only one job runs at a time (queue/worker concurrency is fixed at 1),
+  so these raise per-job core usage rather than enabling concurrent jobs.
 - Railway provides `PORT`; production binds `0.0.0.0`
 
 P2.1 PostgreSQL variables:

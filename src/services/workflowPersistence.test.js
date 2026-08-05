@@ -4,13 +4,13 @@ import { createJob, deleteJob, getJob, recoverStuckJobs, updateJob } from './job
 import { WORKFLOW_VERSION } from '../domain/workflow.js';
 
 test('new jobs persist workflow v2, stable stage ID, and queued lifecycle', () => {
-    createJob('workflow-v2-job', { videoPath: '/tmp/video', audioPath: null });
-    const job = getJob('workflow-v2-job');
+    createJob('workflow-v3-job', { videoPath: '/tmp/video', audioPath: null });
+    const job = getJob('workflow-v3-job');
     assert.equal(job.workflowVersion, WORKFLOW_VERSION);
     assert.equal(job.stageId, 'upload');
     assert.equal(job.status, 'queued');
     assert.equal(Object.hasOwn(job, 'currentStep'), false);
-    deleteJob('workflow-v2-job');
+    deleteJob('workflow-v3-job');
 });
 
 test('legacy jobs are made non-resumable with a clear error policy', () => {

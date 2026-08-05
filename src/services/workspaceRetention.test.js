@@ -141,35 +141,96 @@ test('retention sweep coordinates linked terminal deletion and preserves active 
         const result = JSON.parse(output.trim().split('\n').at(-1));
 
         assert.equal(result.candidates, 5);
-        assert.deepEqual(result.terminal, {
-            workspace: null,
-            core: null,
-            credentials: {},
-            sourceExists: false,
-            outputExists: false,
-            cacheExists: false
-        });
+
+        // Expired (not deleted): the record is kept -- so a direct link can
+        // report "Expired" -- but stripped of media links and marked, its
+        // generated output/temporary artifacts (and cached credential) gone.
+        assert.notEqual(result.terminal.workspace, null);
+        assert.equal(result.terminal.workspace.expired, true);
+        assert.equal(typeof result.terminal.workspace.expiredAt, 'string');
+        assert.equal(result.terminal.workspace.videoUrl, null);
+        assert.notEqual(result.terminal.core, null);
+        assert.equal(result.terminal.core.expired, true);
+        assert.equal(result.terminal.core.status, 'complete');
+        assert.deepEqual(result.terminal.credentials, {});
+        assert.equal(result.terminal.sourceExists, false);
+        assert.equal(result.terminal.outputExists, false);
+        assert.equal(result.terminal.cacheExists, false);
+
+        // Still active -- never a candidate at any age; completely untouched.
         assert.deepEqual(result.active, {
             workspaceStatus: 'pending',
             coreStatus: 'complete',
             sourceExists: true,
             outputExists: true
         });
-        assert.deepEqual(result.legacy, {
-            core: null,
-            outputExists: false
-        });
+
+        // Core-only (no linked workspace record) -- also expired, not deleted.
+        assert.notEqual(result.legacy.core, null);
+        assert.equal(result.legacy.core.expired, true);
+        assert.equal(result.legacy.outputExists, false);
+
+        // Ownership mismatch between linked records -- left completely
+        // untouched rather than guessed at.
         assert.deepEqual(result.mismatch, {
             workspaceStatus: 'completed',
             coreOwner: 'different-owner',
             outputExists: true
         });
-        assert.deepEqual(result.orphan, {
-            workspace: null,
-            sourceExists: false,
-            outputExists: false,
-            cacheExists: false
+
+        // Orphaned workspace record (no linked core job) -- also expired.
+        assert.notEqual(result.orphan.workspace, null);
+        assert.equal(result.orphan.workspace.expired, true);
+        assert.equal(result.orphan.sourceExists, false);
+        assert.equal(result.orphan.outputExists, false);
+        assert.equal(result.orphan.cacheExists, false);
+
+        // Idempotent / restart-safe: re-running the sweep against the same
+        // persisted, file-backed stores in a fresh process must not error
+        // and must not change anything for the already-expired jobs. The
+        // still-reported ACTIVE_ID (defensively skipped: its core record
+        // independently says 'complete' while its linked workspace record
+        // is genuinely 'pending') and MISMATCH_ID (an ownership conflict no
+        // automatic sweep can resolve) are pre-existing, expected
+        // candidates every run -- neither was ever swept, before or after
+        // this change, so they are excluded from nothing.
+        const rerun = execFileSync(process.execPath, [
+            '--input-type=module',
+            '--eval',
+            `
+                const core = await import(process.env.JOB_MANAGER_MODULE_URL);
+                const workspace = await import(process.env.WORKSPACE_JOBS_MODULE_URL);
+                const cleanup = await import(process.env.CLEANUP_MODULE_URL);
+                const candidates = cleanup.sweepExpiredCompletedJobs({ now: 20000, maxAgeMs: 100 });
+                console.log(JSON.stringify({
+                    candidates,
+                    terminal: {
+                        workspace: workspace.getWorkspaceJobInternal('${TERMINAL_ID}'),
+                        core: core.getJob('${TERMINAL_ID}')
+                    },
+                    legacy: { core: core.getJob('${LEGACY_ID}') },
+                    orphan: { workspace: workspace.getWorkspaceJobInternal('${ORPHAN_ID}') }
+                }));
+            `
+        ], {
+            cwd: process.cwd(),
+            env: {
+                ...process.env,
+                DATA_DIR: root,
+                JOB_STORE_PATH: path.join(root, 'saas-state.json'),
+                WORKSPACE_JOB_STORE_PATH: path.join(root, 'workspace-jobs.json'),
+                JOB_MANAGER_MODULE_URL: jobManagerUrl,
+                WORKSPACE_JOBS_MODULE_URL: workspaceJobsUrl,
+                CLEANUP_MODULE_URL: cleanupUrl
+            },
+            encoding: 'utf8'
         });
+        const rerunResult = JSON.parse(rerun.trim().split('\n').at(-1));
+        assert.equal(rerunResult.candidates, 2, 'only the pre-existing unresolvable ACTIVE/MISMATCH cases remain candidates');
+        assert.deepEqual(rerunResult.terminal.workspace, result.terminal.workspace, 'already-expired workspace record must be unchanged by a second sweep');
+        assert.deepEqual(rerunResult.terminal.core, result.terminal.core, 'already-expired core record must be unchanged by a second sweep');
+        assert.deepEqual(rerunResult.legacy.core, result.legacy.core, 'already-expired core-only record must be unchanged by a second sweep');
+        assert.deepEqual(rerunResult.orphan.workspace, result.orphan.workspace, 'already-expired orphan record must be unchanged by a second sweep');
     } finally {
         fs.rmSync(root, { recursive: true, force: true });
     }

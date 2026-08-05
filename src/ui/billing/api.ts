@@ -50,12 +50,20 @@ export interface PurchaseRequest {
   screenshotFileId: string;
   planName: string;
   credits: string;
+  packageBonusCredits: string;
   priceMinor: string;
   currency: string;
   submittedAt: string;
   reviewedAt: string | null;
   rejectionReason: string | null;
 }
+
+// Total granted credits = base credits + package bonus credits. Every
+// display (package cards, purchase popup, purchase history, Owner review,
+// ledger, balance) must derive from this one shared computation rather than
+// showing base credits alone.
+export const purchaseTotalCredits = (purchase: Pick<PurchaseRequest, 'credits' | 'packageBonusCredits'>) =>
+  (BigInt(purchase.credits) + BigInt(purchase.packageBonusCredits || '0')).toString();
 
 export interface PaymentProofConfiguration {
   maxSizeBytes: number;
@@ -79,6 +87,17 @@ export interface PaymentProofSubmission {
   proof: PaymentProofMetadata;
 }
 
+export interface TrialRequest {
+  id: string;
+  userId: string;
+  status: 'pending' | 'approved';
+  requestedAt: string;
+  reviewedAt: string | null;
+  reviewedByUserId: string | null;
+  userEmail?: string;
+  userDisplayName?: string;
+}
+
 export class ApiError extends Error {
   code?: string;
   status: number;
@@ -98,7 +117,25 @@ export const parseResponse = async <T>(response: Response): Promise<T> => {
   return payload as T;
 };
 
-const get = <T>(path: string) => fetch(path, { credentials: 'include' }).then(parseResponse<T>);
+// A stalled request (slow/unreachable database, dropped connection) must
+// never spin a loading indicator forever — every billing fetch races against
+// this timeout so callers always get a real, actionable error and their
+// `finally` block always runs.
+const REQUEST_TIMEOUT_MS = 20000;
+const fetchWithTimeout = (input: RequestInfo | URL, init: RequestInit = {}) => {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
+  return fetch(input, { ...init, signal: controller.signal })
+    .catch(error => {
+      if (error instanceof DOMException && error.name === 'AbortError') {
+        throw new ApiError('Request timed out. Please try again.', 0, 'TIMEOUT');
+      }
+      throw new ApiError('Network error. Check your connection and try again.', 0, 'NETWORK_ERROR');
+    })
+    .finally(() => clearTimeout(timer));
+};
+
+const get = <T>(path: string) => fetchWithTimeout(path, { credentials: 'include' }).then(parseResponse<T>);
 
 export const getBillingOverview = async () => {
   const [balance, assignment, plans, ledger, purchases] = await Promise.all([
@@ -110,6 +147,16 @@ export const getBillingOverview = async () => {
   ]);
   return { balance, assignment, plans, ledger, purchases };
 };
+
+// Rule #1 (frozen): Guest taps "Request Trial" -> pending -> Owner approves.
+export const getMyTrialRequest = () => get<TrialRequest | null>('/api/trial/request').catch(() => null);
+
+export const requestTrial = () =>
+  fetchWithTimeout('/api/trial/request', {
+    method: 'POST',
+    credentials: 'include',
+    headers: { 'Idempotency-Key': crypto.randomUUID() },
+  }).then(parseResponse<{ request: TrialRequest }>);
 
 export const listPackageBanks = (packageId: string) =>
   get<PackageBank[]>(`/api/credit-plans/${encodeURIComponent(packageId)}/bank-accounts`);
@@ -156,7 +203,7 @@ export const submitPurchaseWithProof = (input: {
 export const adminGet = get;
 
 export const adminMutation = <T>(path: string, body: unknown, method: 'POST' | 'PATCH' = 'POST') =>
-  fetch(path, {
+  fetchWithTimeout(path, {
     method,
     credentials: 'include',
     headers: {

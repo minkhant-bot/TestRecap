@@ -10,11 +10,22 @@ import {
   planAssignmentsRepository,
   plansRepository,
   rolesRepository,
+  trialRequestsRepository,
   usersRepository,
 } from '../db/repositories/index.js';
 import { hasUserGeminiApiKey } from './userGeminiKeys.js';
 
-const PLAN_CODES = new Set(['trial', 'normal', 'pro']);
+// Rule #2 (frozen): Trial is always exactly 12 credits (1 credit = 30s of
+// uploaded/source video, existing block system unchanged) and always expires
+// exactly 120 hours after Owner approval, whichever comes first with
+// exhaustion. Fixed by product decision, not admin-configurable.
+const TRIAL_GRANT_CREDITS = 12n;
+const TRIAL_DURATION_MS = 120 * 60 * 60 * 1000;
+
+// Rule #4 (frozen): Normal plan removed. Only Trial (request/approve only,
+// never self-selected) and Pro (assigned automatically on purchase approval,
+// never self-selected) remain.
+const PLAN_CODES = new Set(['trial', 'pro']);
 const ENTITLEMENT_KEYS = new Set([
   'blur', 'flip', 'byok_mode', 'blink_funded_mode',
   'active_job_limit', 'storage_limit_bytes', 'retention_hours',
@@ -104,6 +115,7 @@ const dependencies = {
   roles: rolesRepository,
   users: usersRepository,
   hasByok: hasUserGeminiApiKey,
+  trialRequests: trialRequestsRepository,
 };
 
 const requireEnabled = (env = process.env) => {
@@ -129,12 +141,35 @@ const ensureActor = async (identity, { client = null, deps = dependencies } = {}
   return { identity, user };
 };
 
+// Rule #6 (frozen): Owner authority source of truth is the Firebase
+// super_admin claim (already present on `actor.identity.role`, set by
+// requireAuth before this ever runs). PostgreSQL user_roles is kept in sync
+// automatically as a side effect, purely for durable audit/query — it is
+// never itself the authority. A stale/missing Postgres row never grants
+// access, and a stale Postgres "super_admin" row never survives a mismatched
+// Firebase claim on the next call (this function only ever syncs *up* to
+// match the current claim; it does not attempt to demote other rows here —
+// Firebase's own last-super-admin/self-lockout protections already keep
+// exactly one live super_admin claim).
 const requireSuperAdmin = async (actor, { client, deps = dependencies } = {}) => {
-  const role = await deps.roles.findRoleByUserId(actor.user.id, { client, forUpdate: true });
-  if (role?.role !== 'super_admin') {
-    fail('PostgreSQL Super Admin authority is required.', 'SUPER_ADMIN_REQUIRED', 403);
+  if (actor.identity?.role !== 'super_admin') {
+    fail('Owner (Super Admin) authority is required.', 'SUPER_ADMIN_REQUIRED', 403);
   }
-  return role;
+  const before = await deps.roles.findRoleByUserId(actor.user.id, { client, forUpdate: true });
+  if (before?.role === 'super_admin') return before;
+  // 'manual' is the closest fit among the DB's fixed source enum
+  // ('bootstrap' | 'manual' | 'migration') — the sync itself is recorded
+  // precisely in the audit event below (afterState.source: 'firebase_sync').
+  const synced = await deps.roles.assignRole({
+    userId: actor.user.id, role: 'super_admin', source: 'manual', assignedByUserId: null,
+  }, { client });
+  await deps.audit.insertAuditLog({
+    actorUserId: actor.user.id, subjectUserId: actor.user.id,
+    eventType: 'owner.authority_synced', resourceType: 'user_role', resourceId: actor.user.id,
+    beforeState: { role: before?.role || null },
+    afterState: { role: 'super_admin', source: 'firebase_sync' },
+  }, { client });
+  return synced;
 };
 
 const idempotent = async ({
@@ -192,49 +227,21 @@ export const getMyPlan = async (identity, { env = process.env, deps = dependenci
   return deps.assignments.findCurrentPlanAssignment(actor.user.id);
 };
 
+// Rule #4 (frozen): self-service plan selection is removed entirely. Pro is
+// assigned only as an automatic side effect of an approved purchase (see
+// reviewPurchase); Trial is granted only via the request/approve flow (see
+// requestTrial/approveTrialRequest). This endpoint is kept only so existing
+// callers get a clear, permanent rejection instead of a 404.
 export const selectPlan = async (identity, input, {
-  env = process.env, idempotencyKey, deps = dependencies,
+  env = process.env, deps = dependencies,
 } = {}) => {
   requireEnabled(env);
-  const code = text(input?.planCode, 'planCode', { max: 20 });
-  if (!['normal', 'pro'].includes(code)) fail('Only Normal or Pro may be explicitly selected.', 'PLAN_NOT_SELECTABLE', 422);
-  return idempotent({
-    actorScope: `firebase:${identity.uid}`,
-    operation: 'plan.select',
-    idempotencyKey,
-    request: { code },
-    resourceType: 'plan_assignment',
-    work: async client => {
-      const actor = await ensureActor(identity, { client, deps });
-      const plan = await deps.plans.findPlanByCode(code, { client });
-      if (!plan?.active || plan.archivedAt) fail('Plan is unavailable.', 'PLAN_UNAVAILABLE', 422);
-      const policy = await deps.plans.findEffectivePlanPolicy(plan.id, new Date(), { client });
-      if (!policy) fail('Plan has no effective policy.', 'PLAN_POLICY_UNAVAILABLE', 422);
-      if (code === 'normal' && !deps.hasByok(identity.uid)) {
-        fail('Normal requires a verified user Gemini key.', 'BYOK_REQUIRED', 422);
-      }
-      if (code === 'pro') {
-        const balance = await deps.balances.findBalanceAccount(actor.user.id, { client });
-        if (!String(env.GEMINI_API_KEY || '').trim()) {
-          fail('Blink-funded Gemini processing is unavailable.', 'PLATFORM_PROVIDER_UNAVAILABLE', 503);
-        }
-        if (!balance || balance.availableBalance <= 0n) {
-          fail('Pro requires an available purchased credit balance.', 'INSUFFICIENT_CREDITS', 409);
-        }
-      }
-      const assignment = await deps.billing.replaceCurrentAssignment({
-        userId: actor.user.id, planId: plan.id, source: 'user_selection',
-      }, { client });
-      await deps.audit.insertAuditLog({
-        actorUserId: actor.user.id,
-        eventType: 'plan.assignment.selected',
-        resourceType: 'plan_assignment',
-        resourceId: assignment.id,
-        afterState: { planCode: code },
-      }, { client });
-      return { status: 200, resourceId: assignment.id, body: { assignment, policy } };
-    },
-  }, { deps });
+  await ensureActor(identity, { deps });
+  fail(
+    'Self-service plan selection is no longer supported. Request a Trial or purchase a package to activate Pro.',
+    'PLAN_SELF_SELECTION_REMOVED',
+    410,
+  );
 };
 
 export const getTrialEligibility = async (identity, {
@@ -318,6 +325,149 @@ export const grantTrial = async (identity, input = {}, {
       return { status: 201, resourceId: grant.id, body: { grant, balance, assignment } };
     },
   }, { deps });
+};
+
+// Rule #1 (frozen): Guest taps "Request Trial" -> pending request -> Owner
+// approves -> one-time Trial. No eligibility questionnaire, no application
+// form, no risk-scoring. Idempotent: replays the existing request rather
+// than erroring on a second call.
+export const requestTrial = async (identity, {
+  env = process.env, idempotencyKey, deps = dependencies,
+} = {}) => {
+  requireEnabled(env);
+  return idempotent({
+    actorScope: `firebase:${identity.uid}`,
+    operation: 'trial.request',
+    idempotencyKey,
+    request: {},
+    resourceType: 'trial_request',
+    work: async client => {
+      const actor = await ensureActor(identity, { client, deps });
+      const grant = await deps.billing.findTrialGrant(actor.user.id, { client });
+      if (grant) fail('Trial was already granted once and cannot be requested again.', 'TRIAL_ALREADY_GRANTED', 409);
+      const existing = await deps.trialRequests.findTrialRequestByUserId(actor.user.id, { client });
+      if (existing) return { status: 200, resourceId: existing.id, body: { request: existing } };
+      const request = await deps.trialRequests.insertTrialRequest({ userId: actor.user.id }, { client });
+      await deps.audit.insertAuditLog({
+        actorUserId: actor.user.id, subjectUserId: actor.user.id,
+        eventType: 'trial.requested', resourceType: 'trial_request', resourceId: request.id,
+        afterState: { status: 'pending' },
+      }, { client });
+      return { status: 201, resourceId: request.id, body: { request } };
+    },
+  }, { deps });
+};
+
+export const getMyTrialRequest = async (identity, {
+  env = process.env, deps = dependencies,
+} = {}) => {
+  requireEnabled(env);
+  const actor = await ensureActor(identity, { deps });
+  return deps.trialRequests.findTrialRequestByUserId(actor.user.id);
+};
+
+export const listTrialRequests = async (identity, {
+  env = process.env, deps = dependencies,
+} = {}) => {
+  requireEnabled(env);
+  return deps.transaction(async client => {
+    const actor = await ensureActor(identity, { client, deps });
+    await requireSuperAdmin(actor, { client, deps });
+    return deps.trialRequests.listPendingTrialRequests({ client });
+  });
+};
+
+// Rule #1/#2 (frozen): Owner approval grants exactly once, 12 credits,
+// expiring 120 hours from now. A 'trial' plan + effective policy must
+// already be configured (same requirement the live job-billing reservation
+// path already has) so the granted plan can actually be used once billing
+// goes live; the allowance amount itself is fixed by product decision, not
+// read from that policy.
+export const approveTrialRequest = async (identity, id, {
+  env = process.env, idempotencyKey, deps = dependencies,
+} = {}) => withSuperAdminMutation(identity, {
+  env, idempotencyKey, operation: 'trial.request.approve', request: { id },
+  resourceType: 'trial_request', deps,
+  work: async (client, actor) => {
+    const request = await deps.trialRequests.findTrialRequestById(id, { client, forUpdate: true });
+    if (!request) fail('Trial request not found.', 'NOT_FOUND', 404);
+    if (request.status !== 'pending') fail('Trial request is already reviewed.', 'INVALID_STATE', 409);
+    const existingGrant = await deps.billing.findTrialGrant(request.userId, { client });
+    if (existingGrant) fail('Trial was already granted once and cannot be granted again.', 'TRIAL_ALREADY_GRANTED', 409);
+    const plan = await deps.plans.findPlanByCode('trial', { client });
+    if (!plan?.active) fail('Trial plan is not configured.', 'PLAN_UNAVAILABLE', 422);
+    const policy = await deps.plans.findEffectivePlanPolicy(plan.id, new Date(), { client });
+    if (!policy) fail('Trial plan has no effective policy.', 'TRIAL_POLICY_UNAVAILABLE', 422);
+    await deps.balances.ensureBalanceAccountForUpdate(request.userId, { client });
+    const expiresAt = new Date(Date.now() + TRIAL_DURATION_MS);
+    const ledger = await deps.ledger.insertLedgerEntry({
+      userId: request.userId,
+      amount: TRIAL_GRANT_CREDITS,
+      entryType: 'trial_grant',
+      correlationKey: `trial:${request.userId}`,
+      createdByUserId: actor.user.id,
+      metadata: { policyVersionId: policy.id, source: 'trial_request' },
+    }, { client });
+    const balance = await deps.balances.addPostedCredits(request.userId, TRIAL_GRANT_CREDITS, { client });
+    const grant = await deps.billing.insertTrialGrant({
+      userId: request.userId,
+      assessmentId: null,
+      creditAmount: TRIAL_GRANT_CREDITS,
+      policyVersionId: policy.id,
+      ledgerEntryId: ledger.id,
+      idempotencyKey,
+      expiresAt,
+    }, { client });
+    const assignment = await deps.billing.replaceCurrentAssignment({
+      userId: request.userId, planId: plan.id, source: 'trial',
+    }, { client });
+    const approvedRequest = await deps.trialRequests.approveTrialRequest({
+      id, reviewerId: actor.user.id,
+    }, { client });
+    await deps.audit.insertAuditLog({
+      actorUserId: actor.user.id, subjectUserId: request.userId,
+      eventType: 'trial.approved', resourceType: 'trial_grant', resourceId: grant.id,
+      afterState: { creditAmount: String(TRIAL_GRANT_CREDITS), expiresAt: expiresAt.toISOString() },
+    }, { client });
+    return {
+      status: 201, resourceId: grant.id,
+      body: { request: approvedRequest, grant, balance, assignment },
+    };
+  },
+});
+
+// Rule #2 (frozen): Trial expires exactly 120 hours after grant even if
+// credits remain; any remaining balance is permanently forfeited with a
+// durable, distinctly-labeled audit record. Expiry blocks only NEW job
+// creation — jobs already running are unaffected, which is naturally true
+// here since this only runs at the reservation checkpoint (before a new job
+// is admitted), never mid-processing. A no-op once the user has moved on to
+// Pro (Pro never expires and is unaffected by a Trial that already ended).
+export const checkAndExpireTrial = async (userId, { client, deps = dependencies }) => {
+  const grant = await deps.billing.findTrialGrant(userId, { client, forUpdate: true });
+  if (!grant || grant.expired_at || !grant.expires_at) return null;
+  if (new Date(grant.expires_at).getTime() > Date.now()) return null;
+  const marked = await deps.billing.markTrialGrantExpired(userId, { client });
+  if (!marked) return null;
+  const balance = await deps.balances.ensureBalanceAccountForUpdate(userId, { client });
+  if (balance.availableBalance > 0n) {
+    await deps.ledger.insertLedgerEntry({
+      userId,
+      amount: -balance.availableBalance,
+      entryType: 'manual_deduction',
+      correlationKey: `trial-expired:${userId}`,
+      reason: 'Trial expired 120 hours after grant; remaining credits forfeited automatically.',
+      createdByUserId: userId,
+      metadata: { system: true, trigger: 'trial_expiry' },
+    }, { client });
+    await deps.balances.addPostedCredits(userId, -balance.availableBalance, { client });
+  }
+  await deps.audit.insertAuditLog({
+    actorService: 'trial_lifecycle', subjectUserId: userId,
+    eventType: 'trial.expired', resourceType: 'trial_grant', resourceId: grant.id,
+    afterState: { forfeitedCredits: String(balance.availableBalance) },
+  }, { client });
+  return { forfeitedCredits: balance.availableBalance };
 };
 
 export const getBalance = async (identity, {
@@ -531,6 +681,7 @@ export const submitPurchase = async (identity, input, {
         planCode: catalog.code,
         planName: catalog.name,
         credits: bigint(catalog.credit_amount),
+        packageBonusCredits: bigint(catalog.bonus_credits ?? 0),
         priceMinor: bigint(catalog.price_minor),
         currency: catalog.currency,
         bankSnapshot: {
@@ -647,10 +798,25 @@ export const reviewPurchase = async (identity, id, input, {
         return { status: 200, resourceId: id, body: { purchase: rejected } };
       }
       await deps.balances.ensureBalanceAccountForUpdate(purchase.userId, { client });
+      // The package's own configured bonus_credits (Super Admin package
+      // management, migration 0002) is distinct from the unrelated one-time
+      // first-purchase promotion bonus below. Both are granted as part of
+      // this single approval, atomically, but the package bonus is folded
+      // into the one 'purchase' ledger entry (base + package bonus) so the
+      // balance and every display reflect one consistent total; base and
+      // package-bonus stay separately auditable via the immutable
+      // purchase_credit_snapshot/package_bonus_credit_snapshot columns on
+      // this purchase request (added in migration 0004).
+      const packageBonusCredits = purchase.packageBonusCredits ?? 0n;
       const purchaseLedger = await deps.ledger.insertLedgerEntry({
-        userId: purchase.userId, amount: purchase.credits, entryType: 'purchase',
+        userId: purchase.userId, amount: purchase.credits + packageBonusCredits,
+        entryType: 'purchase',
         purchaseRequestId: id, correlationKey: `purchase:${id}`,
         createdByUserId: actor.user.id,
+        metadata: {
+          baseCredits: String(purchase.credits),
+          packageBonusCredits: String(packageBonusCredits),
+        },
       }, { client });
       let bonusLedger = null;
       const existingRedemption = await deps.billing.findPromotionRedemption(
@@ -671,7 +837,7 @@ export const reviewPurchase = async (identity, id, input, {
         }, { client });
         if (!redemption) fail('First-purchase bonus was concurrently consumed.', 'BONUS_CONFLICT', 409);
       }
-      const total = purchase.credits + (bonusLedger?.amount || 0n);
+      const total = purchase.credits + packageBonusCredits + (bonusLedger?.amount || 0n);
       const balance = await deps.balances.addPostedCredits(purchase.userId, total, { client });
       const approved = await deps.billing.approvePurchase({
         id, reviewerId: actor.user.id, purchaseLedgerEntryId: purchaseLedger.id,
@@ -682,13 +848,33 @@ export const reviewPurchase = async (identity, id, input, {
         eventType: 'credit_purchase.approved', resourceType: 'credit_purchase_request',
         resourceId: id, beforeState: { status: 'pending' },
         afterState: {
-          status: 'approved', purchaseCredits: String(purchase.credits),
-          bonusCredits: String(bonusLedger?.amount || 0n),
+          status: 'approved', baseCredits: String(purchase.credits),
+          packageBonusCredits: String(packageBonusCredits),
+          firstPurchaseBonusCredits: String(bonusLedger?.amount || 0n),
+          totalCreditsGranted: String(total),
         },
       }, { client });
+      // Rule #4 (frozen): any approved purchase automatically assigns Pro —
+      // both Guest->Purchase->Pro and Guest->Trial->Purchase->Pro. Credits
+      // and Pro are separate concepts, so this never checks balance; it
+      // simply reuses the same plan-replacement mechanism Trial already uses
+      // (correctly no-ops/updates whether or not the user was on Trial).
+      const proPlan = await deps.plans.findPlanByCode('pro', { client });
+      let proAssignment = null;
+      if (proPlan?.active) {
+        proAssignment = await deps.billing.replaceCurrentAssignment({
+          userId: purchase.userId, planId: proPlan.id, source: 'admin',
+        }, { client });
+        await deps.audit.insertAuditLog({
+          actorUserId: actor.user.id, subjectUserId: purchase.userId,
+          eventType: 'plan.pro_assigned_via_purchase', resourceType: 'plan_assignment',
+          resourceId: proAssignment.id,
+          afterState: { planCode: 'pro', purchaseRequestId: id },
+        }, { client });
+      }
       return {
         status: 200, resourceId: id,
-        body: { purchase: approved, balance, purchaseLedger, bonusLedger },
+        body: { purchase: approved, balance, purchaseLedger, bonusLedger, proAssignment },
       };
     },
   });
@@ -733,7 +919,7 @@ export const adjustCredits = async (identity, input, {
 export const configurePlan = async (identity, input, options = {}) => {
   const { env = process.env, idempotencyKey, deps = dependencies } = options;
   const code = text(input?.code, 'code', { max: 20 });
-  if (!PLAN_CODES.has(code)) fail('code must be trial, normal, or pro.', 'INVALID_INPUT');
+  if (!PLAN_CODES.has(code)) fail('code must be trial or pro.', 'INVALID_INPUT');
   const request = {
     code, name: text(input?.name, 'name', { max: 100 }),
     description: text(input?.description, 'description', { max: 1000, optional: true }),
@@ -777,7 +963,7 @@ export const createPlanPolicy = async (identity, planCode, input, options = {}) 
   const pro = planCode === 'pro';
   if (Boolean(flags.blur) !== pro || Boolean(flags.flip) !== pro ||
       Boolean(flags.byok_mode) === pro || Boolean(flags.blink_funded_mode) !== pro) {
-    fail('Entitlements must enforce BYOK Trial/Normal and Pro-only Blur/Flip/funded mode.', 'INVALID_PLAN_POLICY', 422);
+    fail('Entitlements must enforce BYOK Trial and Pro-only Blur/Flip/funded mode.', 'INVALID_PLAN_POLICY', 422);
   }
   const request = {
     planCode, version, creditsPerBlock, trialAllowanceCredits, billingMode,
@@ -797,23 +983,6 @@ export const createPlanPolicy = async (identity, planCode, input, options = {}) 
         effectiveUntil: request.effectiveUntil,
       }, { client })) {
         fail('An active policy already overlaps this effective window.', 'PLAN_POLICY_OVERLAP', 409);
-      }
-      if (['normal', 'pro'].includes(planCode)) {
-        const counterpartCode = planCode === 'pro' ? 'normal' : 'pro';
-        const counterpart = await deps.plans.findPlanByCode(counterpartCode, { client });
-        const counterpartPolicy = counterpart
-          ? await deps.plans.findEffectivePlanPolicy(
-            counterpart.id, request.effectiveFrom, { client },
-          )
-          : null;
-        if (counterpartPolicy) {
-          const invalidRate = planCode === 'pro'
-            ? request.creditsPerBlock <= counterpartPolicy.creditsPerBlock
-            : request.creditsPerBlock >= counterpartPolicy.creditsPerBlock;
-          if (invalidRate) {
-            fail('Pro credits-per-block must be higher than Normal.', 'INVALID_PLAN_RATE', 422);
-          }
-        }
       }
       const policy = await deps.billing.insertPlanPolicy({
         ...request, planId: plan.id, actorUserId: actor.user.id,

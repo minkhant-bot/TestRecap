@@ -2,9 +2,9 @@ import fs from 'fs';
 import path from 'path';
 import { WORKFLOW_VERSION } from '../domain/workflow.js';
 
-export const TIMELINE_ALGORITHM_VERSION = 'chronological-scene-timeline-v1';
-export const MIN_VISUAL_PLAYBACK_RATE = 0.25;
-export const MAX_VISUAL_PLAYBACK_RATE = 4;
+export const TIMELINE_ALGORITHM_VERSION = 'sawaungthin-authoritative-timeline-v1';
+export const MIN_VISUAL_PLAYBACK_RATE = 0.35;
+export const MAX_VISUAL_PLAYBACK_RATE = 100;
 export const MAX_AV_DRIFT_SECONDS = 0.3;
 export const FFMPEG_VIDEO_THREADS = 2;
 
@@ -54,7 +54,7 @@ export const mapRecordsChronologically = (records, sceneBoundaries, mediaDuratio
         throw new Error('Chronological mapping requires records and positive source/TTS durations.');
     }
     const boundaries = validateSceneBoundaries(sceneBoundaries, mediaDuration);
-    const mapped = records.map((record, index) => {
+    const anchored = records.map((record, index) => {
         const [sourceStart, sourceEnd] = validateInterval(
             record.orig_start, record.orig_end, mediaDuration, `Source record ${index}`);
         const [ttsStart, ttsEnd] = validateInterval(
@@ -74,9 +74,58 @@ export const mapRecordsChronologically = (records, sceneBoundaries, mediaDuratio
             text: String(record.text || '')
         };
     });
-    validateOrderedIntervals(mapped, 'source_start', 'source_end', 'Source');
-    validateOrderedIntervals(mapped, 'tts_start', 'tts_end', 'TTS');
-    return mapped;
+    for (let index = 1; index < anchored.length; index += 1) {
+        if (anchored[index].source_start < anchored[index - 1].source_end - 0.05) {
+            throw new Error(`Source records ${index - 1} and ${index} overlap beyond 0.05s.`);
+        }
+    }
+    validateOrderedIntervals(anchored, 'tts_start', 'tts_end', 'TTS');
+
+    const merged = [];
+    for (const record of anchored) {
+        const previous = merged[merged.length - 1];
+        const gap = previous ? record.source_start - previous.source_end : Infinity;
+        const proposedDuration = previous ? record.source_end - previous.source_start : Infinity;
+        if (previous && gap < 0.75 && proposedDuration <= 12) {
+            previous.source_end = record.source_end;
+            previous.tts_end = record.tts_end;
+            previous.text += ` ${record.text}`;
+        } else {
+            merged.push({ ...record });
+        }
+    }
+
+    let currentTime = merged.at(-1)?.tts_end || 0;
+    if (currentTime < ttsDuration) {
+        let sourceStart = anchored.at(-1)?.source_end || 0;
+        if (sourceStart >= mediaDuration) sourceStart = Math.max(0, mediaDuration - 0.5);
+        if (mediaDuration > sourceStart) {
+            let matchedSceneIndex = 0;
+            for (let index = 1; index < boundaries.length; index += 1) {
+                if (boundaries[index] <= sourceStart + 0.1) matchedSceneIndex = index;
+                else break;
+            }
+            merged.push({
+                source_start: sourceStart, source_end: mediaDuration,
+                source_scene_index: matchedSceneIndex, matched_scene_index: matchedSceneIndex,
+                tts_start: currentTime, tts_end: ttsDuration, text: '[Silence]'
+            });
+        } else if (merged.length > 0) {
+            merged.at(-1).tts_end = ttsDuration;
+        }
+    }
+
+    for (let index = 1; index < merged.length; index += 1) {
+        const difference = merged[index].tts_start - merged[index - 1].tts_end;
+        if (Math.abs(difference) < 0.02) merged[index].tts_start = merged[index - 1].tts_end;
+        else if (difference !== 0) {
+            throw new Error(`Unrepairable TTS timeline gap/overlap between segments ${index - 1} and ${index}.`);
+        }
+    }
+    if (merged.length > 0 && Math.abs(merged.at(-1).tts_end - ttsDuration) < 0.02) {
+        merged.at(-1).tts_end = ttsDuration;
+    }
+    return merged;
 };
 
 export const validateTimelineManifest = (manifest, mediaDuration, ttsDuration) => {
@@ -105,7 +154,6 @@ export const validateTimelineManifest = (manifest, mediaDuration, ttsDuration) =
         }
         outputRanges.push({ start: segment.tts_start, end: segment.tts_end });
     });
-    validateOrderedIntervals(manifest.segments, 'source_start', 'source_end', 'Timeline source');
     validateOrderedIntervals(manifest.segments, 'tts_start', 'tts_end', 'Timeline TTS');
     validateOrderedIntervals(outputRanges, 'start', 'end', 'Timeline output');
     return manifest;
@@ -128,7 +176,10 @@ export const buildTimelineManifest = (mappedRecords, mediaDuration, ttsDuration,
                 tts_start: record.tts_start,
                 tts_end: record.tts_end,
                 target_output_duration: targetDuration,
-                playback_rate: (record.source_end - record.source_start) / targetDuration,
+                playback_rate: Math.max(MIN_VISUAL_PLAYBACK_RATE, Math.min(
+                    MAX_VISUAL_PLAYBACK_RATE,
+                    (record.source_end - record.source_start) / targetDuration
+                )),
                 output_order: index,
                 text: record.text
             };
@@ -164,20 +215,23 @@ export const assertSafeJobPath = (candidatePath, jobDirectory) => {
 };
 
 export const getSegmentPath = (jobDirectory, outputOrder) =>
-    assertSafeJobPath(path.join(jobDirectory, 'segments', `segment-${String(outputOrder).padStart(6, '0')}.mp4`), jobDirectory);
+    assertSafeJobPath(path.join(jobDirectory, 'segments', `segment-${String(outputOrder).padStart(6, '0')}.ts`), jobDirectory);
 
 export const buildSegmentFFmpegArgs = (sourceVideo, outputPath, segment) => [
     '-ss', segment.source_start.toFixed(6),
     '-t', (segment.source_end - segment.source_start).toFixed(6),
     '-i', path.resolve(sourceVideo),
     '-an',
-    '-vf', `setpts=PTS/${segment.playback_rate.toFixed(8)},fps=30,setsar=1,format=yuv420p`,
+    '-vf', `setpts=${(1 / segment.playback_rate).toFixed(8)}*(PTS-STARTPTS),` +
+        `tpad=stop_mode=clone:stop_duration=${segment.target_output_duration.toFixed(6)},` +
+        'scale=1080:1920:force_original_aspect_ratio=increase,crop=1080:1920,' +
+        'fps=30,setsar=1,format=yuv420p',
     '-t', segment.target_output_duration.toFixed(6),
     '-c:v', 'libx264',
     '-threads', String(FFMPEG_VIDEO_THREADS),
     '-preset', 'fast',
     '-crf', '20',
-    '-movflags', '+faststart',
+    '-f', 'mpegts',
     '-y', outputPath
 ];
 
@@ -189,9 +243,20 @@ export const buildConcatManifest = (manifest, jobDirectory) =>
             if (!fs.existsSync(segmentPath)) throw new Error(`Segment file is missing: ${segmentPath}`);
             if (fs.lstatSync(segmentPath).isSymbolicLink()) throw new Error(`Segment is a symlink: ${segmentPath}`);
             if (fs.statSync(segmentPath).size === 0) throw new Error(`Segment file is empty: ${segmentPath}`);
-            return `file '${segmentPath.replaceAll("'", "'\\''")}'`;
+            return `file '${segmentPath.replaceAll("'", "'\\''")}'\n` +
+                `duration ${segment.target_output_duration.toFixed(6)}`;
         })
         .join('\n');
+
+export const buildFinalExportArgs = (concatFile, ttsAudioPath, outputPath) => [
+    '-f', 'concat', '-safe', '0', '-i', path.resolve(concatFile),
+    '-i', path.resolve(ttsAudioPath),
+    '-map', '0:v:0', '-map', '1:a:0',
+    '-c:v', 'copy',
+    '-c:a', 'aac', '-b:a', '128k',
+    '-filter:a', 'loudnorm=I=-14:LRA=11:TP=-1.5',
+    '-movflags', '+faststart', '-y', outputPath
+];
 
 export const buildAtempoFilter = multiplier => {
     multiplier = finite(multiplier, 'Final speed multiplier');

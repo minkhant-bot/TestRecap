@@ -7,6 +7,22 @@ export const DEFAULT_SUBTITLE_POSITION = Object.freeze({
     xPct: 10, yPct: 78, widthPct: 80, heightPct: 12
 });
 
+// One global fill color applied to every subtitle cue in the whole video --
+// never per-cue, never per-speaker. Outline/shadow (readability) are a
+// separate, unrelated style fields and are never changed by this selection.
+export const SUBTITLE_COLOR_PRESETS = Object.freeze({
+    yellow: Object.freeze({ r: 255, g: 255, b: 0 }),
+    red: Object.freeze({ r: 255, g: 59, b: 48 }),
+    blue: Object.freeze({ r: 51, g: 153, b: 255 })
+});
+export const DEFAULT_SUBTITLE_COLOR = 'yellow';
+
+const toAssColor = ({ r, g, b }) => {
+    const hex = value => value.toString(16).padStart(2, '0').toUpperCase();
+    // ASS/SSA color order is &HAABBGGRR (alpha, blue, green, red); AA=00 is opaque.
+    return `&H00${hex(b)}${hex(g)}${hex(r)}`;
+};
+
 const finite = (value, fallback) => Number.isFinite(Number(value)) ? Number(value) : fallback;
 const clamp = (value, minimum, maximum) => Math.min(maximum, Math.max(minimum, value));
 
@@ -28,6 +44,12 @@ export const normalizeVideoEffects = value => ({
     flipVideoEnabled: value?.flipVideoEnabled === true,
     burnSubtitlesEnabled: value?.burnSubtitlesEnabled === true || value?.subtitleEnabled === true,
     subtitlePosition: normalizeRect(value?.subtitlePosition),
+    // Saved as part of the same effects object as every other choice, so
+    // retry/resume replays the exact color the user selected before
+    // processing started (see workspaceJobs.js job.effects persistence).
+    subtitleColor: Object.hasOwn(SUBTITLE_COLOR_PRESETS, value?.subtitleColor)
+        ? value.subtitleColor
+        : DEFAULT_SUBTITLE_COLOR,
     blurEnabled: value?.blurEnabled === true,
     blurBoxes: value?.blurEnabled === true && Array.isArray(value?.blurBoxes)
         ? value.blurBoxes.slice(0, 8).map((box, index) => ({
@@ -77,13 +99,23 @@ export const parseAuthoritativeSrt = srtContent => {
     });
 };
 
-export const buildAssDocument = (srtContent, position = DEFAULT_SUBTITLE_POSITION) => {
+export const buildAssDocument = (
+    srtContent, position = DEFAULT_SUBTITLE_POSITION, subtitleColor = DEFAULT_SUBTITLE_COLOR
+) => {
     const subtitles = parseAuthoritativeSrt(srtContent);
     const normalized = normalizeRect(position);
     const marginL = Math.round((normalized.xPct / 100) * 1080);
     const marginR = Math.round(1080 - ((normalized.xPct + normalized.widthPct) / 100) * 1080);
     const marginV = Math.round((normalized.yPct / 100) * 1920);
     const fontSize = clamp(Math.round(((normalized.heightPct / 100) * 1920) * 0.6), 24, 80);
+    // One fill color for the whole document's single Default style -- every
+    // Dialogue event below uses Style: Default, so this is applied
+    // uniformly to every subtitle cue, never alternated, never per-speaker.
+    // Outline (&H00000000, strong black) and BackColour (&H80000000, subtle
+    // shadow) are unrelated fields and are always preserved unchanged here.
+    const primaryColour = toAssColor(
+        SUBTITLE_COLOR_PRESETS[subtitleColor] || SUBTITLE_COLOR_PRESETS[DEFAULT_SUBTITLE_COLOR]
+    );
     const header = `[Script Info]
 ScriptType: v4.00+
 PlayResX: 1080
@@ -92,7 +124,7 @@ WrapStyle: 1
 
 [V4+ Styles]
 Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding
-Style: Default,Padauk,${fontSize},&H00FFFFFF,&H000000FF,&H00000000,&H80000000,-1,0,0,0,100,100,0,0,1,3,0,8,${marginL},${marginR},${marginV},1
+Style: Default,Padauk,${fontSize},${primaryColour},&H000000FF,&H00000000,&H80000000,-1,0,0,0,100,100,0,0,1,3,0,8,${marginL},${marginR},${marginV},1
 
 [Events]
 Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
@@ -225,7 +257,11 @@ export const applyFinalVideoEffects = async ({
             const srtContent = fs.readFileSync(subtitleSrtPath, "utf8");
             const assPath = path.join(directory, `.${basename}.${process.pid}.ass`);
             const temporary = nextTemporary("subtitles");
-            fs.writeFileSync(assPath, buildAssDocument(srtContent, normalized.subtitlePosition), "utf8");
+            fs.writeFileSync(
+                assPath,
+                buildAssDocument(srtContent, normalized.subtitlePosition, normalized.subtitleColor),
+                "utf8"
+            );
             try {
                 const escapedAssPath = assPath.replaceAll("\\", "/").replaceAll(":", "\\:").replaceAll("'", "\\'");
                 await run([

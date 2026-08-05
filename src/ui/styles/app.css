@@ -1,0 +1,719 @@
+/* ==========================================================================
+   Additive rules for real product surfaces that BlinkAutomationFull_v2.jsx's
+   own <style> block (see reference.css, copied byte-identical) does not
+   cover: accessibility basics, real form controls, the effects editor,
+   session/login/settings screens, and inline (non-modal) admin panels.
+   Every rule below reuses only the reference's own CSS variables
+   (--bg/--panel/--panel2/--line/--line2/--text/--muted/--accent/--danger/
+   --success/--warning) and, where a reference class already exists
+   (.panel/.btn/.chip/.card/.progress/.statusDot/.videoBox/.alert), extends
+   it rather than inventing a parallel system.
+   ========================================================================== */
+
+/* Spacing/radius/touch-target scale for the premium-SaaS refinement pass.
+   Reused by real-product surfaces below and by future screen-by-screen
+   polish; the reference's own byte-identical block keeps its own hardcoded
+   values and is not retrofitted onto this scale to avoid drifting from the
+   verified-copy baseline. */
+:root {
+  --space-1: 4px;
+  --space-2: 8px;
+  --space-3: 12px;
+  --space-4: 16px;
+  --space-5: 20px;
+  --space-6: 24px;
+  --space-7: 32px;
+  --space-8: 40px;
+  --radius-sm: 10px;
+  --radius-md: 14px;
+  --radius-lg: 20px;
+  --touch-target-min: 48px;
+}
+
+:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+
+/* Mobile Chrome/WebKit paints a large translucent blue/gray block on tap
+   unless -webkit-tap-highlight-color is explicitly cleared. This does NOT
+   remove keyboard accessibility: :focus-visible above still shows a real
+   ring for keyboard users, and :focus-visible is not satisfied by a touch
+   tap, so nothing here suppresses focus for non-pointer input. */
+html { -webkit-tap-highlight-color: transparent; }
+a, button, [role="button"], input, textarea, select, summary {
+  -webkit-tap-highlight-color: transparent;
+  touch-action: manipulation;
+}
+a:focus, button:focus, [role="button"]:focus, input:focus, textarea:focus, select:focus {
+  outline: none;
+}
+a:focus-visible, button:focus-visible, [role="button"]:focus-visible,
+input:focus-visible, textarea:focus-visible, select:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
+/* Root cause (confirmed via computed-style inspection, not a guess): the
+   browser's UA stylesheet sets a plain background-color on <button> that
+   appearance:none alone does not clear. .chip declares no background of its
+   own (only .badge does) because it was designed for a decorative <span>;
+   applied to the header's real, clickable credits <button>, the native
+   light system button face showed through solid. .btn/.iconBtn/etc. already
+   declare their own background, which wins on specificity over this generic
+   element-level reset, so this only fills the gap .chip left open. */
+button {
+  appearance: none;
+  -webkit-appearance: none;
+  -moz-appearance: none;
+  background: none;
+  border: none;
+  color: inherit;
+}
+
+.sr-only {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  border: 0;
+}
+
+.skip-link {
+  position: fixed;
+  top: 12px;
+  left: 12px;
+  z-index: 999;
+  padding: 12px 16px;
+  border-radius: 12px;
+  background: var(--accent);
+  color: #fff;
+  font-weight: 700;
+  text-decoration: none;
+  transform: translateY(-180%);
+}
+.skip-link:focus { transform: translateY(0); }
+
+/* NavLink renders <a>, not <button> — mirrors reference's own
+   .sidenav/.mobileNav button rules exactly for anchor elements (real
+   routing requirement, see AppShell.tsx). */
+.sidenav a { display: flex; align-items: center; gap: 12px; width: 100%; text-decoration: none; color: #85858f; text-align: left; padding: 12px 13px; border-radius: 11px; margin-bottom: 5px; }
+.sidenav a svg { flex: 0 0 auto; }
+.sidenav a.active { background: #17171d; color: #fff; }
+.sidenav a:hover { background: #121217; color: #fff; }
+
+/* Bottom nav: bigger touch targets, real icons, and a visible active-state
+   pill (the reference's own text-only nav only changed color on active,
+   which is too subtle at a glance — the explicit ask here). */
+.mobileNav { height: auto; padding: 8px 8px calc(8px + env(safe-area-inset-bottom)); }
+.mobileNav a {
+  flex: 1;
+  min-height: var(--touch-target-min);
+  background: transparent;
+  border: 0;
+  color: #8b8b95;
+  font-size: 11px;
+  font-weight: 600;
+  line-height: 1.3;
+  min-width: 0;
+  padding: 8px 4px;
+  border-radius: 14px;
+  text-decoration: none;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 4px;
+  transition: background 150ms, color 150ms;
+}
+.mobileNav a span { max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.mobileNav a.active { color: #fff; background: rgba(255, 45, 125, 0.14); }
+.mobileNav a:active { background: rgba(255, 45, 125, 0.2); }
+
+/* Account menu: replaces the standing Settings/Logout text buttons in both
+   the sidebar (opens upward) and the workspace header (opens downward). */
+.accountMenu { position: relative; }
+.accountMenu__trigger {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  min-height: var(--touch-target-min);
+  padding: 4px 10px 4px 4px;
+  border: 1px solid var(--line2);
+  border-radius: 999px;
+  background: #111116;
+  color: var(--text);
+}
+.accountMenu__trigger:hover { background: #17171d; }
+.accountMenu__chevron { transition: transform 150ms; color: #9898a2; }
+.accountMenu__chevron--open { transform: rotate(180deg); }
+.accountMenu__panel {
+  position: absolute;
+  top: calc(100% + 8px);
+  right: 0;
+  z-index: 60;
+  width: max(220px, 100%);
+  padding: 8px;
+  display: grid;
+  gap: 2px;
+  border: 1px solid var(--line2);
+  border-radius: var(--radius-md);
+  background: #111116;
+  box-shadow: 0 24px 60px rgba(0, 0, 0, 0.45);
+  opacity: 0;
+  visibility: hidden;
+  pointer-events: none;
+  transform: translateY(-6px) scale(0.98);
+  transition: opacity 180ms ease, transform 180ms ease, visibility 180ms;
+  transform-origin: top right;
+}
+.accountMenu__panel.is-open { opacity: 1; visibility: visible; pointer-events: auto; transform: translateY(0) scale(1); }
+.accountMenu--upward .accountMenu__panel { top: auto; bottom: calc(100% + 8px); left: 0; right: 0; transform: translateY(6px) scale(0.98); transform-origin: bottom left; }
+.accountMenu--upward .accountMenu__panel.is-open { transform: translateY(0) scale(1); }
+.accountMenu__identity {
+  padding: 8px 10px;
+  color: var(--muted);
+  font-size: 13px;
+  font-weight: 600;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  border-bottom: 1px solid var(--line);
+  margin-bottom: 4px;
+}
+.accountMenu__item {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  width: 100%;
+  min-height: var(--touch-target-min);
+  padding: 0 10px;
+  border: 0;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--text);
+  text-align: left;
+  font-size: 14px;
+}
+.accountMenu__item:hover { background: #17171d; }
+.accountMenu__item--danger:hover { background: rgba(255, 93, 108, 0.12); color: #ff9da8; }
+
+/* Interactive header chip (credits) needs a real touch target, and must
+   match the account menu trigger's height so brand/credits/avatar sit on one
+   visual baseline instead of two different pill heights side by side. */
+.appheader .chip { min-height: var(--touch-target-min); padding: 0 14px; font-size: 13px; }
+
+/* Compact square icon button — used for every inline panel's close/cancel/
+   dismiss action across History/BuyCredits/SuperAdmin, replacing a literal
+   "×" glyph (whose size/baseline varies by font) with an aligned lucide-react
+   icon at a real touch target. */
+.iconBtn { min-height: var(--touch-target-min); min-width: var(--touch-target-min); padding: 0; display: inline-flex; align-items: center; justify-content: center; border-radius: 999px; flex: 0 0 auto; }
+
+/* Base button/card polish for the premium-SaaS pass: bigger touch target,
+   soft depth on panels/cards, and more legible chip text — additive so the
+   byte-identical reference block stays untouched. */
+/* Reference's own .btn rule has no display/align-items — a plain <button>
+   with an icon + text child doesn't reliably center that content on its own
+   baseline, and there's no declared gap between icon and label. This is the
+   "labels/icons not vertically or horizontally centered" fix. */
+.btn {
+  min-height: var(--touch-target-min);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  line-height: 1;
+  transition: transform 180ms ease, background 180ms ease, box-shadow 180ms ease, border-color 180ms ease, opacity 180ms ease;
+}
+.btn:active { transform: scale(0.97); }
+.btn.accent:active { box-shadow: 0 6px 20px rgba(255, 45, 125, 0.18); }
+.panel, .card { box-shadow: 0 1px 0 rgba(255, 255, 255, 0.03) inset, 0 20px 44px -28px rgba(0, 0, 0, 0.65); }
+.chip { font-size: 12px; }
+.adminTabs button { min-height: var(--touch-target-min); transition: background 180ms ease, color 180ms ease; }
+
+/* Mobile Super Admin section switcher: below 850px the horizontally-
+   scrolling 7-item .adminTabs strip (reference's own mobile rule is
+   overflow-x:auto/nowrap) is replaced with a compact custom dropdown so
+   every section is reachable without any sideways swipe and the active
+   section is never partially off-screen. Desktop keeps the tab strip.
+   Same trigger/panel visual language as .accountMenu (dark panel, subtle
+   border, opacity+transform transition) — never a native <select>, whose
+   platform picker (a large white sheet on Android) breaks the dark chrome. */
+.adminTabsMobile { display: none; position: relative; margin-bottom: 16px; }
+@media (max-width: 850px) {
+  .adminTabs { display: none; }
+  .adminTabsMobile { display: block; }
+}
+.adminTabsMobile__trigger {
+  width: 100%;
+  min-height: var(--touch-target-min);
+  padding: 0 14px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  border: 1px solid var(--line2);
+  border-radius: 12px;
+  background: var(--panel2);
+  color: var(--text);
+  font: inherit;
+  font-size: 15px;
+  font-weight: 600;
+}
+.adminTabsMobile__trigger:hover { background: #17171d; }
+.adminTabsMobile__trigger:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.adminTabsMobile__chevron { flex: 0 0 auto; color: #9898a2; transition: transform 150ms; }
+.adminTabsMobile__chevron--open { transform: rotate(180deg); }
+.adminTabsMobile__menu {
+  position: absolute;
+  top: calc(100% + 8px);
+  left: 0;
+  right: 0;
+  z-index: 60;
+  margin: 0;
+  padding: 6px;
+  list-style: none;
+  max-height: min(60vh, 360px);
+  overflow-y: auto;
+  display: grid;
+  gap: 2px;
+  border: 1px solid var(--line2);
+  border-radius: var(--radius-md);
+  background: #111116;
+  box-shadow: 0 24px 60px rgba(0, 0, 0, 0.45);
+  opacity: 0;
+  visibility: hidden;
+  pointer-events: none;
+  transform: translateY(-6px) scale(0.98);
+  transition: opacity 180ms ease, transform 180ms ease, visibility 180ms;
+  transform-origin: top center;
+}
+.adminTabsMobile__menu.is-open { opacity: 1; visibility: visible; pointer-events: auto; transform: translateY(0) scale(1); }
+.adminTabsMobile__menu button {
+  width: 100%;
+  min-height: var(--touch-target-min);
+  padding: 0 12px;
+  display: flex;
+  align-items: center;
+  border: 0;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--text);
+  text-align: left;
+  font-size: 14px;
+}
+.adminTabsMobile__menu button:hover { background: #17171d; }
+.adminTabsMobile__menu button.is-active { background: rgba(255, 45, 125, 0.14); color: #fff; font-weight: 700; }
+
+/* Defensive overflow fix: flex children default to min-width:auto, which
+   lets long unbreakable content (emails, filenames) force the flex
+   container — and in turn the page — wider than the viewport. */
+.row > * { min-width: 0; }
+
+/* Real overflow bug, confirmed by measuring rendered widths at 360px: the
+   reference's own mobile override collapses .adminRow to a bare `1fr`
+   column (not `minmax(0,1fr)`), so a long unbreakable token (e.g. an email
+   address with no spaces) sets the grid track's automatic minimum to its
+   own min-content width, forcing the row — and the whole page — wider than
+   the viewport. `minmax(0, 1fr)` restores the zero floor grid needs to
+   actually shrink the item; body's existing overflow-wrap:break-word then
+   lets the long token itself wrap instead of pushing outward. */
+@media (max-width: 850px) {
+  .adminRow { grid-template-columns: minmax(0, 1fr); }
+}
+
+/* Subtle, restrained transitions on nav items, list rows, and cards — no
+   bounce/spin, just opacity/transform/background settling in under 200ms. */
+.sidenav a, .mobileNav a, .historyitem, .adminRow, .price, .stat, .card {
+  transition: background 180ms ease, border-color 180ms ease, transform 180ms ease, opacity 180ms ease;
+}
+.historyitem:hover, .adminRow:hover { border-color: var(--line2); }
+.price:hover, .historyitem:hover { transform: translateY(-2px); }
+
+/* Hero eyebrow badge's live-indicator dot: a subtle pulse gives the "for
+   Burmese creators" tag a premium, alive feel instead of a static dot. */
+.badge i { animation: blink-badge-pulse 2s ease-in-out infinite; }
+@keyframes blink-badge-pulse {
+  0%, 100% { opacity: 1; box-shadow: 0 0 0 0 rgba(255, 45, 125, 0.55); }
+  50% { opacity: 0.7; box-shadow: 0 0 0 5px rgba(255, 45, 125, 0); }
+}
+@media (prefers-reduced-motion: reduce) {
+  .badge i { animation: none; }
+}
+
+/* Marketing topbar mobile menu: the reference's own mobile rule hides
+   .navlinks and .actions .ghost with nothing put in their place — this adds
+   a hamburger toggle + inline panel so the anchor links stay reachable. */
+.navToggle {
+  display: none;
+  align-items: center;
+  justify-content: center;
+  width: var(--touch-target-min);
+  height: var(--touch-target-min);
+  border: 1px solid var(--line2);
+  border-radius: 12px;
+  background: #111116;
+  color: #fff;
+}
+/* .topbar has a fixed height (reference.css), so this must be an overlay
+   positioned off the sticky topbar rather than a normal-flow child —
+   otherwise its content overflows underneath the topbar's fixed box and
+   visually overlaps the hero section beneath it. Always rendered (not
+   conditionally mounted) so open/close can transition instead of snapping. */
+.mobileNavPanel {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  position: absolute;
+  top: 100%;
+  left: 0;
+  right: 0;
+  z-index: 39;
+  padding: 8px 16px 16px;
+  background: rgba(5, 5, 5, 0.98);
+  backdrop-filter: blur(18px);
+  border-bottom: 1px solid var(--line);
+  box-shadow: 0 24px 60px rgba(0, 0, 0, 0.45);
+  opacity: 0;
+  visibility: hidden;
+  pointer-events: none;
+  transform: translateY(-10px);
+  transition: opacity 200ms ease, transform 200ms ease, visibility 200ms;
+}
+.mobileNavPanel.is-open { opacity: 1; visibility: visible; pointer-events: auto; transform: translateY(0); }
+.mobileNavPanel a {
+  min-height: var(--touch-target-min);
+  display: flex;
+  align-items: center;
+  padding: 0 4px;
+  border-radius: 12px;
+  color: #d7d7dc;
+  text-decoration: none;
+  transition: background 150ms ease, color 150ms ease;
+}
+.mobileNavPanel a:hover, .mobileNavPanel a:active { background: #17171d; color: #fff; }
+@media (max-width: 850px) {
+  .navToggle { display: inline-flex; }
+}
+
+/* Admin package form's Price/Currency/Credits/Bonus/Order row — was a
+   hardcoded inline 2-column grid with no mobile override (inline styles
+   can't be media-queried), which packed 5 labeled inputs into two narrow
+   columns on small screens. Single column below 480px keeps every field's
+   label and input full-width and readable. */
+.packageFormGrid { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
+@media (max-width: 480px) {
+  .packageFormGrid { grid-template-columns: 1fr; }
+}
+
+/* Real form controls (Settings API key, Admin credit correction, package form) */
+.field { display: grid; gap: 8px; margin-bottom: 14px; }
+.field label { color: var(--muted); font-size: 13px; font-weight: 600; }
+.field input,
+.field select,
+.field textarea {
+  min-height: 44px;
+  padding: 0 14px;
+  border: 1px solid var(--line2);
+  border-radius: 12px;
+  background: var(--bg);
+  color: var(--text);
+  font: inherit;
+}
+.field textarea { padding: 10px 14px; min-height: auto; resize: vertical; }
+.field input:focus, .field select:focus, .field textarea:focus { border-color: var(--accent); outline: none; }
+.field small { color: var(--muted); font-size: 11px; }
+.field small.error { color: var(--danger); }
+.checkline { display: flex; align-items: center; gap: 10px; cursor: pointer; color: var(--muted); font-size: 13px; }
+.checkline input { accent-color: var(--accent); width: 16px; height: 16px; }
+
+/* Avatar (reference has no avatar imagery; real account UI needs one) */
+.avatar {
+  flex: 0 0 auto;
+  display: inline-grid;
+  place-items: center;
+  overflow: hidden;
+  border: 1px solid var(--line2);
+  border-radius: 50%;
+  background: var(--panel2);
+  color: var(--text);
+  font-weight: 700;
+}
+.avatar img { width: 100%; height: 100%; object-fit: cover; }
+.avatar--sm { width: 32px; height: 32px; font-size: 12px; }
+.avatar--md { width: 44px; height: 44px; }
+.avatar--lg { width: 64px; height: 64px; font-size: 20px; }
+
+/* Skeleton loading shimmer (reference has no async loading states) */
+.skeleton {
+  display: block;
+  border-radius: 10px;
+  background: linear-gradient(90deg, var(--panel2) 25%, #1b1b21 50%, var(--panel2) 75%);
+  background-size: 200% 100%;
+  animation: blink-skeleton 1.6s ease-in-out infinite;
+}
+.skeleton--rounded { border-radius: 999px; }
+@keyframes blink-skeleton { to { background-position: -200% 0; } }
+.spin { animation: blink-spin 900ms linear infinite; display: inline-flex; }
+@keyframes blink-spin { to { transform: rotate(360deg); } }
+
+.uploadpanel { cursor: pointer; transition: border-color 150ms, background 150ms; }
+/* The dropzone's inner content (icon/label/hint/button) had no declared
+   gap system, relying on <p>'s default browser margin against inline/flex
+   siblings that have none — an inconsistent, "random margin" stack. */
+.uploadpanel > div { display: flex; flex-direction: column; align-items: center; gap: 10px; }
+.uploadpanel > div p, .uploadpanel > div b, .uploadpanel > div .bigicon { margin: 0; }
+.uploadpanel.is-dragging { border-color: var(--accent); background: rgba(255, 45, 125, 0.06); }
+.uploadpanel:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+
+/* Session / login / settings — built only from .panel/.btn/.bigicon, no new namespace */
+.centered-page { min-height: 100vh; display: grid; place-items: center; padding: 24px; }
+.centered-page .panel { width: min(100%, 26rem); }
+
+/* Google "G" on the login page's pink primary button: a small white
+   circular backing keeps the official multicolor mark legible against the
+   accent background instead of floating directly on pink. */
+.googleMark {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 28px;
+  border-radius: 50%;
+  background: #fff;
+  flex-shrink: 0;
+}
+
+/* Effects editor (blur / subtitle position / flip / color grading) — real
+   requirement with no reference equivalent; styled with reference tokens. */
+.effects-editor { width: 100%; display: grid; gap: 8px; }
+.effects-editor__preview { position: relative; width: 100%; max-height: 70vh; overflow: hidden; background: #000; }
+.effects-editor__preview video { width: 100%; height: 100%; display: block; object-fit: contain; }
+.effects-editor__video--flipped { transform: scaleX(-1); }
+.effects-editor__video--auto { filter: contrast(1.03) saturate(1.04) brightness(1.01); }
+.effects-editor__video--cinematic { filter: contrast(1.08) saturate(0.92) brightness(0.98); }
+.effects-editor__video--warm { filter: contrast(1.03) saturate(1.06) sepia(0.1); }
+.effects-editor__video--cool { filter: contrast(1.03) saturate(1.02) hue-rotate(8deg); }
+.effects-editor__media-controls {
+  position: absolute;
+  inset: auto 8px 8px;
+  z-index: 5;
+  min-height: 40px;
+  padding: 4px 8px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  border-radius: 12px;
+  background: rgba(9, 9, 12, 0.82);
+  color: #fff;
+  backdrop-filter: blur(8px);
+}
+.effects-editor__media-controls button { width: 32px; height: 32px; padding: 0; display: grid; place-items: center; flex: 0 0 auto; border: 0; border-radius: 50%; background: transparent; color: inherit; }
+.effects-editor__media-controls span { min-width: 40px; font-size: 11px; font-variant-numeric: tabular-nums; }
+.effects-editor__media-controls input { min-width: 0; flex: 1; accent-color: var(--accent); }
+.effects-editor__overlay { position: absolute; z-index: 2; pointer-events: none; }
+.effects-box { position: absolute; pointer-events: auto; touch-action: none; user-select: none; }
+.effects-box--blur { z-index: 1; border: 1px dashed var(--accent); cursor: move; background: rgba(255, 45, 125, 0.12); }
+.effects-box--subtitle { z-index: 2; display: grid; place-items: center; border: 1px dashed #facc15; color: #fff; cursor: move; text-align: center; font-weight: 700; text-shadow: 0 2px 3px #000; }
+.effects-handles { position: static; }
+.effects-handle { position: absolute; z-index: 3; padding: 0; border-radius: 50%; cursor: pointer; pointer-events: auto; touch-action: none; transform: translate(45%, 45%); border: 0; }
+.effects-handle::before { content: ""; position: absolute; inset: -0.8rem; }
+.effects-handle--resize { width: 8px; height: 8px; border: 1px solid #fff; background: var(--accent); cursor: nwse-resize; }
+.effects-handle--delete { width: 14px; height: 14px; display: grid; place-items: center; background: var(--danger); color: #fff; transform: translate(45%, -55%); }
+.effects-handle--delete svg { width: 9px; height: 9px; }
+.effects-editor__controls { padding: 12px; display: flex; flex-wrap: wrap; align-items: center; gap: 8px; background: var(--panel2); }
+.effects-editor__controls label { min-height: 36px; padding: 0 12px; display: flex; align-items: center; gap: 8px; border: 1px solid var(--line2); border-radius: 999px; color: var(--muted); font-size: 13px; cursor: pointer; }
+.effects-editor__controls label:has(input:checked) { border-color: var(--accent); background: rgba(255, 45, 125, 0.1); color: #fff; }
+.effects-editor__grading select { min-height: 28px; border: 0; background: transparent; color: var(--text); }
+.effects-editor__strength input { width: 6rem; accent-color: var(--accent); }
+.effects-editor--readonly .effects-editor__controls { opacity: 0.65; }
+
+/* Real <video> playback inside the reference's decorative .videoBox */
+.videoBox { overflow: hidden; }
+.videoBox video { width: 100%; height: 100%; object-fit: contain; display: block; background: #000; }
+
+/* Completed New Recap output: the reference's .videoBox is aspect-ratio:16/9,
+   but Blink's pipeline renders 1080x1920 (9:16) portrait video — a 16:9 box
+   was letterboxing the real frame down to a thin strip. object-fit:contain
+   (above) already prevents stretching/distortion; this corrects the
+   container's own shape to match the actual output. width:100% of its
+   panel keeps it responsive/never wider than the viewport; height is
+   derived from that width via the ratio (deliberately uncapped, so the box
+   is a genuine 9:16 shape rather than a compromise — the page scrolls past
+   it like any real portrait video preview would). */
+.videoBox--portrait { aspect-ratio: 9 / 16; width: 100%; }
+
+/* Inline (non-modal) expand-in-place panels — mirrors the reference's own
+   BuyFlow pattern (a .panel appearing directly in the page flow). */
+.inline-panel { margin-top: 14px; }
+
+/* .chip must never wrap mid-word (status text like "Cancelled" broke onto
+   two lines without this) — the reference's own .chip rule has no
+   white-space declaration, so this is a necessary additive fix. */
+/* .chip inherits body's line-height:1.7 (tuned for paragraph text), which
+   left single-line pill text sitting visibly above center — the same fix
+   already applied to .btn. justify-content is added too since a <button>
+   chip (the header credits pill) can be width-constrained by its flex
+   container in a way a plain <span> chip never was. */
+.chip { white-space: nowrap; flex-shrink: 0; display: inline-flex; align-items: center; justify-content: center; line-height: 1; }
+
+/* .historyitem is a clickable <article>, not a <button>, so it needs a
+   pointer cursor the reference's own (non-interactive, static-data) rule
+   doesn't declare. On narrow screens the action-button row spans full width
+   below the thumb/title columns, mirroring the reference's own
+   ".historyitem>.btn{grid-column:1/-1;width:100%}" mobile rule for the
+   (possibly multiple) action buttons wrapped in a .row. */
+.historyitem { cursor: pointer; }
+@media (max-width: 640px) {
+  .historyitem > .row { grid-column: 1 / -1; width: 100%; }
+  .historyitem > .row .btn { flex: 1; }
+}
+
+/* Audit log lists (Super Admin Purchases/Packages/Audit Log tabs): the
+   reference has no ordered-list precedent, so this strips the browser's
+   default numbering/indent and reuses .adminRow's own bordered-row look for
+   each event instead. */
+.adminAuditList { list-style: none; margin: 0; padding: 0; display: grid; gap: 10px; }
+.adminAuditList li { padding: 12px 14px; border: 1px solid var(--line); border-radius: 15px; background: #0f0f13; }
+.adminAuditList li > div { display: flex; flex-direction: column; gap: 4px; }
+.adminAuditList small, .adminAuditList li > div > span { color: var(--muted); font-size: 12px; }
+
+/* Credits tab's user picker (Search a user, then pick from a compact,
+   incrementally-loaded result list) — same bordered-row look as
+   .adminRow/.historyitem, scrollable instead of ever growing past the panel
+   or forcing the page wider. */
+.userPickList { list-style: none; margin: 10px 0 0; padding: 0; display: grid; gap: 6px; max-height: min(50vh, 320px); overflow-y: auto; }
+.userPickList button {
+  width: 100%;
+  min-height: var(--touch-target-min);
+  padding: 10px 12px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  background: #0f0f13;
+  color: var(--text);
+  text-align: left;
+}
+.userPickList button:hover { border-color: var(--line2); background: #17171d; }
+.userPickList button > span:first-child { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
+.userPickList strong, .userPickList small { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.userPickList small { color: var(--muted); }
+
+.tabs-panel { padding-top: 4px; }
+
+/* FAQ accordion: reference toggles display:none/block, which can't animate.
+   grid-template-rows 0fr -> 1fr is the standard height-animatable pattern
+   (no JS measuring, no layout thrash) — the inner wrapper is what actually
+   gets clipped while the row track grows. */
+.faqbtn { transition: color 150ms ease; }
+.faqans {
+  display: grid;
+  grid-template-rows: 0fr;
+  overflow: hidden;
+  padding: 0;
+  color: var(--muted);
+  line-height: 1.8;
+  transition: grid-template-rows 220ms ease, opacity 220ms ease;
+  opacity: 0;
+}
+.faqans > div { overflow: hidden; padding-bottom: 20px; }
+.faqitem.open .faqans { display: grid; grid-template-rows: 1fr; opacity: 1; }
+
+/* Small utility rows */
+.stack { display: grid; gap: 16px; }
+.hint { color: var(--muted); font-size: 12px; }
+
+@media (max-width: 640px) {
+  .field input, .field select, .field textarea { font-size: 16px; }
+}
+
+/* Route content entrance — subtle fade + rise on each navigation, keyed by
+   pathname (see AppShell.tsx) so it replays per route without any layout
+   jump (no height/position change, opacity+transform only). */
+.routeFade { animation: blink-route-fade 220ms ease both; }
+@keyframes blink-route-fade {
+  from { opacity: 0; transform: translateY(6px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+
+/* Global motion guard: every custom transition/animation added in this pass
+   collapses to effectively-instant under prefers-reduced-motion, without
+   having to gate each rule individually. */
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
+  }
+}
+
+/* Interaction Rule (CLAUDE.md): forms/confirmations/approvals/uploads/
+   destructive actions render in a centered popup with a dimmed backdrop
+   instead of an inline expanding panel. Reuses .panel's own look (border,
+   background gradient, radius) rather than inventing a new surface —
+   .panel/.card already share this box-shadow (app.css above). Safe mobile
+   margins via the backdrop's own padding; long content scrolls internally
+   so the popup itself never exceeds the viewport. */
+.dialogBackdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 200;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 20px;
+  background: rgba(5, 5, 5, 0.72);
+  backdrop-filter: blur(3px);
+  animation: blink-dialog-backdrop-in 160ms ease both;
+}
+.dialogCard {
+  width: min(480px, 100%);
+  max-height: calc(100dvh - 40px);
+  display: flex;
+  flex-direction: column;
+  border: 1px solid var(--line2);
+  border-radius: var(--radius-lg);
+  background: linear-gradient(180deg, #101014, #0a0a0d);
+  box-shadow: 0 30px 90px rgba(0, 0, 0, 0.6);
+  outline: none;
+  animation: blink-dialog-card-in 180ms cubic-bezier(0.2, 0.8, 0.2, 1) both;
+}
+.dialogCard__header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 18px 18px 0;
+  flex: 0 0 auto;
+}
+.dialogCard__header strong { font-size: 16px; }
+.dialogCard__body {
+  padding: 16px 18px 18px;
+  overflow-y: auto;
+}
+@keyframes blink-dialog-backdrop-in { from { opacity: 0; } to { opacity: 1; } }
+@keyframes blink-dialog-card-in {
+  from { opacity: 0; transform: translateY(8px) scale(0.98); }
+  to { opacity: 1; transform: translateY(0) scale(1); }
+}
+@media (max-width: 480px) {
+  .dialogBackdrop { padding: 12px; align-items: flex-end; }
+  .dialogCard { width: 100%; max-height: calc(100dvh - 24px); border-radius: var(--radius-lg) var(--radius-lg) 0 0; }
+}
+
+/* Plans & Credits package cards: credit value is now the prominent figure
+   (was a plain <small>) and price is demoted to a compact secondary line
+   (was the reference's own 42px .money hero treatment) — the reverse of
+   the reference's price-first hierarchy, per product decision. */
+.price--compact { padding: 20px; }
+.priceCredits { display: flex; align-items: baseline; gap: 6px; margin: 8px 0 2px; }
+.priceCredits b { font: 800 32px "Manrope", sans-serif; line-height: 1; }
+.priceCredits span { font-size: 12px; color: var(--muted); text-transform: uppercase; letter-spacing: 0.05em; }
+.priceCost { display: flex; align-items: baseline; gap: 6px; padding-top: 12px; margin-top: 12px; border-top: 1px solid var(--line); }
+.priceCost__amount { font: 700 18px "Manrope", sans-serif; }
+.priceCost__currency { font-size: 12px; color: var(--muted); }

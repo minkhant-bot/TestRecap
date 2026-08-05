@@ -15,7 +15,7 @@ archive, and reorder; normal users read active packages only. Mutations require
 confirmation/idempotency and audit. No package-management UI is implemented.
 The native PostgreSQL integration suites passed 3/3.
 
-## ZIP Handoff Snapshot (2026-07-31)
+## ZIP Handoff Snapshot (2026-07-31, superseded by the 2026-08-04 snapshot below)
 
 - Branch: `blink-baseline`
 - HEAD: `5f5bfc9`
@@ -28,13 +28,32 @@ The native PostgreSQL integration suites passed 3/3.
 - No implementation, configuration, migration, runtime, deployment, or Core AI
   Pipeline behavior may be changed by a documentation handoff.
 
+## Current Snapshot (2026-08-04, documentation audit)
+
+- Branch: `main` (not `blink-baseline`, which still exists but is not checked
+  out).
+- HEAD: `f5473aa` ("Fix Railway volume permissions at startup").
+- Working tree: intentionally dirty; `git status --porcelain` reports 122
+  changed/untracked paths. Beyond the 2026-07-31 snapshot's PostgreSQL/billing
+  foundation, this now includes an uncommitted UI restructuring (Landing page,
+  retired Dashboard/Projects/Upload/Processing pages consolidated into New
+  Recap/History/the Admin console, a `Dialog`/`StatCard` component rebuild,
+  restyled CSS) and a Trial request/Owner-approval credit lifecycle
+  (migration `0003_trial_lifecycle.sql`) that removed self-service Normal/Pro
+  plan selection. Never reset, restore, stash, or discard them.
+- `node --test`: 269 total, 265 passed, 0 failed, 4 skipped; `npm run lint`
+  and `npm run build` both passed; `git diff --check` passed clean.
+- This documentation audit changed only files under `docs/`, `README.md`, and
+  this file; no implementation, configuration, migration, runtime, or
+  deployment behavior was changed.
+
 ### Roadmap status
 
 | Phase | Status and continuation boundary |
 |---|---|
 | P1 | Core functionality implemented; real 30-second upload → processing → final output → preview → download flow passed. Not fully production-validated; all longer-duration/reliability scope remains pending. |
 | P2.1 | PostgreSQL configuration, pool/transactions, checksummed migrations, schema, repositories, readiness, shutdown, and bootstrap scaffolding exist. Inactive; no global authority cutover. |
-| P2.2 | Trial/Normal/Pro plans/policies, entitlements, trial grants, credits/ledger/balance, packages/banks, screenshot metadata, manual purchase review, first-purchase bonus, adjustments, estimates, audit, and Super Admin financial APIs exist. Gated by `P2_BILLING_ENABLED`; no commercial values are seeded. |
+| P2.2 | Plans/policies, entitlements, trial grants, credits/ledger/balance, packages/banks, screenshot metadata, manual purchase review, first-purchase bonus, adjustments, estimates, audit, and Super Admin financial APIs exist. Application code now accepts only Trial and Pro as selectable/configurable plan codes; self-service `POST /api/plans/me/select` always returns HTTP 410. A second, simplified Trial request/Owner-approval lifecycle (migration `0003_trial_lifecycle.sql`) now coexists with the original eligibility-assessment Trial flow. Gated by `P2_BILLING_ENABLED`; no commercial values are seeded. |
 | P2.3 | Live-job duration snapshots, explicit modes, reservations, settlement/release/refund, leases, checkpoint reuse, duplicate-worker protection, and reconciliation implementation exist. Unit tests and all three native PostgreSQL suites passed. Gated by `P2_LIVE_JOB_BILLING_ENABLED`; production/staging activation remains pending. |
 | P3 | Lifecycle consolidation and PostgreSQL/global role authority cutover: not implemented. |
 | P4 | Performance, scaling, and operational optimization: not implemented. |
@@ -81,8 +100,11 @@ P2.1/P2.2/P2.3 rows above.
 
 ### Super Admin and bootstrap boundary
 
-Roles remain exactly `user`, `admin`, and `super_admin`; Trial/Normal/Pro are
-plans, never roles. Current application requests derive role authority from
+Roles remain exactly `user`, `admin`, and `super_admin`; Trial and Pro are
+plans, never roles (Normal remains architecturally defined in
+`17_P2_FOUNDATION_ARCHITECTURE.md` and the database `plans.code` constraint,
+but application code no longer accepts it for self-service selection or
+configuration). Current application requests derive role authority from
 validated Firebase claims and configured bootstrap UIDs. The approved P2
 PostgreSQL design uses Firebase for identity, synchronizes the user, and gives
 financial mutations only to PostgreSQL `super_admin`. Bootstrap is a temporary
@@ -123,7 +145,7 @@ retry/recovery is fixed without new repository evidence.
 
 ### Implemented
 
-This file documents the current working-tree architecture as of 2026-07-31.
+This file documents the current working-tree architecture as of 2026-08-04.
 
 ### Planned or Placeholder
 
@@ -145,7 +167,7 @@ Read `12_KNOWN_ISSUES.md` and `17_P2_FOUNDATION_ARCHITECTURE.md` before P2 work.
 - Keep user media, outputs, sessions, and Gemini credentials private.
 - Provide durable processing state, clear History, and reliable downloads.
 - Operate within constrained compute using one processing job at a time.
-- In P2, preserve BYOK for Trial/Normal, add Blink-funded Pro, and charge configurable duration-based Blink credits for every plan.
+- In the approved P2 design, preserve BYOK for Trial/Normal, add Blink-funded Pro, and charge configurable duration-based Blink credits for every plan. The currently implemented plans are Trial and Pro only; Normal remains architecturally defined but is not selectable through any current API — see `07_CREDITS_SYSTEM.md` "Plan model".
 - In the future, support server-validated selectable voices with preview and plan, credit-cost, or provider eligibility.
 
 ## Architecture/Flow
@@ -154,10 +176,11 @@ Read `12_KNOWN_ISSUES.md` and `17_P2_FOUNDATION_ARCHITECTURE.md` before P2 work.
 React workspace
   → Express workspace API
   → workspace-jobs.json + WorkspaceWorker
-  → audio extraction
-  → Gemini audio transcript/Burmese translation
-  → workflow-v2 core bridge
-  → saas-state.json + core processor
+  → Sawaungthin workflow-v3 core bridge
+  → audio extraction and scene detection
+  → Faster-Whisper source transcript/timestamps
+  → Gemini Burmese text translation only
+  → saas-state.json + core processor/checkpoints
   → TTS/timeline/scene rebuild/export
   → final effects
   → authenticated canonical output
@@ -167,7 +190,7 @@ The workspace and core records share the job ID. Do not assume either can be del
 
 ## Architecture Rules
 
-1. Workflow-v2 is the current rendering core.
+1. Sawaungthin workflow-v3 is the current media-processing core; direct-Gemini timestamp artifacts are incompatible.
 2. Queue concurrency remains one unless architecture and capacity are explicitly redesigned.
 3. Upload creates `pending`; only explicit Start Processing queues it.
 4. The canonical video is `/output/{jobId}.mp4`.
@@ -248,7 +271,7 @@ the remaining operational boundaries in `17_P2_FOUNDATION_ARCHITECTURE.md`:
 - Gemini behavior, prompts, model-selection policy, or provider contract.
 - TTS voices, timing, retry, grouping, or duration-fit behavior.
 - Timeline Verification or chronological mapping rules.
-- Scene Rebuild or workflow-v2 semantics.
+- Scene Rebuild or Sawaungthin workflow-v3 semantics.
 - Final export quality, codecs, synchronization tolerances, or download contract.
 - Authentication provider/design, session lifetime, role authority, or admin bootstrap.
 - Credits, billing, prices, ledger, payments, or refunds.
@@ -289,12 +312,17 @@ the remaining operational boundaries in `17_P2_FOUNDATION_ARCHITECTURE.md`:
   Pipeline contract, workflow, prompts, TTS behavior, timeline, FFmpeg
   composition, export, or accepted output quality. Authenticated staging smoke
   testing remains a separate pre-beta release gate.
-- Trial/Normal/Pro policies, estimates, manual purchase review,
-  first-purchase bonus, PostgreSQL financial Super Admin authority, and the
-  gated live BYOK/Pro job admission/reservation/settlement implementation exist.
-  The gates remain off and global role cutover is not complete.
+- Plan policies (currently Trial and Pro only — see below), estimates, manual
+  purchase review, first-purchase bonus, PostgreSQL financial Super Admin
+  authority, and the gated live BYOK/Pro job admission/reservation/settlement
+  implementation exist. The gates remain off and global role cutover is not
+  complete.
 - Credit balances and charges are exclusively backend-authoritative; clients never issue credits or determine settlement.
-- Trial/Normal/Pro are plans, never roles. Firebase verifies identity; PostgreSQL is the approved future role/permission authority.
+- Trial and Pro are the currently implemented plans, never roles (Normal
+  remains architecturally defined in `17_P2_FOUNDATION_ARCHITECTURE.md` and
+  the database `plans.code` constraint, but is not selectable through any
+  current API — see `07_CREDITS_SYSTEM.md` "Plan model"). Firebase verifies
+  identity; PostgreSQL is the approved future role/permission authority.
 - Preserve current BYOK and single-voice behavior until the applicable P2 phase is explicitly approved and verified.
 - Authenticated staging smoke testing remains a separate pre-beta requirement.
 - Current Railway screenshots prove only that a project and Production environment exist, a public URL exists, one replica is running, and the shown deployment succeeded. They do not establish that the deployment is Blink or verify `DATA_DIR`, a persistent volume, required variables, or startup/recovery logs. Deployment preflight remains blocked and authenticated staging smoke testing has not started.

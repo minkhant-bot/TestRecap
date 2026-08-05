@@ -28,9 +28,18 @@ export const DEFAULT_VIDEO_EFFECTS: VideoEffects = {
   flipVideoEnabled: false,
   burnSubtitlesEnabled: false,
   subtitlePosition: { xPct: 10, yPct: 78, widthPct: 80, heightPct: 12 },
+  subtitleColor: 'yellow',
   blurEnabled: false,
   blurBoxes: [],
 };
+
+// One color applies to every subtitle cue in the whole video -- selecting a
+// swatch is a single, exclusive choice, never alternated, never per-speaker.
+const SUBTITLE_COLOR_SWATCHES: Array<{ id: VideoEffects['subtitleColor']; label: string; hex: string }> = [
+  { id: 'yellow', label: 'Yellow', hex: '#FFFF00' },
+  { id: 'red', label: 'Red', hex: '#FF3B30' },
+  { id: 'blue', label: 'Blue', hex: '#3399FF' },
+];
 
 export function VideoEffectsEditor({ jobId, effects, onChange, readOnly = false }: Props) {
   const latestEffectsRef = useRef(effects);
@@ -301,10 +310,6 @@ export function VideoEffectsEditor({ jobId, effects, onChange, readOnly = false 
               const nextEffects = mergeVideoEffects(latestEffectsRef.current, {
                 flipVideoEnabled: event.target.checked,
               });
-              console.info('[Blink effects]', {
-                boundary: 'flip.toggle',
-                flipVideoEnabled: nextEffects.flipVideoEnabled,
-              });
               commitEffects(() => nextEffects);
             }}
           />
@@ -323,6 +328,34 @@ export function VideoEffectsEditor({ jobId, effects, onChange, readOnly = false 
           />
           Burn subtitles
         </label>
+        {effects.burnSubtitlesEnabled && (
+          <div className="effects-editor__subtitle-color" role="radiogroup" aria-label="Subtitle color">
+            <span className="hint">Subtitle color</span>
+            <div className="row" style={{ gap: 8 }}>
+              {SUBTITLE_COLOR_SWATCHES.map(swatch => (
+                <button
+                  key={swatch.id}
+                  type="button"
+                  role="radio"
+                  aria-checked={effects.subtitleColor === swatch.id}
+                  aria-label={swatch.label}
+                  title={swatch.label}
+                  disabled={readOnly}
+                  onClick={() => commitEffects(current => mergeVideoEffects(current, { subtitleColor: swatch.id }))}
+                  style={{
+                    width: 28,
+                    height: 28,
+                    borderRadius: '50%',
+                    background: swatch.hex,
+                    border: effects.subtitleColor === swatch.id ? '3px solid var(--accent, #333)' : '2px solid var(--line2, #999)',
+                    cursor: readOnly ? 'default' : 'pointer',
+                    padding: 0,
+                  }}
+                />
+              ))}
+            </div>
+          </div>
+        )}
         <label>
           <input
             type="checkbox"
@@ -336,7 +369,7 @@ export function VideoEffectsEditor({ jobId, effects, onChange, readOnly = false 
           Blur masks
         </label>
         {effects.blurEnabled && (
-          <Button type="button" variant="secondary" size="sm" icon={<Plus size={15} />} disabled={readOnly} onClick={addBlurBox}>
+          <Button type="button" variant="secondary" icon={<Plus size={15} />} disabled={readOnly} onClick={addBlurBox}>
             Add blur box
           </Button>
         )}

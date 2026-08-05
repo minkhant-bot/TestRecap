@@ -1,16 +1,27 @@
 import type { WorkspaceJob } from './types';
 
+// Simple product-facing stages only. Internal pipeline implementation
+// details (Faster-Whisper transcription, Gemini translation, Edge-TTS
+// synthesis, scene-rebuild/timeline algorithms, retry checkpoints, etc.)
+// are intentionally never named here -- this is the single place that maps
+// every real backend job.stage value to what a user (or Owner/Admin, who
+// only ever sees sanitized operational status, never raw pipeline detail)
+// is shown.
+// "upload" has no real job.stage value -- it is complete as soon as a job
+// exists (special-cased below) -- so its stageIds is empty, typed as real
+// WorkspaceJob['stage'] values like every other step for STAGE_ORDER below.
+const EMPTY_STAGES: WorkspaceJob['stage'][] = [];
 export const WORKFLOW_STEPS = [
-  { id: 'upload', label: 'Upload', available: true },
-  { id: 'audio_extraction', label: 'Audio Extraction', available: true },
-  { id: 'gemini_transcript', label: 'Gemini Transcript', available: true },
-  { id: 'voice_generation', label: 'Voice Generation', available: true },
-  { id: 'timeline_verification', label: 'Timeline Verification', available: true },
-  { id: 'scene_rebuild', label: 'Scene Rebuild', available: true },
-  { id: 'final_export', label: 'Final Export', available: true },
+  { id: 'upload', label: 'Uploading', stageIds: EMPTY_STAGES },
+  { id: 'preparing', label: 'Preparing', stageIds: ['preparing', 'audio_extraction'] as WorkspaceJob['stage'][] },
+  { id: 'narration', label: 'Generating narration', stageIds: ['transcript_translation', 'voice_generation'] as WorkspaceJob['stage'][] },
+  { id: 'building', label: 'Building video', stageIds: ['timeline_verification', 'scene_rebuild'] as WorkspaceJob['stage'][] },
+  { id: 'finalizing', label: 'Finalizing', stageIds: ['final_export'] as WorkspaceJob['stage'][] },
 ] as const;
 
 export type WorkflowStepId = typeof WORKFLOW_STEPS[number]['id'];
+
+const STAGE_ORDER: WorkspaceJob['stage'][] = WORKFLOW_STEPS.flatMap(step => step.stageIds);
 
 export const getWorkflowStepState = (
   job: WorkspaceJob | null,
@@ -22,37 +33,23 @@ export const getWorkflowStepState = (
     return 'complete';
   }
   if (!job) return 'waiting';
-  if (stepId === 'audio_extraction') {
-    if (job.audioDuration || ['gemini_transcript', 'completed'].includes(job.stage)) return 'complete';
-    return job.stage === 'audio_extraction' ? 'active' : 'waiting';
-  }
-  if (stepId === 'gemini_transcript') {
-    if (job.transcriptSegmentCount !== null || job.status === 'completed') return 'complete';
-    return job.stage === 'gemini_transcript' ? 'active' : 'waiting';
-  }
-  const stageOrder: WorkflowStepId[] = WORKFLOW_STEPS.map(step => step.id);
-  const currentIndex = stageOrder.indexOf(job.stage as WorkflowStepId);
-  const stepIndex = stageOrder.indexOf(stepId);
-  if (job.status === 'completed' || currentIndex > stepIndex) return 'complete';
-  return job.stage === stepId ? 'active' : 'waiting';
+  const step = WORKFLOW_STEPS.find(item => item.id === stepId);
+  if (!step) return 'waiting';
+  const currentIndex = STAGE_ORDER.indexOf(job.stage);
+  const stepStartIndex = STAGE_ORDER.indexOf(step.stageIds[0]);
+  const stepEndIndex = STAGE_ORDER.indexOf(step.stageIds[step.stageIds.length - 1]);
+  if (job.status === 'completed' || currentIndex > stepEndIndex) return 'complete';
+  if (currentIndex >= stepStartIndex && currentIndex <= stepEndIndex) return 'active';
+  return 'waiting';
 };
 
 export const getStageLabel = (stage: WorkspaceJob['stage']) => {
-  const labels: Record<WorkspaceJob['stage'], string> = {
-    pending: 'Waiting',
-    queued: 'Waiting',
-    preparing: 'In progress',
-    audio_extraction: 'Audio Extraction',
-    gemini_transcript: 'Gemini Transcript',
-    voice_generation: 'Voice Generation',
-    timeline_verification: 'Timeline Verification',
-    scene_rebuild: 'Scene Rebuild',
-    final_export: 'Final Export',
-    completed: 'Completed',
-    failed: 'Failed',
-    cancelled: 'Cancelled',
-  };
-  return labels[stage];
+  if (stage === 'pending' || stage === 'queued') return 'Waiting';
+  if (stage === 'completed') return 'Completed';
+  if (stage === 'failed') return 'Failed';
+  if (stage === 'cancelled') return 'Cancelled';
+  const step = WORKFLOW_STEPS.find(item => (item.stageIds as readonly string[]).includes(stage));
+  return step ? step.label : 'Preparing';
 };
 
 export const getJobStatusLabel = (job: WorkspaceJob) => {

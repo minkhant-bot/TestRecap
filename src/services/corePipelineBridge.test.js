@@ -4,140 +4,86 @@ import os from 'node:os';
 import path from 'node:path';
 import test, { after } from 'node:test';
 
-const temporaryRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'testrecap-core-bridge-'));
-process.env.DATA_DIR = temporaryRoot;
-process.env.JOB_STORE_PATH = path.join(temporaryRoot, 'jobs.json');
+const root = fs.mkdtempSync(path.join(os.tmpdir(), 'sawaungthin-core-bridge-'));
+process.env.DATA_DIR = root;
+process.env.JOB_STORE_PATH = path.join(root, 'jobs.json');
 
 const {
     assertCompletedCoreOutput,
     continueWithCorePipeline,
     prepareCorePipelineState
 } = await import('./corePipelineBridge.js');
-const { createJob, getJob, updateJob } = await import('./jobManager.js');
+const { createJob, getJob, getJobKeys, setJobKeys, updateJob } = await import('./jobManager.js');
+const { WORKFLOW_VERSION } = await import('../domain/workflow.js');
 
-after(() => fs.rmSync(temporaryRoot, { recursive: true, force: true }));
+after(() => fs.rmSync(root, { recursive: true, force: true }));
 
-test('workspace transcript seeds the proven workflow-v2 continuation at voice generation', async () => {
-    const jobDirectory = path.join(temporaryRoot, 'uploads', 'workspace', 'bridge-job');
-    fs.mkdirSync(jobDirectory, { recursive: true });
-    const videoPath = path.join(jobDirectory, 'source.mp4');
-    const audioPath = path.join(jobDirectory, 'audio.wav');
-    const transcriptPath = path.join(jobDirectory, 'gemini-transcript.json');
-    fs.writeFileSync(videoPath, 'video');
-    fs.writeFileSync(audioPath, 'audio');
-    fs.writeFileSync(transcriptPath, JSON.stringify({
-        segments: [{
-            start_time: 0,
-            end_time: 2,
-            type: 'dialogue',
-            speaker: 'A',
-            original_text: 'Hello',
-            burmese_text: 'မင်္ဂလာပါ'
-        }]
-    }));
+const writeOutputs = jobId => {
+    fs.mkdirSync(path.join(root, 'output'), { recursive: true });
+    fs.writeFileSync(path.join(root, 'output', `${jobId}.mp4`), 'mp4');
+    fs.writeFileSync(path.join(root, 'output', `${jobId}.mp3`), 'mp3');
+};
+const resultFor = jobId => ({
+    videoUrl: `/output/${jobId}.mp4`, audioUrl: `/output/${jobId}.mp3`
+});
 
-    const state = await prepareCorePipelineState({
-        job: {
-            id: 'bridge-job',
-            storedPath: videoPath
-        },
-        audioPath,
-        transcriptPath,
-        detect: async () => [0, 1],
-        duration: async target => target === videoPath ? 3 : 2,
-        fingerprint: target => `fingerprint:${path.basename(target)}`
+test('workspace bridge starts the restored workflow at upload without a hybrid transcript', () => {
+    const state = prepareCorePipelineState({
+        job: { id: 'bridge-start', ownerUid: 'owner', storedPath: '/data/source.mp4' }
     });
-
-    assert.equal(state.workflowVersion, 2);
-    assert.equal(state.stageId, 'generate_tts');
-    assert.deepEqual(state.scenes, [0, 1]);
-    assert.deepEqual(state.originalTranscript, [{
-        timestamp: [0, 2],
-        text: 'Hello'
-    }]);
-    assert.deepEqual(state.translatedTranscript, [{
-        timestamp: [0, 2],
-        text: 'မင်္ဂလာပါ',
-        kind: 'dialogue',
-        speaker: 'A'
-    }]);
-    assert.deepEqual(
-        JSON.parse(fs.readFileSync(path.join(temporaryRoot, 'cache', 'bridge-job', 'state.json'), 'utf8')),
-        state
-    );
-});
-
-test('a core job cannot complete without an authoritative non-empty MP4', () => {
-    const outputDirectory = path.join(temporaryRoot, 'verified-output');
-    fs.mkdirSync(outputDirectory, { recursive: true });
-    const jobId = '11111111-1111-4111-8111-111111111111';
-    const result = { videoUrl: `/output/${jobId}.mp4` };
-
-    assert.throws(
-        () => assertCompletedCoreOutput(jobId, result, outputDirectory),
-        /no final MP4 artifact/
-    );
-    fs.writeFileSync(path.join(outputDirectory, `${jobId}.mp4`), 'mp4');
-    assert.equal(assertCompletedCoreOutput(jobId, result, outputDirectory), result);
-    assert.throws(
-        () => assertCompletedCoreOutput(jobId, { videoUrl: '/output/wrong.mp4' }, outputDirectory),
-        /no authoritative final video URL/
-    );
-});
-
-test('restart resumes final effects from an already completed core output without source artifacts', async () => {
-    const jobId = '22222222-2222-4222-8222-222222222222';
-    const outputPath = path.join(temporaryRoot, 'output', `${jobId}.mp4`);
-    fs.mkdirSync(path.dirname(outputPath), { recursive: true });
-    fs.writeFileSync(outputPath, 'workflow-v2 output');
-    createJob(jobId, {
+    assert.deepEqual(state, {
+        workflowVersion: WORKFLOW_VERSION,
+        stageId: 'upload',
         ownerUid: 'owner',
-        videoPath: path.join(temporaryRoot, 'uploads', 'already-cleaned.mp4')
+        videoPath: '/data/source.mp4'
     });
-    const result = {
-        videoUrl: `/output/${jobId}.mp4`,
-        audioUrl: `/output/${jobId}.mp3`,
-        srtPath: path.join(temporaryRoot, 'cache', jobId, 'subs.srt')
-    };
-    updateJob(jobId, { status: 'complete', result });
-
-    assert.deepEqual(await continueWithCorePipeline({
-        job: { id: jobId, storedPath: path.join(temporaryRoot, 'uploads', 'already-cleaned.mp4') },
-        audioPath: path.join(temporaryRoot, 'uploads', 'already-cleaned.wav'),
-        transcriptPath: path.join(temporaryRoot, 'uploads', 'already-cleaned.json')
-    }), result);
+    assert.equal('originalTranscript' in state, false);
+    assert.equal('translatedTranscript' in state, false);
 });
 
-test('workspace retry preserves the verified translate_burmese core resume stage', async () => {
-    const jobId = '33333333-3333-4333-8333-333333333333';
-    const directory = path.join(temporaryRoot, 'uploads', 'workspace', jobId);
-    const cache = path.join(temporaryRoot, 'cache', jobId);
-    fs.mkdirSync(directory, { recursive: true });
-    fs.mkdirSync(cache, { recursive: true });
-    const videoPath = path.join(directory, 'source.mp4');
-    const audioPath = path.join(directory, 'audio.wav');
-    fs.writeFileSync(videoPath, 'video');
-    fs.writeFileSync(audioPath, 'audio');
-    fs.writeFileSync(path.join(cache, 'state.json'), JSON.stringify({
-        workflowVersion: 2,
-        stageId: 'translate_burmese',
-        originalTranscript: [{ timestamp: [0, 1], text: 'hello' }]
-    }));
-    createJob(jobId, { ownerUid: 'owner', videoPath, audioPath });
-    updateJob(jobId, {
-        status: 'error', stageId: 'translate_burmese', progress: 30,
-        retryable: true, resumeStage: 'translate_burmese', error: 'quota'
-    });
-    let observedStage = null;
+test('completion guard requires authoritative nonempty MP4 and MP3 artifacts', () => {
+    const output = path.join(root, 'guard-output');
+    const id = 'guard-job';
+    fs.mkdirSync(output, { recursive: true });
+    assert.throws(() => assertCompletedCoreOutput(id, resultFor(id), output), /MP4 artifact is invalid/);
+    fs.writeFileSync(path.join(output, `${id}.mp4`), 'mp4');
+    assert.throws(() => assertCompletedCoreOutput(id, resultFor(id), output), /MP3 artifact is invalid/);
+    fs.writeFileSync(path.join(output, `${id}.mp3`), 'mp3');
+    assert.equal(assertCompletedCoreOutput(id, resultFor(id), output).videoUrl, `/output/${id}.mp4`);
+});
+
+test('compatible v3 retry preserves its earliest incomplete core stage', async () => {
+    const id = 'compatible-retry';
+    createJob(id, { ownerUid: 'owner', videoPath: '/data/source.mp4' });
+    updateJob(id, { status: 'error', stageId: 'translate_burmese', progress: 30 });
+    let observed;
     await assert.rejects(continueWithCorePipeline({
-        job: { id: jobId, ownerUid: 'owner', storedPath: videoPath },
-        audioPath,
-        transcriptPath: path.join(directory, 'unused.json'),
-        runPipeline: async id => {
-            observedStage = getJob(id).stageId;
-            throw new Error('stop after observing resume stage');
+        job: { id, ownerUid: 'owner', storedPath: '/data/source.mp4' },
+        runPipeline: async jobId => {
+            observed = getJob(jobId).stageId;
+            throw new Error('stop');
         }
-    }), /stop after observing resume stage/);
-    assert.equal(observedStage, 'translate_burmese');
-    assert.equal(getJob(jobId).stageId, 'translate_burmese');
+    }), /stop/);
+    assert.equal(observed, 'translate_burmese');
+});
+
+test('hybrid v2 checkpoint restarts at source while retaining encrypted job credentials', async () => {
+    const id = 'hybrid-restart';
+    createJob(id, { ownerUid: 'owner', videoPath: '/data/source.mp4' });
+    updateJob(id, { workflowVersion: 2, status: 'error', stageId: 'generate_tts' });
+    setJobKeys(id, { geminiApiKey: 'secret-test-key' });
+    const cache = path.join(root, 'cache', id);
+    fs.mkdirSync(cache, { recursive: true });
+    fs.writeFileSync(path.join(cache, 'state.json'), JSON.stringify({ workflowVersion: 2 }));
+    writeOutputs(id);
+    await continueWithCorePipeline({
+        job: { id, ownerUid: 'owner', storedPath: '/data/source.mp4' },
+        runPipeline: async jobId => {
+            assert.equal(getJob(jobId).workflowVersion, WORKFLOW_VERSION);
+            assert.equal(getJob(jobId).stageId, 'upload');
+            assert.equal(getJobKeys(jobId).geminiApiKey, 'secret-test-key');
+            assert.equal(fs.existsSync(path.join(cache, 'state.json')), false);
+            updateJob(jobId, { status: 'complete', result: resultFor(jobId) });
+        }
+    });
 });

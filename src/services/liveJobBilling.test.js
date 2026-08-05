@@ -202,6 +202,47 @@ test('Pro-only effects are rejected for BYOK plans', async () => {
   );
 });
 
+test('Rule #2: an expired Trial blocks a new reservation and forfeits remaining credits', async () => {
+  const harness = createHarness({ planCode: 'trial', balance: 12n });
+  harness.repositories.billing = {
+    findTrialGrant: async () => ({
+      id: 'grant-1', user_id: harness.state.user.id,
+      expires_at: new Date(Date.now() - 1000), expired_at: null,
+    }),
+    markTrialGrantExpired: async () => ({ id: 'grant-1', expired_at: new Date() }),
+  };
+  harness.repositories.balances.ensureBalanceAccountForUpdate = async () => ({
+    ...harness.state.balance,
+    availableBalance: harness.state.balance.postedBalance - harness.state.balance.reservedBalance,
+  });
+  await assert.rejects(
+    reserveLiveJob(request({ requestedPlanCode: 'trial' }), { env, repositories: harness.repositories }),
+    error => error.code === 'TRIAL_EXPIRED',
+  );
+  assert.equal(harness.state.balance.postedBalance, 0n);
+  assert.equal(harness.state.job, null);
+  assert.equal(harness.state.audit.some(entry => entry.eventType === 'trial.expired'), true);
+});
+
+test('Rule #2: an active (non-expired) Trial reserves normally', async () => {
+  const harness = createHarness({ planCode: 'trial', balance: 12n });
+  harness.repositories.billing = {
+    findTrialGrant: async () => ({
+      id: 'grant-1', user_id: harness.state.user.id,
+      expires_at: new Date(Date.now() + 1000 * 60 * 60), expired_at: null,
+    }),
+    markTrialGrantExpired: async () => null,
+  };
+  harness.repositories.balances.ensureBalanceAccountForUpdate = async () => ({
+    ...harness.state.balance,
+    availableBalance: harness.state.balance.postedBalance - harness.state.balance.reservedBalance,
+  });
+  const result = await reserveLiveJob(request({ requestedPlanCode: 'trial' }), {
+    env, repositories: harness.repositories,
+  });
+  assert.equal(result.snapshot.planCode, 'trial');
+});
+
 test('validated success settles once with one debit', async () => {
   const harness = createHarness();
   await reserveLiveJob(request(), { env, repositories: harness.repositories });

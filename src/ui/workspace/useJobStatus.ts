@@ -1,0 +1,185 @@
+import { useCallback, useEffect, useRef, useState } from 'react';
+import { WorkspaceApiError, cancelWorkspaceJob, getWorkspaceJobStatus, getWorkspaceRetryEligibility, retryWorkspaceJob } from './api';
+import type { WorkspaceJobStatus, WorkspaceRetryEligibility } from './types';
+
+// Real SSE subscription + retry/cancel/media-fetch logic, extracted out of
+// what used to be ProcessingPage.tsx's ProcessingStatusView so the new
+// screen can render Processing/Completed/ErrorState however
+// BlinkAutomationFull_v2.jsx's own component shapes require.
+export function useJobStatus(projectId: string | null) {
+  const [job, setJob] = useState<WorkspaceJobStatus | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
+  const [cancelling, setCancelling] = useState(false);
+  const [retrying, setRetrying] = useState(false);
+  const [retryEligibility, setRetryEligibility] = useState<WorkspaceRetryEligibility | null>(null);
+  const [retryFeedback, setRetryFeedback] = useState<string | null>(null);
+  const retryKeyRef = useRef<{ jobId: string; key: string } | null>(null);
+  const [mediaUrl, setMediaUrl] = useState<string | null>(null);
+  const [mediaError, setMediaError] = useState<string | null>(null);
+  const [mediaRetry, setMediaRetry] = useState(0);
+  const pollingRef = useRef<number | null>(null);
+
+  const refresh = useCallback(async () => {
+    if (!projectId) {
+      setJob(null);
+      setLoading(false);
+      return;
+    }
+    try {
+      setJob(await getWorkspaceJobStatus(projectId));
+      setError(null);
+    } catch (requestError) {
+      setError(requestError instanceof Error ? requestError.message : 'လုပ်ဆောင်မှုအခြေအနေကို မရရှိနိုင်ပါ။');
+    } finally {
+      setLoading(false);
+    }
+  }, [projectId]);
+
+  useEffect(() => {
+    if (!projectId) {
+      setJob(null);
+      setLoading(false);
+      return;
+    }
+    setLoading(true);
+    void refresh();
+    const events = new EventSource(`/api/workspace/jobs/${encodeURIComponent(projectId)}/events`, {
+      withCredentials: true,
+    });
+    const accept = (event: MessageEvent<string>) => {
+      const incoming = JSON.parse(event.data) as {
+        eventType: string;
+        payload?: Partial<WorkspaceJobStatus> & { position?: number };
+      };
+      if (!incoming.payload) return;
+      const payload = incoming.payload;
+      setJob(current => ({
+        ...(current || {}),
+        ...payload,
+        queuePosition: payload.position ?? payload.queuePosition ?? current?.queuePosition ?? null,
+      } as WorkspaceJobStatus));
+    };
+    for (const eventName of [
+      'job.snapshot',
+      'queue.position_changed',
+      'job.processing_started',
+      'job.cancellation_requested',
+      'stage.started',
+      'stage.progress',
+      'stage.completed',
+      'job.completed',
+      'job.failed',
+      'job.cancelled',
+      'job.recovered',
+      'job.retry_accepted',
+    ]) events.addEventListener(eventName, accept as EventListener);
+    events.onerror = () => {
+      if (pollingRef.current === null) {
+        pollingRef.current = window.setInterval(() => void refresh(), 3000);
+      }
+    };
+    return () => {
+      events.close();
+      if (pollingRef.current !== null) {
+        window.clearInterval(pollingRef.current);
+        pollingRef.current = null;
+      }
+    };
+  }, [projectId, refresh]);
+
+  useEffect(() => {
+    if (!job || job.status !== 'failed') {
+      setRetryEligibility(null);
+      return;
+    }
+    let current = true;
+    setRetryEligibility(null);
+    void getWorkspaceRetryEligibility(job.id).then(result => {
+      if (current) setRetryEligibility(result);
+    }).catch(requestError => {
+      if (current) setRetryEligibility({
+        recoverable: false,
+        code: requestError instanceof WorkspaceApiError ? requestError.code : 'RETRY_CHECK_FAILED',
+        reason: requestError instanceof Error ? requestError.message : 'Retry availability could not be checked.',
+      });
+    });
+    return () => { current = false; };
+  }, [job?.id, job?.status, job?.updatedAt]);
+
+  const retryFailedJob = async () => {
+    if (!job || retrying || !retryEligibility?.recoverable) return;
+    setRetrying(true);
+    setRetryFeedback(null);
+    const current = retryKeyRef.current;
+    const key = current?.jobId === job.id ? current.key : crypto.randomUUID();
+    retryKeyRef.current = { jobId: job.id, key };
+    try {
+      const result = await retryWorkspaceJob(job.id, key);
+      setJob(previous => previous ? { ...previous, ...result.job } : result.job);
+      setRetryFeedback(result.replayed
+        ? 'This retry is already queued or processing.'
+        : 'Retry accepted. Resuming your recap.');
+    } catch (requestError) {
+      if (requestError instanceof WorkspaceApiError && requestError.code === 'JOB_ALREADY_ACTIVE') {
+        setRetryFeedback('This project is already queued or processing.');
+        await refresh();
+      } else {
+        setRetryFeedback(requestError instanceof Error ? requestError.message : 'Retry could not be requested.');
+      }
+    } finally {
+      setRetrying(false);
+    }
+  };
+
+  const cancelJob = async () => {
+    if (!job || cancelling || job.cancellationRequested) return;
+    setCancelling(true);
+    try {
+      const cancelled = await cancelWorkspaceJob(job.id);
+      setJob(current => current ? { ...current, ...cancelled } : current);
+    } catch (requestError) {
+      setError(requestError instanceof Error ? requestError.message : 'ပယ်ဖျက်ရန် တောင်းဆို၍မရပါ။');
+    } finally {
+      setCancelling(false);
+    }
+  };
+
+  useEffect(() => {
+    if (job?.status !== 'completed') return;
+    if (!job.videoUrl) {
+      setMediaUrl(null);
+      setMediaError('ပြီးစီးသည့် မှတ်တမ်းတွင် နောက်ဆုံးဗီဒီယို မရှိပါ။');
+      return;
+    }
+    const controller = new AbortController();
+    let objectUrl: string | null = null;
+    setMediaUrl(null);
+    setMediaError(null);
+    void fetch(job.videoUrl, {
+      credentials: 'include',
+      signal: controller.signal,
+    }).then(async response => {
+      if (!response.ok) throw new Error(`ဗီဒီယိုရယူမှု HTTP ${response.status} ပြန်လာပါသည်။`);
+      const blob = await response.blob();
+      if (!blob.size) throw new Error('ပြီးစီးသည့်ဗီဒီယိုတွင် အချက်အလက်မရှိပါ။');
+      objectUrl = URL.createObjectURL(blob);
+      setMediaUrl(objectUrl);
+    }).catch(requestError => {
+      if (requestError instanceof DOMException && requestError.name === 'AbortError') return;
+      setMediaError(requestError instanceof Error
+        ? requestError.message
+        : 'ပြီးစီးသည့်ဗီဒီယိုကို ဖွင့်၍မရပါ။');
+    });
+    return () => {
+      controller.abort();
+      if (objectUrl) URL.revokeObjectURL(objectUrl);
+    };
+  }, [job?.id, job?.status, job?.videoUrl, mediaRetry]);
+
+  return {
+    job, loading, error, cancelling, retrying, retryEligibility, retryFeedback,
+    mediaUrl, mediaError, setMediaRetry: () => setMediaRetry(value => value + 1),
+    cancelJob, retryFailedJob,
+  };
+}

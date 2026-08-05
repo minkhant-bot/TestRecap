@@ -1,7 +1,7 @@
-import { Clock3, Trash2 } from 'lucide-react';
 import { useEffect, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
-import { Button, Card, EmptyState, ErrorPanel, Modal, Skeleton } from '../components';
+import { X } from 'lucide-react';
+import { Button, EmptyState, ErrorPanel, Skeleton } from '../components';
 import { deleteWorkspaceJob, getWorkspaceRetryEligibility, retryWorkspaceJob } from '../workspace/api';
 import { JobList } from '../workspace/JobList';
 import type { WorkspaceJob, WorkspaceRetryEligibility } from '../workspace/types';
@@ -70,34 +70,34 @@ export function HistoryPage() {
   };
 
   return (
-    <div className="ds-page-container workspace-page workspace-history-page">
-      <header className="workspace-page-header">
-        <span className="workspace-eyebrow">Workspace</span>
-        <h1>မှတ်တမ်း</h1>
-        <p>တန်းစီနေခြင်း၊ လုပ်ဆောင်နေခြင်းနှင့် ပြီးစီးသွားသော Recap အားလုံးကို ကြည့်ရှုပါ။</p>
-      </header>
-      <Card className="workspace-history-card">
-        {loading && <div className="workspace-loading-list"><Skeleton height="4.5rem" /><Skeleton height="4.5rem" /></div>}
-        {!loading && error && <ErrorPanel title="မှတ်တမ်း မရရှိနိုင်ပါ" description={error} action={{ label: 'ထပ်ကြိုးစားမည်', onClick: () => void refresh() }} />}
-        {!loading && !error && jobs.length === 0 && <EmptyState icon={Clock3} title="မှတ်တမ်းမရှိသေးပါ" />}
-        {!loading && !error && jobs.length > 0 && <JobList jobs={jobs} onDelete={setDeleting} retryEligibility={retryEligibility} retryingId={retryingId} onRetry={job => void retryJob(job)} />}
-        {retryError && <div className="workspace-upload-error" role="alert">{retryError}</div>}
-      </Card>
+    <>
+      <div className="pagetitle">
+        <div>
+          <span className="kicker">WORKSPACE</span>
+          <h1>မှတ်တမ်း</h1>
+          <p>တန်းစီနေခြင်း၊ လုပ်ဆောင်နေခြင်းနှင့် ပြီးစီးသွားသော Recap အားလုံးကို ကြည့်ရှုပါ။</p>
+          <p className="hint">Completed videos are available for 24 hours.</p>
+        </div>
+      </div>
+      {loading && <div style={{ display: 'grid', gap: 12 }}><Skeleton height="4.5rem" /><Skeleton height="4.5rem" /></div>}
+      {!loading && error && <ErrorPanel title="မှတ်တမ်း မရရှိနိုင်ပါ" description={error} action={{ label: 'ထပ်ကြိုးစားမည်', onClick: () => void refresh() }} />}
+      {!loading && !error && jobs.length === 0 && <EmptyState title="မှတ်တမ်းမရှိသေးပါ" />}
+      {!loading && !error && jobs.length > 0 && <JobList jobs={jobs} onDelete={setDeleting} retryEligibility={retryEligibility} retryingId={retryingId} onRetry={job => void retryJob(job)} />}
+      {retryError && <div className="alert error" role="alert">{retryError}</div>}
 
-      <Modal
-        open={Boolean(deleting)}
-        title="Recap ကို ဖျက်မလား?"
-        onClose={() => !deleteBusy && setDeleting(null)}
-        footer={
-          <>
+      {deleting && (
+        <div className="panel" style={{ marginTop: 16 }}>
+          <div className="row between">
+            <strong>Recap ကို ဖျက်မလား? — {deleting.filename}</strong>
+            <button className="btn ghost iconBtn" aria-label="Cancel" onClick={() => !deleteBusy && setDeleting(null)}><X size={16} aria-hidden="true" /></button>
+          </div>
+          {deleteError && <div className="alert error" role="alert" style={{ marginTop: 10 }}>{deleteError}</div>}
+          <div className="row wrap" style={{ marginTop: 12 }}>
+            <Button variant="danger" loading={deleteBusy} onClick={() => void confirmDelete()}>ဖျက်မည်</Button>
             <Button variant="ghost" disabled={deleteBusy} onClick={() => setDeleting(null)}>ပယ်ဖျက်မည်</Button>
-            <Button variant="danger" loading={deleteBusy} icon={<Trash2 size={16} />} onClick={() => void confirmDelete()}>ဖျက်မည်</Button>
-          </>
-        }
-      >
-        <p className="ds-modal-copy">{deleting?.filename}</p>
-        {deleteError && <div className="workspace-upload-error" role="alert">{deleteError}</div>}
-      </Modal>
-    </div>
+          </div>
+        </div>
+      )}
+    </>
   );
 }

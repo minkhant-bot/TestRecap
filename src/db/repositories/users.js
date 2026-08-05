@@ -12,6 +12,14 @@ export const findUserByFirebaseUid = async (firebaseUid, { client = null } = {})
   return mapUser(firstRow(result));
 };
 
+export const findUserById = async (id, { client = null } = {}) => {
+  const result = await databaseExecutor(client).query(
+    `SELECT ${USER_COLUMNS} FROM users WHERE id = $1`,
+    [id],
+  );
+  return mapUser(firstRow(result));
+};
+
 export const ensureUser = async (identity, { client = null, id = randomUUID() } = {}) => {
   const result = await databaseExecutor(client).query(
     `INSERT INTO users

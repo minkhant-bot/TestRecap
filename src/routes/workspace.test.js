@@ -706,7 +706,7 @@ test('failed workspace retry is owner-only, idempotent, concurrency-safe, and cr
         const eligibility = await fetch(`${retryUrl}/jobs/${id}/retry`, { headers: authenticated });
         assert.equal(eligibility.status, 200);
         assert.deepEqual(await eligibility.json(), {
-            recoverable: true, resumeStage: 'audio_extraction', resumeProgress: 10
+            recoverable: true, resumeStage: 'upload', resumeProgress: 5
         });
 
         authenticatedUser = { ...owner, uid: `other-${randomUUID()}` };

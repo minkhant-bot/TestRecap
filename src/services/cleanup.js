@@ -1,11 +1,19 @@
-import { clearJobKeys, deleteJob, getExpiredJobs, getJob } from './jobManager.js';
-import { deleteCompletedJobAndRecord } from './completedOutputDeletion.js';
-import { deleteWorkspaceJobEverywhere } from './workspaceJobDeletion.js';
+import { clearJobKeys, getExpiredJobs, getJob, updateJob } from './jobManager.js';
+import { deleteCompletedJobArtifacts } from './completedOutputDeletion.js';
+import { expireWorkspaceJobEverywhere } from './workspaceJobDeletion.js';
 import {
     getExpiredCompletedWorkspaceJobs,
     getWorkspaceJobInternal
 } from './workspaceJobs.js';
 
+// 24-hour completed-job retention: only ever considers jobs whose status is
+// literally 'complete'/'completed' (see getExpiredJobs /
+// getExpiredCompletedWorkspaceJobs) -- queued, processing, failed,
+// cancelled, and recovery-required (billing review_required) jobs are never
+// candidates, at any age. This sweep EXPIRES jobs (deletes only the
+// generated output/temporary artifacts, keeps a minimal record for direct
+// "Expired" link access) -- it never deletes billing, ledger, purchase,
+// audit, trial, or user-account data, none of which lives in these records.
 const TERMINAL_WORKSPACE_STATUSES = new Set(['completed', 'failed', 'cancelled']);
 
 export const sweepExpiredCompletedJobs = ({
@@ -19,6 +27,7 @@ export const sweepExpiredCompletedJobs = ({
     for (const { id: jobId } of expiredJobs) {
         const job = getJob(jobId);
         if (!job || job.status !== 'complete') continue;
+        if (job.expired) continue;
         try {
             const workspaceJob = getWorkspaceJobInternal(jobId);
             if (workspaceJob) {
@@ -28,28 +37,25 @@ export const sweepExpiredCompletedJobs = ({
                     );
                     continue;
                 }
-                deleteWorkspaceJobEverywhere(jobId, workspaceJob.ownerUid);
+                expireWorkspaceJobEverywhere(jobId, workspaceJob.ownerUid);
             } else {
-                deleteCompletedJobAndRecord({
-                    job,
-                    clearCredentials: clearJobKeys,
-                    deleteRecord: deleteJob,
-                    projectRoot
-                });
+                deleteCompletedJobArtifacts({ job, projectRoot });
+                clearJobKeys(jobId);
+                updateJob(jobId, { expired: true, expiredAt: new Date().toISOString() });
             }
-            console.log(`[Cleanup] Successfully swept completed job ${jobId}.`);
+            console.log(`[Cleanup] Successfully expired completed job ${jobId}.`);
         } catch (error) {
-            console.error(`[Cleanup] Failed to sweep completed job ${jobId}:`, error);
+            console.error(`[Cleanup] Failed to expire completed job ${jobId}:`, error);
         }
     }
     const orphanedWorkspaceJobs = getExpiredCompletedWorkspaceJobs(timeLimit)
         .filter(job => !coreCandidateIds.has(job.id));
     for (const { id: jobId, ownerUid } of orphanedWorkspaceJobs) {
         try {
-            deleteWorkspaceJobEverywhere(jobId, ownerUid);
-            console.log(`[Cleanup] Successfully swept orphaned workspace job ${jobId}.`);
+            expireWorkspaceJobEverywhere(jobId, ownerUid);
+            console.log(`[Cleanup] Successfully expired orphaned workspace job ${jobId}.`);
         } catch (error) {
-            console.error(`[Cleanup] Failed to sweep orphaned workspace job ${jobId}:`, error);
+            console.error(`[Cleanup] Failed to expire orphaned workspace job ${jobId}:`, error);
         }
     }
     return expiredJobs.length + orphanedWorkspaceJobs.length;

@@ -5,7 +5,7 @@ export interface WorkspaceJob {
   fileSize: number;
   duration: number | null;
   status: 'pending' | 'queued' | 'processing' | 'completed' | 'failed' | 'cancelled';
-  stage: 'pending' | 'queued' | 'preparing' | 'audio_extraction' | 'gemini_transcript' |
+  stage: 'pending' | 'queued' | 'preparing' | 'audio_extraction' | 'transcript_translation' |
     'voice_generation' | 'timeline_verification' | 'scene_rebuild' | 'final_export' |
     'completed' | 'failed' | 'cancelled';
   progress: number;
@@ -33,6 +33,8 @@ export interface WorkspaceJob {
   transcriptionCompletedAt: string | null;
   videoUrl?: string | null;
   audioUrl?: string | null;
+  expired: boolean;
+  expiredAt: string | null;
   cancellationRequested: boolean;
   effects: VideoEffects;
 }
@@ -71,6 +73,7 @@ export interface VideoEffects {
   flipVideoEnabled: boolean;
   burnSubtitlesEnabled: boolean;
   subtitlePosition: EffectRect;
+  subtitleColor: 'yellow' | 'red' | 'blue';
   blurEnabled: boolean;
   blurBoxes: BlurBox[];
 }

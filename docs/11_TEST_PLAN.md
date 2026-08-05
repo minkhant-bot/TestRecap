@@ -94,6 +94,38 @@ Describe the current automated tests, safe verification levels, important regres
 - Rolling admission isolation, concurrency, restart recovery, expiry, compensation, legacy-route protection, and HTTP 429 contract.
 - Retention across linked records, legacy-only records, orphan workspace records, active-state preservation, and owner mismatches.
 
+### Latest automated verification (2026-08-04, documentation audit)
+
+- `node --test`: 269 total, 265 passed, 0 failed, 4 skipped.
+- `npm run lint` (TypeScript) and `npm run build` (production bundle) both passed.
+- `git diff --check` passed clean.
+- This run includes new coverage added since the 2026-08-03 cycle: the UI
+  restructuring regression tests (Landing page, retired-route redirects, the
+  Dialog/StatCard component rebuild, `reference.css`/`app.css` parity with
+  `BlinkAutomationFull_v2.jsx`) and the new Trial-request lifecycle tests
+  (`billingFoundation.trialLifecycle.test.js` and its PostgreSQL integration
+  counterpart, run only when `TEST_DATABASE_URL` is set).
+- These are automated/unit-level results only. Real media end-to-end
+  verification of the Sawaungthin workflow-v3 pipeline remains unverified:
+  blur, subtitle position, flip, subtitle rendering, and MP3/MP4 output
+  correctness are not confirmed against real generated artifacts in this cycle.
+- This audit performed a documentation-only review; no application code,
+  tests, configuration, or migrations were changed, and no commit, push, or
+  deployment occurred.
+
+### Previous automated verification (2026-08-03, Sawaungthin workflow-v3 restoration)
+
+- `node --test`: 255 total, 252 passed, 0 failed, 3 skipped.
+- `npm run lint` (TypeScript) and `npm run build` (production bundle) both passed.
+- `git diff --check` passed clean.
+- These are automated/unit-level results only. Real media end-to-end
+  verification of the restored Sawaungthin pipeline was intentionally not
+  completed and remains unverified: blur, subtitle position, flip, subtitle
+  rendering, and MP3/MP4 output correctness are not confirmed against real
+  generated artifacts. That code is preserved from the prior architecture but
+  its runtime output is pending verification.
+- No commit, push, or deployment occurred as part of this verification.
+
 ### Constrained-device rule
 
 Do not run real full exports, Scene Rebuild, Final Export, or full E2E on a constrained phone unless the user explicitly authorizes it. Prefer static inspection, focused tests, mocks, TypeScript, and build verification.
@@ -105,7 +137,7 @@ Do not run real full exports, Scene Rebuild, Final Export, or full E2E on a cons
 - Effects tests: `src/services/videoEffects.test.js`
 - Worker tests: `src/services/workspaceWorker.test.js`
 - Workspace routes: `src/routes/workspace.test.js`
-- Workflow-v2 tests: `src/domain/workflow.test.js`, `src/workers/*.test.js`
+- Sawaungthin workflow-v3 tests: `src/domain/workflow.test.js`, `src/workers/*.test.js`
 - UI source-contract tests: `src/ui/newRecapFlow.test.js`
 - Manual authenticated staging plan: `docs/16_STAGING_SMOKE_TEST.md`
 

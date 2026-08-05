@@ -34,6 +34,7 @@ const mapPurchase = row => row && ({
   planCode: row.plan_code_snapshot,
   planName: row.plan_name_snapshot,
   credits: bigint(row.purchase_credit_snapshot),
+  packageBonusCredits: bigint(row.package_bonus_credit_snapshot ?? 0),
   priceMinor: bigint(row.price_minor_snapshot),
   currency: row.currency_snapshot,
   bankSnapshot: row.bank_snapshot,
@@ -216,20 +217,30 @@ export const insertTrialAssessment = async (assessment, { client }) => {
   return firstRow(result);
 };
 
-export const findTrialGrant = async (userId, { client = null } = {}) =>
+export const findTrialGrant = async (userId, { client = null, forUpdate = false } = {}) =>
   firstRow(await databaseExecutor(client).query(
     `SELECT id,user_id,assessment_id,credit_amount,policy_version_id,ledger_entry_id,
-            idempotency_key,granted_at FROM trial_grants WHERE user_id=$1`,
+            idempotency_key,granted_at,expires_at,expired_at FROM trial_grants WHERE user_id=$1
+     ${forUpdate ? 'FOR UPDATE' : ''}`,
     [userId],
   ));
 
 export const insertTrialGrant = async (grant, { client }) =>
   firstRow(await client.query(
     `INSERT INTO trial_grants
-      (id,user_id,assessment_id,credit_amount,policy_version_id,ledger_entry_id,idempotency_key)
-     VALUES ($1,$2,$3,$4,$5,$6,$7) RETURNING *`,
-    [randomUUID(), grant.userId, grant.assessmentId, String(grant.creditAmount),
-      grant.policyVersionId, grant.ledgerEntryId, grant.idempotencyKey],
+      (id,user_id,assessment_id,credit_amount,policy_version_id,ledger_entry_id,idempotency_key,expires_at)
+     VALUES ($1,$2,$3,$4,$5,$6,$7,$8) RETURNING *`,
+    [randomUUID(), grant.userId, grant.assessmentId ?? null, String(grant.creditAmount),
+      grant.policyVersionId ?? null, grant.ledgerEntryId, grant.idempotencyKey, grant.expiresAt ?? null],
+  ));
+
+export const markTrialGrantExpired = async (userId, { client }) =>
+  firstRow(await client.query(
+    `UPDATE trial_grants SET expired_at = now()
+     WHERE user_id = $1 AND expired_at IS NULL
+     RETURNING id,user_id,assessment_id,credit_amount,policy_version_id,ledger_entry_id,
+               idempotency_key,granted_at,expires_at,expired_at`,
+    [userId],
   ));
 
 export const findEffectivePromotion = async (at = new Date(), { client = null } = {}) =>
@@ -417,13 +428,15 @@ export const insertPurchase = async (purchase, { client }) => {
   const result = await client.query(
     `INSERT INTO credit_purchase_requests
       (id,user_id,status,credit_plan_id,bank_account_id,screenshot_file_id,
-       plan_code_snapshot,plan_name_snapshot,purchase_credit_snapshot,price_minor_snapshot,
+       plan_code_snapshot,plan_name_snapshot,purchase_credit_snapshot,
+       package_bonus_credit_snapshot,price_minor_snapshot,
        currency_snapshot,bank_snapshot,bonus_policy_snapshot,submitted_at,created_at,updated_at)
-     VALUES ($1,$2,'pending',$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,now(),now(),now())
+     VALUES ($1,$2,'pending',$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,now(),now(),now())
      RETURNING *`,
     [randomUUID(), purchase.userId, purchase.creditPlanId, purchase.bankAccountId,
       purchase.screenshotFileId, purchase.planCode, purchase.planName,
-      String(purchase.credits), String(purchase.priceMinor), purchase.currency,
+      String(purchase.credits), String(purchase.packageBonusCredits ?? 0n),
+      String(purchase.priceMinor), purchase.currency,
       purchase.bankSnapshot, purchase.bonusPolicySnapshot],
   );
   return mapPurchase(firstRow(result));

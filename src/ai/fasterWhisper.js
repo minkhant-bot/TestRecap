@@ -6,7 +6,9 @@ import { spawn } from 'node:child_process';
 import os from 'node:os';
 import { WORKFLOW_VERSION } from '../domain/workflow.js';
 
-export const FASTER_WHISPER_ALGORITHM_VERSION = 'faster-whisper-small-cpu-v1';
+export const FASTER_WHISPER_ALGORITHM_VERSION = 'sawaungthin-faster-whisper-small-cpu-v1';
+export const WHISPER_TIMESTAMP_OVERLAP_TOLERANCE_SECONDS = 0.05;
+export const WHISPER_TIMESTAMP_END_CLAMP_SECONDS = 1.5;
 export const FASTER_WHISPER_MODEL = 'small';
 export const DEFAULT_TRANSCRIPTION_TIMEOUT_MS = 30 * 60 * 1000;
 
@@ -43,7 +45,12 @@ export const fingerprintFile = filePath => crypto
     .update(fs.readFileSync(filePath))
     .digest('hex');
 
-export const validateSourceTranscript = (records, duration) => {
+export const validateSourceTranscript = (
+    records,
+    duration,
+    overlapTolerance = WHISPER_TIMESTAMP_OVERLAP_TOLERANCE_SECONDS,
+    endClampTolerance = WHISPER_TIMESTAMP_END_CLAMP_SECONDS
+) => {
     if (!Array.isArray(records)) throw new Error('Faster-Whisper output must be a JSON array.');
     if (!Number.isFinite(duration) || duration <= 0) throw new Error('Real WAV duration is invalid.');
     let previousEnd = 0;
@@ -59,14 +66,22 @@ export const validateSourceTranscript = (records, duration) => {
         if (start < 0 || end <= start) {
             throw new Error(`Faster-Whisper record ${index} has invalid range ${start} -> ${end}.`);
         }
-        if (start < previousEnd) {
+        if (start > duration) {
+            throw new Error(`Faster-Whisper record ${index} starts beyond the real WAV duration.`);
+        }
+        if (index > 0 && start < previousEnd - overlapTolerance) {
             throw new Error(`Faster-Whisper record ${index} overlaps the previous record.`);
         }
         if (end > duration) {
-            throw new Error(`Faster-Whisper record ${index} exceeds the real WAV duration.`);
+            const overflow = end - duration;
+            if (overflow > endClampTolerance) {
+                throw new Error(`Faster-Whisper record ${index} exceeds the real WAV duration by more than ${endClampTolerance}s.`);
+            }
+            record = { ...record, timestamp: [start, duration] };
         }
-        previousEnd = end;
-        return { timestamp: [start, end], text: record.text.trim() };
+        const normalizedEnd = record.timestamp[1];
+        previousEnd = normalizedEnd;
+        return { timestamp: [start, normalizedEnd], text: record.text.trim() };
     });
 };
 

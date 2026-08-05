@@ -125,7 +125,6 @@ export const retryWorkspaceJob = async (jobId: string, idempotencyKey: string) =
 export const queueWorkspaceJob = async (jobId: string, geminiApiKey: string, effects?: VideoEffects) => {
   const body = { geminiApiKey, effects };
   const url = `/api/workspace/jobs/${encodeURIComponent(jobId)}/queue`;
-  console.info('[Blink effects]', { boundary: 'queue.request', url, method: 'POST', body });
   try {
     return parseResponse<WorkspaceJobStatus>(await fetch(url, {
       method: 'POST',

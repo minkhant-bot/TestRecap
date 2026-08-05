@@ -63,7 +63,7 @@ const fixture = ({ role = 'super_admin' } = {}) => {
   return { deps, packages, audits };
 };
 
-const identity = { uid: 'firebase-owner' };
+const identity = { uid: 'firebase-owner', role: 'super_admin' };
 const options = (deps, key) => ({ env: enabledEnv, deps, idempotencyKey: key });
 
 test('Super Admin can create, edit, activate, deactivate, archive, and reorder packages with audit', async () => {
@@ -122,8 +122,9 @@ test('package changes require explicit confirmation and PostgreSQL Super Admin r
     error => error.code === 'CONFIRMATION_REQUIRED',
   );
   const adminFixture = fixture({ role: 'admin' });
+  const adminIdentity = { uid: 'firebase-admin', role: 'admin' };
   await assert.rejects(
-    createCreditPackage(identity, {
+    createCreditPackage(adminIdentity, {
       name: 'Forbidden', price: 1, creditAmount: 1, bonusCredits: 0,
       active: false, displayOrder: 0, currency: 'MMK', confirmed: true,
     }, options(adminFixture.deps, 'admin-create')),

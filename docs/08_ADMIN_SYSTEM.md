@@ -17,14 +17,21 @@ Describe the current administrative authorization, backend endpoints, UI exposur
 - Validated Firebase custom claims are the authoritative role source.
 - `FIREBASE_SUPER_ADMIN_UIDS` provides server-side initial super-admin bootstrap.
 - Admin endpoints can list Firebase users, update role/status, inspect the core queue/jobs, view in-memory logs, and return process/system metrics.
-- Super-admin receives Dashboard and Projects navigation in the current UI.
+- Super-admin receives a single "Super Admin" navigation item pointing at `/admin`, rendering a tab-based console (`src/ui/pages/SuperAdminPage.tsx`): Overview, Users, Trial Requests, Purchases, Packages, Credits, Audit Log, and System Status. The former separate Dashboard and Projects pages/navigation items were removed; `/dashboard` and `/projects` now redirect to `/admin` and `/new-recap`.
 - Role and status mutations enforce `user < admin < super_admin`, revalidate the actor, and serialize concurrent changes.
 - Administrators cannot change roles, modify peers/higher roles, or change their own role/status.
 - Bootstrap and last-active-super-admin protections prevent administrative lockout.
 - When the billing foundation is explicitly enabled, PostgreSQL
   `super_admin`—not generic Firebase `admin`—is required for purchase decisions,
-  plan/catalog/promotion policy, Trial assessments, adjustments, screenshot
-  metadata verification, and financial/audit reads.
+  plan/catalog/promotion policy, Trial assessments, Trial-request review/approval,
+  adjustments, screenshot metadata verification, and financial/audit reads.
+- A second, simplified Trial pathway now exists alongside the original
+  eligibility-assessment flow: an authenticated user can submit one lifetime
+  `POST /api/trial/request`, and PostgreSQL `super_admin` reviews it through
+  `GET /api/admin/billing/trial-requests` and approves with
+  `POST /api/admin/billing/trial-requests/{id}/approve` (idempotent, no
+  rejection state). Approval grants a fixed 12 credits expiring 120 hours
+  later. See `07_CREDITS_SYSTEM.md` for the full rule.
 - `min85639@gmail.com` is the intended sole Product Owner/Super Admin account;
   the repository does not prove sole-owner enforcement. Planned ban/unban and
   reasoned, audited grant/deduction/refund/reversal operations are not complete.
@@ -44,7 +51,10 @@ Describe the current administrative authorization, backend endpoints, UI exposur
 
 ### Known Issues
 
-- The current dashboard and projects pages call user workspace APIs, not admin APIs.
+- The Super Admin console's Overview tab still reads the ordinary user-facing
+  workspace-jobs API (via `useWorkspaceJobs`/`JobList`) rather than a dedicated
+  admin queue view, even though its other tabs (Users, Trial Requests,
+  Purchases, Packages, Credits, Audit Log) now call real admin/billing APIs.
 
 ## Architecture/Flow
 
@@ -91,7 +101,7 @@ demoted or disabled administrator cannot continue with stale authority.
 - Admin API: `src/routes/admin.js`
 - Audit events: `src/services/auditLog.js`
 - Admin route wrappers: `src/ui/AppFoundation.tsx`
-- Current dashboard/projects: `src/ui/pages/DashboardPage.tsx`, `src/ui/pages/ProjectsPage.tsx`
+- Current Super Admin console: `src/ui/pages/SuperAdminPage.tsx`
 
 ## Important Decisions
 
@@ -102,7 +112,10 @@ demoted or disabled administrator cannot continue with stale authority.
 - Configured bootstrap super-admins cannot be demoted or disabled through the API.
 - At least one active super-admin must always remain.
 - The current admin foundation is not production-complete.
-- Trial, Normal, and Pro are commercial plans and must never enter `user_roles`.
+- Trial and Pro are the currently implemented commercial plans and must never
+  enter `user_roles` (Normal remains architecturally defined in
+  `17_P2_FOUNDATION_ARCHITECTURE.md` but is not selectable through any
+  current code path — see `07_CREDITS_SYSTEM.md` "Plan model").
 
 ## Future Work
 

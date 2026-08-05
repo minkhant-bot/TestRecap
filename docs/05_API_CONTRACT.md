@@ -104,8 +104,12 @@ Queue request:
 ```
 
 `planCode`, `billingMode`, and `Idempotency-Key` are required only when the
-separate live-job billing gate is enabled. Trial/Normal accept only `byok`; Pro
-accepts only `blink_funded`. Successful queueing returns HTTP 202 with a
+separate live-job billing gate is enabled. Trial accepts only `byok`; Pro
+accepts only `blink_funded`. (The originally designed Normal plan would also
+have accepted only `byok`, but `billingFoundation.js` no longer assigns any
+user to Normal — see `07_CREDITS_SYSTEM.md` "Plan model" — so `planCode:
+"normal"` cannot currently occur on a real reservation.) Successful queueing
+returns HTTP 202 with a
 workspace job, immutable safe billing snapshot, and `queuePosition`. BYOK
 credential/quota failures use structured `BYOK_*` codes and never fall back to
 Blink-funded mode.
@@ -192,8 +196,17 @@ PostgreSQL configured. Mutations require `Idempotency-Key`.
 
 User routes:
 
-- `GET /plans`, `GET /plans/me`, `POST /plans/me/select`
-- `GET /trial/eligibility`, `POST /trial/grant`
+- `GET /plans`, `GET /plans/me`
+- `POST /plans/me/select` always returns HTTP 410 `PLAN_SELF_SELECTION_REMOVED`;
+  self-service plan selection has been removed. Pro is assigned automatically
+  only as a side effect of an approved credit purchase; Trial is granted only
+  through the request/approval flow below.
+- `GET /trial/eligibility`, `POST /trial/grant` (original eligibility-assessment
+  flow; still mounted and functional, but superseded by the simpler flow below)
+- `GET /trial/request`, `POST /trial/request` — current Trial pathway. A user
+  submits one lifetime request (`POST`, idempotent via `Idempotency-Key`,
+  replays an existing pending/approved request, 409 `TRIAL_ALREADY_GRANTED` if
+  a grant already exists) and reads their own request status (`GET`).
 - `POST /jobs/estimate` (non-authoritative estimate only; no reservation)
 - `GET /credits/balance`, `GET /credits/ledger`
 - `GET /credit-plans`, `GET /credit-plans/{id}/bank-accounts`
@@ -211,6 +224,11 @@ PostgreSQL-Super-Admin routes under `/admin/billing`:
 - catalog, purchase list/approve/reject, plan and immutable policy creation;
 - credit-package, bank, package-bank-link, and promotion configuration;
 - Trial eligibility assessment and manual credit grant/deduction;
+- `GET /trial-requests` (list pending Trial requests, joined with requester
+  email/display name) and `POST /trial-requests/{id}/approve` (idempotent;
+  requires the request still `pending` and no existing grant; grants a fixed
+  12 credits expiring 120 hours later and marks the request `approved`; there
+  is no reject transition in this flow);
 - private screenshot metadata read and authenticated content streaming at
   `GET /screenshots/{id}/content`, per-user balance/ledger, and audit reads.
 - `POST /credit-packages`, `PATCH /credit-packages/{id}`;

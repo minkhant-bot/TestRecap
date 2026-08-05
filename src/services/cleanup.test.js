@@ -24,11 +24,31 @@ test('expiration cleanup removes only the selected expired completed job', () =>
         fs.writeFileSync(path.join(root, 'public', 'output', `${id}.mp3`), 'audio');
     }
     try {
-        sweepExpiredCompletedJobs({ now: Date.now(), maxAgeMs: 1000, projectRoot: root });
-        assert.equal(getJob(EXPIRED_ID), null);
-        assert.notEqual(getJob(CURRENT_ID), null);
+        const swept = sweepExpiredCompletedJobs({ now: Date.now(), maxAgeMs: 1000, projectRoot: root });
+        assert.equal(swept, 1);
+
+        // Expired -- record kept (not deleted) so a direct link can report
+        // "Expired", but marked and stripped of media links; artifacts gone.
+        const expiredJob = getJob(EXPIRED_ID);
+        assert.notEqual(expiredJob, null);
+        assert.equal(expiredJob.expired, true);
+        assert.equal(typeof expiredJob.expiredAt, 'string');
+        assert.equal(expiredJob.status, 'complete');
         assert.equal(fs.existsSync(path.join(root, 'public', 'output', `${EXPIRED_ID}.mp4`)), false);
+        assert.equal(fs.existsSync(path.join(root, 'public', 'output', `${EXPIRED_ID}.mp3`)), false);
+
+        // Not yet expired -- fully untouched.
+        const currentJob = getJob(CURRENT_ID);
+        assert.notEqual(currentJob, null);
+        assert.equal(Boolean(currentJob.expired), false);
         assert.equal(fs.existsSync(path.join(root, 'public', 'output', `${CURRENT_ID}.mp4`)), true);
+
+        // Idempotent / restart-safe: re-running the sweep must not error,
+        // must not re-report the already-expired job, and must not touch
+        // the (already-deleted) artifacts again.
+        const secondSweep = sweepExpiredCompletedJobs({ now: Date.now(), maxAgeMs: 1000, projectRoot: root });
+        assert.equal(secondSweep, 0);
+        assert.deepEqual(getJob(EXPIRED_ID), expiredJob);
     } finally {
         deleteJob(EXPIRED_ID);
         deleteJob(CURRENT_ID);

@@ -29,6 +29,13 @@ Document all current durable stores, schemas, ownership, and limitations.
 - `0002_credit_package_management.sql` adds package bonus/note fields and a
   database trigger that forbids deleting package records, preserving purchase
   foreign keys and immutable purchase/ledger history.
+- `0003_trial_lifecycle.sql` adds a simplified Trial pathway alongside the
+  original eligibility-assessment schema: a new append-only `trial_requests`
+  table (`pending`/`approved` status, one row per user, reviewer/timestamp
+  columns), and two new nullable `trial_grants` columns, `expires_at` and
+  `expired_at` (with `trial_grants.assessment_id` now nullable, since this
+  flow performs no eligibility assessment). See `07_CREDITS_SYSTEM.md`
+  "Trial request lifecycle" for the full rule.
 - `P2_BILLING_ENABLED=true` activates only the billing APIs and requires
   `DATABASE_URL`. Billing requests synchronize the authenticated Firebase
   identity into PostgreSQL. Financial mutations require PostgreSQL
@@ -60,14 +67,19 @@ Schema version 1. Stores user-facing jobs:
 - Intermediate artifacts: audio/transcript paths and metadata
 - Results: `videoUrl`, `audioUrl`
 - Normalized effects object
+- Retry/idempotency: `retry.attempts`, `retry.maxAttempts`, `retry.lastAttemptAt`,
+  `retry.resumeStage` (public); `retry.lastIdempotencyKey` (internal only)
+- Billing snapshot: `billing` object populated when the separately gated
+  `P2_LIVE_JOB_BILLING_ENABLED` live-job billing integration reserves credits
+  for the job
 - Failure diagnostic internally; the public serializer omits it
 
 ### `saas-state.json`
 
-Schema version 1. Stores workflow-v2 core jobs and encrypted per-job credentials:
+Schema version 1. Stores workflow-v3 core jobs and encrypted per-job credentials:
 
 - Core lifecycle uses `queued`, `processing`, `complete`, `error`, `cancelled`.
-- Internal stage uses workflow-v2 `stageId`.
+- Internal stage uses the Sawaungthin workflow-v3 `stageId`.
 - `result` is serialized as JSON and includes transcripts, timeline, media URLs, and metadata.
 - A bridged workspace job uses the same ID in this store.
 
@@ -138,7 +150,10 @@ Without `DATA_DIR`, local paths are repository-relative under `src/tmp`, `data/c
 The following remain incomplete or gated after the P2.1–P2.3 implementation:
 
 - Keep Firebase as identity authority while PostgreSQL becomes authoritative for roles and permissions.
-- Keep roles separate from Trial/Normal/Pro plan assignments and entitlements.
+- Keep roles separate from commercial-plan assignments and entitlements
+  (currently Trial and Pro only; Normal remains architecturally defined but
+  is not selectable through any current code path — see
+  `07_CREDITS_SYSTEM.md` "Plan model").
 - Production-enable immutable job pricing/entitlement snapshots and transactionally linked reservations only after isolated verification.
 - Complete global role/authority cutover for users, roles, settings, and audit; billing-domain PostgreSQL authority is already gated.
 - Verify synchronized PostgreSQL/proof-volume backup and restore, integrity

@@ -15,7 +15,7 @@ const run = (statePath, source) => execFileSync(process.execPath, [
     encoding: 'utf8'
 }).trim();
 
-test('queued workflow-v2 jobs and encrypted BYOK credentials survive restart', () => {
+test('queued workflow-v3 jobs and encrypted BYOK credentials survive restart', () => {
     const root = fs.mkdtempSync(path.join(os.tmpdir(), 'durable-queue-'));
     const statePath = path.join(root, 'saas-state.json');
     try {

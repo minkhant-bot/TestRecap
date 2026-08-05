@@ -11,6 +11,7 @@ import {
   getMyPlan,
   getMyPurchase,
   getMyScreenshotMetadata,
+  getMyTrialRequest,
   getTrialEligibility,
   grantTrial,
   listCreditPackages,
@@ -18,6 +19,7 @@ import {
   listPackageBanks,
   listPlans,
   publicJson,
+  requestTrial,
   selectPlan,
   submitPurchase,
 } from '../services/billingFoundation.js';
@@ -55,6 +57,7 @@ const handler = operation => async (req, res) => {
 
 export const createBillingRouter = (service = {
   listPlans, getMyPlan, selectPlan, getTrialEligibility, grantTrial,
+  requestTrial, getMyTrialRequest,
   getBalance, getLedger, estimateCredits, listCreditPackages, listPackageBanks,
   createScreenshotIntent, completeScreenshotUpload, submitPurchase,
   listMyPurchases, getMyPurchase, getMyScreenshotMetadata,
@@ -125,6 +128,10 @@ export const createBillingRouter = (service = {
   })));
   router.get('/trial/eligibility', handler(req => service.getTrialEligibility(req.user)));
   router.post('/trial/grant', handler(req => service.grantTrial(req.user, req.body, {
+    idempotencyKey: idempotencyKey(req),
+  })));
+  router.get('/trial/request', handler(req => service.getMyTrialRequest(req.user)));
+  router.post('/trial/request', handler(req => service.requestTrial(req.user, {
     idempotencyKey: idempotencyKey(req),
   })));
   router.get('/credits/balance', handler(req => service.getBalance(req.user)));

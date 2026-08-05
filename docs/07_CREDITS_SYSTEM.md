@@ -14,15 +14,21 @@ and API specification is `17_P2_FOUNDATION_ARCHITECTURE.md`.
 
 ### Implemented
 
-- Navigation includes Credits and the shell displays a numeric fallback.
-- Buy Credits is a “coming soon” empty state.
+- Navigation includes Credits, and the shell displays a numeric balance
+  fallback. Buy Credits (`/buy-credits`) is a real purchase flow — package and
+  bank selection, external transfer, private proof upload via `Dialog`, and a
+  pending purchase request — not a placeholder; this stale claim is corrected
+  here and in `06_UI_UX.md`.
 - Active-job and rolling admission limits are non-financial controls.
 - Encrypted BYOK storage and verification exist.
-- An opt-in PostgreSQL billing API foundation implements configurable
-  Trial/Normal/Pro plans and policies, entitlements, Trial assessment and
-  one-time grants, balance/ledger reads, credit packages/banks, private
-  screenshot metadata, pending purchase submission, atomic Super Admin
-  approval/rejection, one-time first-purchase bonus, and manual adjustments.
+- An opt-in PostgreSQL billing API foundation implements configurable Trial
+  and Pro plans and policies (Normal is defined in the architecture and the
+  database constraint but not selectable — see "Plan model" below),
+  entitlements, Trial assessment and one-time grants (plus the newer Trial
+  request/approval lifecycle), balance/ledger reads, credit packages/banks,
+  private screenshot metadata, pending purchase submission, atomic Super
+  Admin approval/rejection, one-time first-purchase bonus, and manual
+  adjustments.
 - No rates, allowances, bonuses, prices, currencies, packages, banks, or
   commercial policies are seeded.
 - A separate default-off live-job gate connects authoritative-duration pricing,
@@ -34,6 +40,21 @@ and API specification is `17_P2_FOUNDATION_ARCHITECTURE.md`.
   mutations require explicit confirmation, idempotency, PostgreSQL Super Admin
   authority, and append-only audit entries. User reads return active,
   non-archived packages only.
+- Self-service commercial-plan selection has been removed from the
+  application code: `PLAN_CODES` in `src/services/billingFoundation.js` is
+  now `{trial, pro}` only, and `POST /api/plans/me/select` unconditionally
+  returns HTTP 410 `PLAN_SELF_SELECTION_REMOVED`. Pro is assigned only as a
+  side effect of an approved credit purchase. The `plans.code` database check
+  constraint still permits `'normal'` for compatibility, but no current code
+  path can select or configure it as a live plan.
+- A second, simpler Trial lifecycle now coexists with the original
+  eligibility-assessment flow: an authenticated user submits one lifetime
+  `trial_requests` row (`pending`), and PostgreSQL Super Admin approves it,
+  granting a fixed, non-configurable 12 credits that expire exactly 120 hours
+  (5 days) after approval. Unused Trial credit is automatically forfeited at
+  the next job-reservation attempt after expiry (`checkAndExpireTrial`, gated
+  behind `P2_LIVE_JOB_BILLING_ENABLED`). See "Trial request lifecycle" below.
+  Added by migration `0003_trial_lifecycle.sql`.
 
 ### Approved and implemented as a gated foundation
 
@@ -58,20 +79,82 @@ and API specification is `17_P2_FOUNDATION_ARCHITECTURE.md`.
   assigned plan and entitled mode; no server-key fallback is permitted.
 - Railway proof-volume persistence plus synchronized database/binary
   backup/restore remain required before production use.
+- Restart reconciliation only covers jobs whose JSON-store status is still
+  `processing` at restart. A hard process crash between a job's JSON terminal
+  write and its Postgres settle/release call can leave a reservation
+  permanently `reserved` with no automatic reconciliation; the query needed
+  to find such jobs exists (`listRecoverableLiveJobIds`) but nothing calls it
+  in production. See `12_KNOWN_ISSUES.md` item 15 and `17_P2_FOUNDATION_ARCHITECTURE.md`
+  P2.9.
 
 ## Plan model
 
-Plans are not roles:
+Plans are not roles. The originally approved architecture (`17_P2_FOUNDATION_ARCHITECTURE.md`)
+defines three plans — Trial, Normal, Pro — but the current `billingFoundation.js`
+implementation only accepts and configures **Trial** and **Pro**; Normal has
+been removed from self-service selection and plan configuration:
 
 | Plan | Gemini credential | Credits | Blur/Flip | Purpose |
 |---|---|---|---|---|
-| Trial | Valid user BYOK required | Trial jobs consume the configurable free allowance at Trial’s versioned 30-second-block rate; purchased credits are required only after that allowance is exhausted | Unavailable | Limited acquisition trial, not unlimited free BYOK |
-| Normal | Valid user BYOK required | Purchased credits; lower configurable rate than Pro | Unavailable | Paid Blink infrastructure while user pays Gemini provider |
-| Pro | Blink-owned secret | Purchased credits; higher configurable rate | Available | Provider-funded full approved feature set |
+| Trial | Valid user BYOK required | Fixed one-time grant of 12 credits, expiring 120 hours after Owner approval; purchased credits (via Pro) are required after that grant is exhausted or expires | Unavailable | Limited acquisition trial, not unlimited free BYOK |
+| Pro | Blink-owned secret | Purchased credits; configurable rate | Available | Provider-funded full approved feature set |
+
+Normal (paid BYOK without Blink funding) remains architecturally defined in
+`17_P2_FOUNDATION_ARCHITECTURE.md` and the `plans.code` database constraint
+still permits the value `'normal'` for compatibility, but no current API or
+UI path can select, configure, or assign it — `POST /api/plans/me/select`
+always returns HTTP 410 `PLAN_SELF_SELECTION_REMOVED`. Reconcile the
+architecture document with this implementation decision before further
+Normal-plan work.
 
 Roles remain only `user`, `admin`, and `super_admin`. Firebase verifies identity;
 PostgreSQL is the approved P2 authority for roles/permissions. Plan assignment
 never grants administrative access.
+
+## Trial request lifecycle
+
+A second, simpler Trial pathway (migration `0003_trial_lifecycle.sql`,
+repository `src/db/repositories/trialRequests.js`) now coexists with the
+original eligibility-assessment flow described in "Purchase and bonus rule"
+below and in `17_P2_FOUNDATION_ARCHITECTURE.md`'s `trial_eligibility_assessments`
+design. It does not replace that schema — `trial_eligibility_assessments` and
+its `/trial/eligibility` / `/trial/grant` / admin `/trial-assessments` routes
+remain mounted and functional — but application code comments mark it as the
+current, simpler flow:
+
+```text
+authenticated user
+  → POST /api/trial/request  (one lifetime request per user; idempotent replay
+     of an existing pending/approved request; 409 TRIAL_ALREADY_GRANTED if a
+     grant already exists)
+  → trial_requests row, status "pending"
+  → Super Admin reviews GET /api/admin/billing/trial-requests
+  → Super Admin approves POST /api/admin/billing/trial-requests/{id}/approve
+     (idempotent; requires status "pending" and no existing grant)
+  → fixed 12-credit trial_grant, expires_at = approval time + 120 hours
+  → trial_requests row becomes "approved" (terminal; there is no reject state)
+```
+
+- `trial_requests.status` supports only `pending` and `approved` — unlike
+  `credit_purchase_requests`, there is no `rejected` transition in this schema.
+- `trial_grants` gained two nullable columns, `expires_at` and `expired_at`,
+  and its `assessment_id` foreign key became nullable (the new flow performs
+  no eligibility assessment).
+- Both the grant amount (12 credits) and expiry window (120 hours) are fixed
+  in application code (`TRIAL_GRANT_CREDITS`, `TRIAL_DURATION_MS` in
+  `src/services/billingFoundation.js`), not driven by
+  `plan_policy_versions.trial_allowance_credits` as the original architecture
+  describes.
+- Expiry is enforced lazily: `checkAndExpireTrial` runs inside the live-job
+  credit-reservation transaction (`P2_LIVE_JOB_BILLING_ENABLED` gate). Once
+  `expires_at` has passed, it marks the grant expired and forfeits any
+  remaining balance with a `manual_deduction` ledger entry
+  (`metadata.trigger = 'trial_expiry'`) before blocking the new reservation
+  with `TRIAL_EXPIRED`. There is no separate background expiry sweep.
+- Both new endpoints require `P2_BILLING_ENABLED`; no separate gate was added.
+  `trial_requests` rows are append-only (a `prevent_financial_delete()`
+  trigger blocks deletion), matching the immutability pattern used elsewhere
+  in the billing schema.
 
 ## Billing rule
 
@@ -136,8 +219,12 @@ audit, logs, analytics, URLs, or client responses.
 ## File References
 
 - Complete P2 contract: `docs/17_P2_FOUNDATION_ARCHITECTURE.md`
-- Current UI placeholder: `src/ui/layout/AppShell.tsx`,
-  `src/ui/pages/BuyCreditsPage.tsx`
+- Current UI (real billing flow, not a placeholder): `src/ui/layout/AppShell.tsx`,
+  `src/ui/pages/BuyCreditsPage.tsx`, `src/ui/billing/api.ts`
+- Current Super Admin billing UI: `src/ui/pages/SuperAdminPage.tsx`
+- Trial request/approval: `src/db/migrations/0003_trial_lifecycle.sql`,
+  `src/db/repositories/trialRequests.js`, `src/services/billingFoundation.js`,
+  `src/routes/billing.js`, `src/routes/adminBilling.js`
 - Current BYOK: `src/services/userGeminiKeys.js`,
   `src/routes/workspace.js`
 - Current non-financial admission: `src/services/admissionControl.js`
@@ -146,8 +233,11 @@ audit, logs, analytics, URLs, or client responses.
 
 ## Open decisions
 
-Exact rates, allowance, risk thresholds, credit-package prices/currencies,
-bonus amount/dates, screenshot limits/retention, pending-request cancellation,
-post-provider user-cancellation policy, `review_required` operations, and legacy
-credential/data migration require approval before their dependent P2 phases
-activate.
+The Trial grant amount and expiry are now fixed in code for the request/approval
+flow (12 credits, 120 hours) rather than open; Normal's rate question is moot
+while Normal is not selectable. Exact Pro credits-per-30-second-block rate,
+risk thresholds for the original eligibility-assessment flow, credit-package
+prices/currencies, bonus amount/dates, screenshot limits/retention,
+pending-request cancellation, post-provider user-cancellation policy,
+`review_required` operations, and legacy credential/data migration still
+require approval before their dependent P2 phases activate.

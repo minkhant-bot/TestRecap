@@ -55,6 +55,17 @@ flow, but is not yet fully production-validated. Long-duration and reliability
 verification remains pending because the available Gemini key/quota limited the
 latest real E2E test to 30 seconds.
 
+This real-E2E result predates the Sawaungthin workflow-v3 restoration (the
+prior Gemini direct-audio-transcript hybrid path has since been removed;
+Faster-Whisper now owns transcript timestamps and Gemini performs Burmese
+text-only translation). It does not verify the restored v3 pipeline. A real
+media end-to-end run of workflow-v3 was intentionally not completed and
+remains unverified as of 2026-08-04; automated/unit coverage (269 total, 265
+passed, 0 failed, 4 skipped) plus TypeScript, build, and `git diff --check`
+passed, but blur, subtitle position, flip, subtitle rendering, and MP3/MP4
+output correctness are not confirmed against real generated artifacts for
+workflow-v3.
+
 #### Pending verification — not confirmed defects
 
 - Longer source videos.
@@ -102,6 +113,47 @@ this real-E2E scope.
     replace production migration, backup/restore, or staging verification.
     Ban/unban persistence is not implemented; planned Super Admin ban/unban and
     operational credit reversal flows remain pending.
+14. Workflow-v2 job checkpoints are incompatible with the restored Sawaungthin
+    workflow-v3 pipeline. Any in-flight or resumable job recorded under v2 is
+    discarded and restarted from source rather than resumed; there is no
+    migration path that preserves v2 progress.
+15. **Confirmed real implementation gap (investigated 2026-08-05), not a
+    documentation-only issue or an intentional/documented limitation:**
+    `listRecoverableLiveJobIds` in `src/services/liveJobBilling.js:286-287`
+    (backed by `listRecoverableBillingJobs` in `src/db/repositories/jobs.js:95-103`,
+    which selects `jobs` rows where `billing_status IN
+    ('reserved','settled','review_required')` and `status IN
+    ('queued','processing','failed','cancelled')`) is exported and covered by
+    a real assertion in `liveJobBilling.postgres.integration.test.js:147`
+    (confirming the underlying query itself works), but no startup path,
+    scheduled sweep, or any other production code calls it — confirmed by
+    grepping `server.js`, `cleanup.js`, and every script for its name or its
+    repository function.
+
+    The only automatic restart reconciliation that exists is inside
+    `WorkspaceWorker.start()` (`src/services/workspaceWorker.js:115-146`),
+    and it only (a) considers jobs that `recoverWorkspaceJobs()` found stuck
+    in the JSON store's `processing` status, and (b) among those, only
+    reconciles the ones whose `billing.billingStatus === 'settled'`. A job
+    whose Postgres reservation is still `reserved` (not yet `settled`) is not
+    specially reconciled — it is implicitly retried through the ordinary
+    JSON-requeue-and-reprocess path, which works correctly for a **graceful**
+    shutdown/restart. However, `WorkspaceWorker.tick()`
+    (`workspaceWorker.js:272-323`) writes the JSON terminal status
+    (`completed`/`failed`) and calls the Postgres `settle`/`fail` billing
+    call as two separate, non-transactional steps. If the process is killed
+    (crash, OOM, `SIGKILL`) in the narrow window between the JSON write and
+    the Postgres call, the JSON store ends up in a terminal state
+    (`failed`/`cancelled`, which `recoverWorkspaceJobs()` never revisits)
+    while the Postgres reservation is permanently stuck `reserved` (money
+    reserved, never released or settled) with no automatic process to notice
+    or fix it — exactly the scenario `listRecoverableBillingJobs`'s query is
+    shaped to find. This crash-consistency gap is consistent with, and a
+    concrete instance of, the already-documented "No transaction spans
+    workspace state, core state, files, and credentials" issue in
+    `04_DATABASE.md`. It only matters once `P2_LIVE_JOB_BILLING_ENABLED=true`,
+    which remains off by default, and is tracked as pending work under P2.9
+    in `17_P2_FOUNDATION_ARCHITECTURE.md` ("Worker lease/reconciliation").
 
 #### P3 — Low
 
@@ -134,7 +186,7 @@ Repository state risk is independent of runtime behavior: the working applicatio
 - Deletion/retention: `src/services/workspaceJobDeletion.js`, `src/services/completedOutputDeletion.js`, `src/services/cleanup.js`
 - Cancellation: `src/services/workspaceWorker.js`, `src/services/corePipelineBridge.js`
 - Roles: `src/services/firebaseAdmin.js`, `src/routes/admin.js`
-- Media client: `src/ui/pages/ProcessingPage.tsx`
+- Media client: `src/ui/workspace/useJobStatus.ts` (consumed by `src/ui/pages/NewRecapPage.tsx`; formerly `src/ui/pages/ProcessingPage.tsx`, now deleted)
 
 ## Important Decisions
 

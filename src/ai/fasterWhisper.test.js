@@ -106,7 +106,7 @@ test('timeout and cancellation terminate the transcription child', async () => {
     assert.deepEqual(cancelledChild.killSignals, ['SIGTERM']);
 });
 
-test('strictly validates order, overlap, ranges, and real WAV duration', () => {
+test('uses the ZIP timestamp tolerance and bounded WAV-end clamp', () => {
     assert.deepEqual(validateSourceTranscript([
         { timestamp: [0, 1], text: ' first ' },
         { timestamp: [1.2, 2], text: 'second' }
@@ -118,7 +118,16 @@ test('strictly validates order, overlap, ranges, and real WAV duration', () => {
     assert.throws(() => validateSourceTranscript([
         { timestamp: [0, 1.2], text: 'x' }, { timestamp: [1, 2], text: 'y' }
     ], 2), /overlaps/);
-    assert.throws(() => validateSourceTranscript([{ timestamp: [0, 2.1], text: 'x' }], 2), /exceeds/);
+    assert.deepEqual(validateSourceTranscript([{ timestamp: [0, 2.5], text: 'x' }], 2), [
+        { timestamp: [0, 2], text: 'x' }
+    ]);
+    assert.deepEqual(validateSourceTranscript([
+        { timestamp: [0, 1], text: 'x' }, { timestamp: [0.96, 2], text: 'y' }
+    ], 2), [
+        { timestamp: [0, 1], text: 'x' }, { timestamp: [0.96, 2], text: 'y' }
+    ]);
+    assert.throws(() => validateSourceTranscript([{ timestamp: [0, 3.5001], text: 'x' }], 2), /exceeds/);
+    assert.throws(() => validateSourceTranscript([{ timestamp: [2.01, 2.1], text: 'x' }], 2), /starts beyond/);
 });
 
 test('source transcript cache invalidates workflow, source, and algorithm mismatches', async () => {

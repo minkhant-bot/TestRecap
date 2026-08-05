@@ -25,6 +25,13 @@ authenticated staging verification.
 
 ### Verification evidence boundary
 
+This section's Node inventory count (327) is a 2026-07-31 snapshot, superseded
+first by the 2026-08-03 Sawaungthin workflow-v3 restoration (255 total, after
+removing nine legacy hybrid-pipeline test files) and then by the current
+2026-08-04 count of 269 total, 265 passed, 0 failed, 4 skipped — see
+`11_TEST_PLAN.md`. The native PostgreSQL integration-suite results below
+remain the latest recorded native-database evidence.
+
 The latest full Node inventory passed 327 tests, failed 0, and skipped 3. The
 three native PostgreSQL integration tests (`src/db/postgres.integration.test.js`,
 `src/services/billingFoundation.postgres.integration.test.js`, and
@@ -74,6 +81,42 @@ snapshots, reservations, settlement/release/refund, worker recovery, UI,
 subscriptions, partial refunds, or pending-purchase cancellation. Those remain
 in their later architecture phases.
 
+## Trial Lifecycle Simplification Boundary (2026-08-04)
+
+Migration `0003_trial_lifecycle.sql` and repository
+`src/db/repositories/trialRequests.js` add a second, simpler Trial pathway to
+`billingFoundation.js`. It does not replace the `trial_eligibility_assessments`
+schema or the `/trial/eligibility` / `/trial/grant` / admin
+`/trial-assessments` endpoints described above and in the schema section
+below — those remain mounted and functional — but application-code comments
+mark this as the current flow: an authenticated user submits one lifetime
+`trial_requests` row (`POST /api/trial/request`, idempotent, 409
+`TRIAL_ALREADY_GRANTED` if a grant already exists), and PostgreSQL Super Admin
+reviews (`GET /api/admin/billing/trial-requests`) and approves
+(`POST /api/admin/billing/trial-requests/{id}/approve`, idempotent). Approval
+grants a **fixed** 12 credits expiring **exactly** 120 hours later — both
+values are hardcoded in `billingFoundation.js` (`TRIAL_GRANT_CREDITS`,
+`TRIAL_DURATION_MS`), not read from `plan_policy_versions.trial_allowance_credits`
+as this document's original Trial design (below) describes. `trial_requests`
+supports only `pending`/`approved` — there is no reject transition. Expiry is
+enforced lazily inside the live-job credit-reservation transaction
+(`checkAndExpireTrial`, gated by `P2_LIVE_JOB_BILLING_ENABLED`), which
+forfeits any remaining balance via a `manual_deduction` ledger entry once
+`expires_at` has passed; there is no separate background expiry sweep. Both
+new endpoints require the same `P2_BILLING_ENABLED` gate as the rest of the
+billing foundation; no new flag was introduced.
+
+The same working-tree change also removed self-service commercial-plan
+selection from application code: `PLAN_CODES` in `billingFoundation.js` is
+now `{trial, pro}` only, and `POST /api/plans/me/select` unconditionally
+returns HTTP 410 `PLAN_SELF_SELECTION_REMOVED`. Pro is now assigned only as an
+automatic side effect of an approved credit purchase. This document's
+"### Normal" plan design below remains the approved architecture text and the
+`plans.code` database check constraint still permits `'normal'` for
+compatibility, but no current API or UI path can select, configure, or assign
+it. Reconcile this document's three-plan design with the current two-plan
+implementation before further Normal-plan work is authorized.
+
 ## P2.3 Live Job Billing and Recovery Boundary (2026-07-31)
 
 The P2.3 delivery connects the gated billing foundation to the workspace worker.
@@ -105,7 +148,7 @@ payment-screenshot storage, financial auditing, and job billing. This remains
 the design contract; implementation status is stated explicitly in the
 boundaries above and phase list below.
 
-The P2 foundation must not change workflow-v2, prompts, Gemini request content,
+The P2 foundation must not change Sawaungthin workflow-v3, prompts, Gemini request content,
 model-selection behavior, TTS, Timeline Verification, Scene Rebuild, FFmpeg,
 export encoding, output quality, or the completed-output contract.
 
@@ -171,6 +214,13 @@ versioned database policy and must never be hardcoded in pipeline code.
 
 ### Trial
 
+> Implementation note (2026-08-04): the currently implemented Trial pathway
+> (see "Trial Lifecycle Simplification Boundary" above) grants a fixed 12
+> credits expiring 120 hours after Owner approval via a simple
+> request/approve flow, not the configurable eligibility-assessment allowance
+> described below. Both flows exist in code; reconcile before further Trial
+> policy work.
+
 - Requires Firebase/Google sign-in and a valid supported user Gemini key.
 - Uses BYOK only; the user pays Gemini provider usage through their provider
   account.
@@ -206,6 +256,18 @@ fingerprint separated from credential encryption and access.
 
 ### Normal
 
+> Implementation note (2026-08-05): `billingFoundation.js`'s `PLAN_CODES` is
+> currently `{trial, pro}` only. Normal is not selectable through
+> `POST /api/plans/me/select` (which unconditionally returns HTTP 410
+> `PLAN_SELF_SELECTION_REMOVED`), cannot be configured through
+> `PUT /api/admin/billing/plans/{code}` (also `{trial, pro}`-only), and no
+> code path assigns it to a `user_plan_assignments` row. The `plans.code`
+> database check constraint still permits `'normal'` for schema compatibility,
+> and the design below remains the approved architecture text, but it is not
+> currently implemented or reachable. Reconcile before further Normal-plan
+> work; see `07_CREDITS_SYSTEM.md` "Plan model" for the current two-plan
+> implementation status.
+
 - Paid BYOK plan.
 - Requires a valid supported user Gemini key.
 - Uses purchased Blink credits after the trial allowance is exhausted.
@@ -240,6 +302,13 @@ A user may move from Trial to Normal or Pro through an explicit commercial-plan
 selection permitted by current policy. Existing jobs retain their snapshots.
 Moving between Normal and Pro changes only future jobs. Purchased credits are
 account credits unless a later policy explicitly restricts a credit grant.
+
+> Implementation note (2026-08-05): no explicit self-service transition
+> mechanism currently exists. `POST /api/plans/me/select` always returns HTTP
+> 410. In the current implementation a user moves from Trial to Pro only as
+> an automatic side effect of an approved credit purchase
+> (`billingFoundation.js`'s purchase-approval path assigns `pro`); there is no
+> Normal to transition to or from. See `07_CREDITS_SYSTEM.md` "Plan model".
 
 ## Manual purchase and first-purchase bonus
 
@@ -442,14 +511,40 @@ Indexes: `(user_id, created_at DESC)`, `(decision, created_at)`.
 |---|---|
 | `id` | `UUID PRIMARY KEY` |
 | `user_id` | `UUID NOT NULL UNIQUE REFERENCES users(id)` |
-| `assessment_id` | `UUID NOT NULL REFERENCES trial_eligibility_assessments(id)` |
+| `assessment_id` | `UUID REFERENCES trial_eligibility_assessments(id)` — nullable since migration `0003_trial_lifecycle.sql`; the request/approval flow below performs no eligibility assessment |
 | `credit_amount` | `BIGINT NOT NULL CHECK (credit_amount > 0)` |
 | `policy_version_id` | `UUID NOT NULL REFERENCES plan_policy_versions(id)` |
 | `ledger_entry_id` | `UUID NOT NULL UNIQUE REFERENCES credit_ledger(id)` |
 | `idempotency_key` | `TEXT NOT NULL UNIQUE` |
 | `granted_at` | `TIMESTAMPTZ NOT NULL DEFAULT now()` |
+| `expires_at` | `TIMESTAMPTZ` — added by `0003_trial_lifecycle.sql`; set by the request/approval flow to 120 hours after approval |
+| `expired_at` | `TIMESTAMPTZ` — added by `0003_trial_lifecycle.sql`; set once by `markTrialGrantExpired` when `checkAndExpireTrial` observes `expires_at` has passed |
 
 One row per user makes the grant idempotent. It is never deleted or recreated.
+Expiry (`expires_at`/`expired_at`) is only populated by the request/approval
+flow described under "Trial Lifecycle Simplification Boundary" above; the
+original eligibility-assessment flow does not set them.
+
+### `trial_requests`
+
+Added by migration `0003_trial_lifecycle.sql`. Backs the simplified
+request/Owner-approval Trial pathway described above.
+
+| Column | Type and constraints |
+|---|---|
+| `id` | `UUID PRIMARY KEY` |
+| `user_id` | `UUID NOT NULL UNIQUE REFERENCES users(id)` |
+| `status` | `TEXT NOT NULL CHECK (status IN ('pending','approved'))` — no reject transition |
+| `requested_at` | `TIMESTAMPTZ NOT NULL DEFAULT now()` |
+| `reviewed_at` | `TIMESTAMPTZ` |
+| `reviewed_by_user_id` | `UUID REFERENCES users(id)` |
+
+A row-level `CHECK` enforces that `pending` rows have no review fields set and
+`approved` rows have both set. Index `(status, requested_at)`. A
+`trial_requests_no_delete` trigger reuses `prevent_financial_delete()` from
+migration `0001`, making rows append-only like `credit_purchase_requests`.
+`user_id` is unique, so a user may submit at most one request in their
+lifetime.
 
 ### `promotion_versions`
 
@@ -648,7 +743,7 @@ idempotency key are immutable.
 
 ### `jobs`
 
-The canonical operational job table must preserve workflow-v2 identity while
+The canonical operational job table must preserve Sawaungthin workflow-v3 identity while
 adding billing fields outside the Core AI Pipeline:
 
 | Column | Type and constraints |
@@ -995,6 +1090,11 @@ client must not infer balances from HTTP status alone.
 - `POST /api/plans/me/select`
   - Body: `planCode`; explicit Normal/Pro selection subject to eligibility.
   - Idempotent. Never changes `user_roles`.
+  - **Implementation note (2026-08-05):** the current `billingFoundation.js`
+    implementation of this endpoint unconditionally returns HTTP 410
+    `PLAN_SELF_SELECTION_REMOVED`. Self-service plan selection of any kind
+    (Normal or Pro) is not currently reachable; Pro is assigned only as an
+    automatic side effect of an approved credit purchase.
 - `GET /api/trial/eligibility`
   - Returns `eligible`, `ineligible`, or `review_required`, whether already
     granted, allowance if public, and safe reason codes.
@@ -1224,6 +1324,10 @@ application-role cutover and operational bootstrap remain pending.
 Trial/Normal/Pro, versioned 30-second rates, Blur/Flip/provider entitlements,
 trial allowance, first-purchase promotion, and public eligibility reads.
 Implemented behind explicit billing activation with no seeded commercial values.
+As of the 2026-08-05 documentation audit, application code accepts and
+configures only Trial and Pro; Normal remains schema-defined but is no longer
+selectable or configurable through any current API — see the "Normal"
+implementation note above and `07_CREDITS_SYSTEM.md` "Plan model".
 
 ### P2.4 — Object storage and manual purchase requests
 
@@ -1263,6 +1367,12 @@ milestone settlement, full failure release/refund, and no silent fallback.
 
 Worker lease/reconciliation, `review_required`, legacy data backfill/cutover,
 PostgreSQL/object backup restore, restart/redeploy, and concurrency tests.
+A concrete confirmed gap in this pending scope: `listRecoverableLiveJobIds`
+(`src/services/liveJobBilling.js`) and its underlying query are implemented
+and tested, but nothing calls them in production, so a hard-crash race
+between a job's JSON-store terminal write and its Postgres
+settle/release call can leave a reservation permanently stuck. See
+`12_KNOWN_ISSUES.md` item 15.
 
 Every phase requires focused tests and documentation updates. All phases must
 confirm the Core AI Pipeline and accepted output behavior remain unchanged.
@@ -1296,10 +1406,15 @@ confirm the Core AI Pipeline and accepted output behavior remain unchanged.
 These do not block database/migration scaffolding, but the affected feature
 cannot activate until approved:
 
-1. Exact integer Trial, Normal, and Pro credits per 30-second block.
-2. Exact trial allowance and trial risk thresholds/review process.
+1. Exact integer Trial and Pro credits per 30-second block (Trial's grant is
+   now fixed at 12 credits total via the request/approval flow — see "Trial
+   Lifecycle Simplification Boundary" — but Pro's rate remains open; Normal's
+   rate is moot while Normal is not implemented).
+2. Exact trial allowance and trial risk thresholds/review process for the
+   original eligibility-assessment flow (the request/approval flow's amount
+   and expiry are no longer open — fixed at 12 credits / 120 hours).
 3. Exact Normal-versus-Pro resource limits other than approved feature/mode
-   differences.
+   differences — moot while Normal is not implemented.
 4. Credit package amounts, money prices, and supported currencies.
 5. First-purchase bonus integer amount, activation dates, and whether it is
    global or limited to specified packages.

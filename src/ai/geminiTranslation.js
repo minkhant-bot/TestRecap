@@ -6,7 +6,7 @@ import { getTranslationSystemInstruction } from './translation.js';
 import { getModelCandidates, rememberSuccessfulGeminiModel } from './geminiModelSelection.js';
 import { createAbortError, isAbortError, throwIfAborted } from '../services/cancellation.js';
 
-export const GEMINI_TRANSLATION_ALGORITHM_VERSION = 'burmese-translation-v2';
+export const GEMINI_TRANSLATION_ALGORITHM_VERSION = 'sawaungthin-burmese-translation-v1';
 export const GEMINI_TRANSLATION_MAX_RETRIES = 3;
 export const RETRYABLE_GEMINI_STATUSES = Object.freeze([429, 500, 502, 503, 504]);
 
@@ -27,7 +27,7 @@ export const getGeminiErrorStatus = error => {
         if (Number.isInteger(status)) return status;
     }
     if (String(error?.status || error?.error?.status || "").toUpperCase() === "UNAVAILABLE") return 503;
-    const match = String(error?.message || '').match(/\b(404|429|500|502|503|504)\b/);
+    const match = String(error?.message || '').match(/\b(400|401|403|404|429|500|502|503|504)\b/);
     return match ? Number(match[1]) : null;
 };
 
@@ -41,26 +41,15 @@ export const TRANSLATION_RESPONSE_SCHEMA = {
     type: Type.ARRAY,
     items: {
         type: Type.OBJECT,
-        required: ['index', 'timestamp', 'text', 'kind'],
+        required: ['index', 'text'],
         properties: {
             index: { type: Type.INTEGER },
-            timestamp: {
-                type: Type.ARRAY,
-                minItems: 2,
-                maxItems: 2,
-                items: { type: Type.NUMBER }
-            },
-            text: { type: Type.STRING },
-            kind: { type: Type.STRING, enum: ['dialogue', 'narration'] },
-            speaker: { type: Type.STRING, nullable: true }
+            text: { type: Type.STRING }
         }
     }
 };
 
 const hashJson = value => crypto.createHash('sha256').update(JSON.stringify(value)).digest('hex');
-const sameTimestamp = (left, right) =>
-    Array.isArray(left) && left.length === 2 && left[0] === right[0] && left[1] === right[1];
-
 export const parseStructuredTranslation = (responseText, sourceRecords, batchStart = 0) => {
     let parsed;
     try {
@@ -79,26 +68,12 @@ export const parseStructuredTranslation = (responseText, sourceRecords, batchSta
         if (!item || item.index !== expectedIndex) {
             throw new Error(`Gemini translation order mismatch at record ${expectedIndex}.`);
         }
-        if (!sameTimestamp(item.timestamp, source.timestamp)) {
-            throw new Error(`Gemini translation changed timestamps at record ${expectedIndex}.`);
-        }
         if (typeof item.text !== 'string' || !item.text.trim()) {
             throw new Error(`Gemini translation record ${expectedIndex} has invalid text.`);
         }
-        if (!['dialogue', 'narration'].includes(item.kind)) {
-            throw new Error(`Gemini translation record ${expectedIndex} has invalid kind.`);
-        }
-        if (item.kind === 'dialogue' && (typeof item.speaker !== 'string' || !item.speaker.trim())) {
-            throw new Error(`Gemini dialogue record ${expectedIndex} is missing a speaker.`);
-        }
-        if (item.speaker !== undefined && item.speaker !== null && typeof item.speaker !== 'string') {
-            throw new Error(`Gemini translation record ${expectedIndex} has invalid speaker.`);
-        }
         return {
             timestamp: [...source.timestamp],
-            text: item.text.trim(),
-            kind: item.kind,
-            ...(item.speaker?.trim() ? { speaker: item.speaker.trim() } : {})
+            text: item.text.trim()
         };
     });
 };
@@ -174,7 +149,6 @@ const translateTranscriptWithSingleGeminiModel = async ({
         const batch = sourceRecords.slice(batchStart, batchStart + batchSize);
         const input = batch.map((record, localIndex) => ({
             index: batchStart + localIndex,
-            timestamp: record.timestamp,
             text: record.text
         }));
         let translated;
@@ -186,7 +160,7 @@ const translateTranscriptWithSingleGeminiModel = async ({
                     model,
                     contents: [{
                         role: 'user',
-                        parts: [{ text: `${translationSettings.instruction}\n\nTranslate and classify these source records without changing their index, order, or timestamp:\n${JSON.stringify(input)}` }]
+                        parts: [{ text: `${translationSettings.instruction}\n\n${JSON.stringify(input)}` }]
                     }],
                     config: {
                         responseMimeType: 'application/json',
@@ -203,17 +177,19 @@ const translateTranscriptWithSingleGeminiModel = async ({
                 if (isAbortError(error)) throw error;
                 lastError = error;
                 if (getGeminiErrorStatus(error) === 404) throw error;
-                const retryableAvailability = isRetryableGeminiError(error);
+                const retryableAvailability = getGeminiErrorStatus(error) === null ||
+                    isRetryableGeminiError(error);
                 console.warn("[Translation] Attempt " + attempt + " failed: " + safeDiagnostic(error));
+                if (!retryableAvailability) {
+                    throw new Error('Gemini translation failed: ' + safeDiagnostic(error));
+                }
                 if (attempt < GEMINI_TRANSLATION_MAX_RETRIES) {
-                    if (retryableAvailability) onRetry({
+                    onRetry({
                         attempt, maxAttempts: GEMINI_TRANSLATION_MAX_RETRIES,
                         status: getGeminiErrorStatus(error),
                         message: "Gemini is busy. Retrying translation…"
                     });
-                    await sleep(retryableAvailability
-                        ? getGeminiRetryDelayMs(attempt, random)
-                        : 500 * (2 ** (attempt - 1)));
+                    await sleep(getGeminiRetryDelayMs(attempt, random));
                     throwIfAborted(signal);
                 }
             }

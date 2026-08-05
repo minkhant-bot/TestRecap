@@ -8,6 +8,7 @@ import {
   adminListCatalog,
   adminListAudit,
   adminListPurchases,
+  approveTrialRequest,
   assessTrial,
   configureBank,
   configureCreditPlan,
@@ -17,6 +18,7 @@ import {
   createPlanPolicy,
   editCreditPackage,
   linkPackageBank,
+  listTrialRequests,
   publicJson,
   reviewPurchase,
   reorderCreditPackages,
@@ -60,7 +62,7 @@ export const createAdminBillingRouter = (service = {
   createCreditPackage, editCreditPackage, setCreditPackageStatus,
   archiveCreditPackage, reorderCreditPackages,
   adjustCredits, assessTrial, verifyScreenshot, adminGetScreenshotMetadata,
-  adminGetUserCredits, adminListAudit,
+  adminGetUserCredits, adminListAudit, listTrialRequests, approveTrialRequest,
 }, { proofStorage = paymentProofStorage } = {}) => {
   const router = express.Router();
   const proofContentHandler = async (req, res) => {
@@ -148,6 +150,11 @@ export const createAdminBillingRouter = (service = {
   router.post('/trial-assessments', handler(req => service.assessTrial(req.user, req.body, {
     idempotencyKey: idempotencyKey(req),
   })));
+  router.get('/trial-requests', handler(req => service.listTrialRequests(req.user)));
+  router.post('/trial-requests/:id/approve', handler(req =>
+    service.approveTrialRequest(req.user, req.params.id, {
+      idempotencyKey: idempotencyKey(req),
+    })));
   router.post('/screenshots/:id/verify', handler(req =>
     service.verifyScreenshot(req.user, req.params.id, {
       idempotencyKey: idempotencyKey(req),

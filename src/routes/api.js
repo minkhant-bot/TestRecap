@@ -304,7 +304,7 @@ router.post('/retry/:jobId', async (req, res) => {
     
     const geminiApiKey = req.body?.geminiApiKey || req.headers['x-gemini-api-key'] || getJobKeys(req.params.jobId).geminiApiKey || process.env.GEMINI_API_KEY;
     if (!geminiApiKey) {
-        return res.status(400).json({ error: 'A Gemini API key is required to resume this workflow-v2 job.' });
+        return res.status(400).json({ error: 'A Gemini API key is required to resume Burmese translation.' });
     }
     setJobKeys(req.params.jobId, { geminiApiKey });
     const retryStage = getRetryStartStage(job);

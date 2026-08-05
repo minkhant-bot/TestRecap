@@ -26,8 +26,8 @@ const EXPECTED_LABELS = [
     'Adjusting final playback speed', 'Cleaning up', 'Complete'
 ];
 
-test('workflow v2 has stable stage ordering and exact frontend labels', () => {
-    assert.equal(WORKFLOW_VERSION, 2);
+test('Sawaungthin workflow v3 has stable stage ordering and exact frontend labels', () => {
+    assert.equal(WORKFLOW_VERSION, 3);
     assert.deepEqual(WORKFLOW_STAGE_IDS, EXPECTED_STAGES);
     assert.deepEqual(EXPECTED_STAGES.map(id => WORKFLOW_STAGE_LABELS[id]), EXPECTED_LABELS);
     assert.deepEqual(JOB_STATUSES, ['queued', 'processing', 'complete', 'error', 'cancelled']);
@@ -42,7 +42,8 @@ test('stage control flow accepts IDs and rejects old display strings', () => {
 test('workflow state rejects old and mismatched cache versions', () => {
     assert.throws(() => readCompatibleWorkflowState('{}'), { code: 'WORKFLOW_VERSION_MISMATCH' });
     assert.throws(() => readCompatibleWorkflowState('{"workflowVersion":1}'), { code: 'WORKFLOW_VERSION_MISMATCH' });
-    assert.equal(readCompatibleWorkflowState('{"workflowVersion":2,"stageId":"upload"}').stageId, 'upload');
+    assert.throws(() => readCompatibleWorkflowState('{"workflowVersion":2}'), { code: 'WORKFLOW_VERSION_MISMATCH' });
+    assert.equal(readCompatibleWorkflowState('{"workflowVersion":3,"stageId":"upload"}').stageId, 'upload');
 });
 
 test('active contract excludes blur, visible subtitle, SRT, and font stages', () => {

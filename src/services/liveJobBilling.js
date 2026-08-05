@@ -3,6 +3,7 @@ import { withTransaction } from '../db/client.js';
 import {
   auditLogsRepository,
   balancesRepository,
+  billingRepository,
   jobsRepository,
   ledgerRepository,
   planAssignmentsRepository,
@@ -11,12 +12,13 @@ import {
   usersRepository,
   workerLeasesRepository,
 } from '../db/repositories/index.js';
-import { BillingError } from './billingFoundation.js';
+import { BillingError, checkAndExpireTrial } from './billingFoundation.js';
 
 const deps = {
   transaction: withTransaction,
   audit: auditLogsRepository,
   balances: balancesRepository,
+  billing: billingRepository,
   jobs: jobsRepository,
   ledger: ledgerRepository,
   assignments: planAssignmentsRepository,
@@ -65,7 +67,7 @@ export const reserveLiveJob = async ({
   if (!String(idempotencyKey || '').trim()) fail('Idempotency-Key is required.', 'IDEMPOTENCY_KEY_REQUIRED');
   const seconds = Number(sourceDurationSeconds);
   if (!Number.isFinite(seconds) || seconds <= 0) fail('Authoritative source duration is invalid.', 'INVALID_DURATION', 422);
-  return repositories.transaction(async client => {
+  const result = await repositories.transaction(async client => {
     const user = await ensureUser(identity, client, repositories);
     const existing = await repositories.jobs.findBillingJob(jobId, { client, forUpdate: true });
     if (existing) {
@@ -85,6 +87,18 @@ export const reserveLiveJob = async ({
     );
     if (!assignment || assignment.planCode !== requestedPlanCode) {
       fail('Requested plan is not the active assigned plan.', 'PLAN_NOT_ASSIGNED', 422);
+    }
+    // Rule #2 (frozen): expiry blocks only new job creation, checked at the
+    // one existing pre-admission checkpoint. A no-op for Pro (Pro never
+    // expires) and a no-op once the user already moved past Trial.
+    // The forfeiture inside checkAndExpireTrial must still be COMMITTED even
+    // though this reservation attempt is ultimately denied — throwing here
+    // would roll back the very forfeiture just written, so a sentinel is
+    // returned instead and the failure is raised only after the transaction
+    // (including the forfeiture) has committed, below.
+    if (assignment.planCode === 'trial') {
+      const expiry = await checkAndExpireTrial(user.id, { client, deps: repositories });
+      if (expiry) return { trialExpired: true };
     }
     const plan = await repositories.plans.findPlanByCode(requestedPlanCode, { client });
     const policy = plan?.active
@@ -136,6 +150,8 @@ export const reserveLiveJob = async ({
     }, { client });
     return { snapshot: publicSnapshot(job), replayed: false };
   });
+  if (result.trialExpired) fail('Trial expired. Purchase a package to continue.', 'TRIAL_EXPIRED', 403);
+  return result;
 };
 
 const transitionReservation = async (jobId, action, reason, repositories) =>
@@ -269,3 +285,6 @@ export const markLiveJobReviewRequired = (jobId, reason, { repositories = deps }
 
 export const listRecoverableLiveJobIds = ({ repositories = deps } = {}) =>
   repositories.jobs.listRecoverableBillingJobs();
+
+export const getLiveJobBillingStatus = (jobId, { repositories = deps } = {}) =>
+  repositories.jobs.findBillingJob(jobId);

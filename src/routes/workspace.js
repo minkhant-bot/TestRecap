@@ -160,6 +160,7 @@ export const createWorkspaceRouter = ({
     router.get('/jobs/:jobId/source', (req, res) => {
         const job = getWorkspaceJob(req.params.jobId, req.user.uid);
         if (!job) return res.status(404).json({ error: 'Project not found.' });
+        if (job.expired) return res.status(410).json({ error: 'This recap has expired.', code: 'JOB_EXPIRED' });
         const internal = getWorkspaceJobInternal(req.params.jobId);
         return res.sendFile(internal.storedPath);
     });

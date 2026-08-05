@@ -5,7 +5,8 @@
 
 TestRecap is an authenticated AI movie-recap workspace with a durable,
 single-concurrency processing queue. Firebase Authentication provides
-email/password registration, login, logout, and persistent sessions.
+Google sign-in (only the Google provider is accepted), an HTTP-only backend
+session cookie, logout, and persistent sessions.
 
 Blink's launch safety limit is 15:00 per source video. The backend rejects
 longer media before job creation and rechecks before queueing or credit
@@ -14,7 +15,7 @@ reservation; the frontend provides immediate feedback. Billing remains in
 
 ## SaaS configuration
 
-Enable Email/Password authentication in Firebase and configure the variables
+Enable Google sign-in authentication in Firebase and configure the variables
 listed in `.env.example`. Firebase Admin credentials stay server-side.
 `FIREBASE_SUPER_ADMIN_UIDS` provides the initial super-admin bootstrap; all subsequent
 authorization uses backend-verified Firebase identities and custom claims.
@@ -67,7 +68,8 @@ There is no `npm test` script. Database status/migrations require an isolated
 PostgreSQL connection and must never run automatically. Both
 `P2_BILLING_ENABLED` and `P2_LIVE_JOB_BILLING_ENABLED` default to `false`;
 neither gate activates commercial values or replaces the existing JSON/Firebase
-compatibility authority. Preserve workflow-v2/Core AI Pipeline prompts, TTS,
-timeline, Scene Rebuild, FFmpeg, output validation, and canonical
-`/output/{jobId}.mp4`. Do not edit code/tests/config/migrations/runtime behavior,
+compatibility authority. The accepted Sawaungthin ZIP pipeline is the media
+source of truth: Faster-Whisper owns timestamps and Gemini translates text only.
+Preserve its TTS, timeline, Scene Rebuild, FFmpeg, output validation, and canonical
+MP4/MP3 outputs. Do not edit code/tests/config/migrations/runtime behavior,
 deployment, or commit/push unless a task explicitly authorizes it.

@@ -11,6 +11,22 @@ Record both the approved future product direction and the architect’s dependen
 
 ## Current Status
 
+### Official P1–P6 roadmap mapping (2026-08-04 documentation audit)
+
+The repository's internal delivery labels (below, and the P2.1–P2.9 sub-phases
+in `17_P2_FOUNDATION_ARCHITECTURE.md`) predate this six-phase stakeholder
+roadmap. This table maps current, evidence-based status onto it; it does not
+replace the internal labels used throughout the rest of this document set.
+
+| Phase | Status |
+|---|---|
+| P1 — Core Platform & AI Foundation | Functionally complete for a verified 30-second real end-to-end flow (upload → processing → output → preview → download). Not fully production-validated: long-duration, reliability, retry/resume, and restart/recovery behavior remain unverified. Automated suite passes (269 total, 265 passed, 4 skipped); real media E2E of the current Sawaungthin workflow-v3 pipeline is unverified. |
+| P2 — Billing & Beta Readiness | PostgreSQL billing foundation (plans, credits, ledger, purchases, packages, and a newly added simplified Trial request/Owner-approval lifecycle) is implemented and passes native PostgreSQL integration tests, but remains behind inactive `P2_BILLING_ENABLED`/`P2_LIVE_JOB_BILLING_ENABLED` gates with no commercial values seeded. Beta readiness is blocked: the mandatory authenticated Railway staging smoke test (`16_STAGING_SMOKE_TEST.md`) has not been executed, Railway deployment attribution/volume/`DATA_DIR` are unverified, and near-15-minute real E2E support is unverified. |
+| P3 — Beta QA & Customer Validation | Not started. No executed staging smoke test, no verified staging deployment, and no recorded customer-facing beta process exist in the repository. |
+| P4 — Production Hardening | Partially addressed: P1 security/dependency review is complete for beta (documented risk acceptances for React Router, `uuid`, Firebase Admin advisories), and durable per-user rolling admission/rate limiting is implemented. Broader hardening — HTTP security headers, an explicit CORS policy, distributed (multi-replica) admission enforcement, secret rotation, and a documented CSRF strategy — remains an absent recommendation, not implemented. |
+| P5 — Operations & Administration | Substantially implemented: a tab-based Super Admin console (`/admin`: Overview, Users, Trial Requests, Purchases, Packages, Credits, Audit Log, System Status) is connected to real backend admin/billing APIs, with role hierarchy, actor revalidation, and last-super-admin protection enforced server-side. Ban/unban persistence/API, sole-owner (`min85639@gmail.com`) enforcement, and a durable (non-in-memory) audit trail remain unimplemented. |
+| P6 — Production Launch | Not started. Railway is explicitly a staging/test target, not production; deployment preflight is blocked pending Blink attribution and storage/variable/log evidence. Launch requires completing P2's staging verification and P1's long-duration validation first. |
+
 ### P1–P5 handoff summary
 
 | Phase | Status |
@@ -122,9 +138,15 @@ phase.
 ### Approved P2 Foundation — plans, BYOK, Blink-funded processing, and credits
 
 The complete approved architecture is `17_P2_FOUNDATION_ARCHITECTURE.md`.
-Trial and Normal preserve BYOK; Pro uses Blink-owned Gemini credentials. All
-three are commercial plans, not roles. User-facing charges use integer credits
-in duration-based 30-second blocks with versioned plan rates.
+That document's design preserves Trial and Normal on BYOK with Pro on
+Blink-owned Gemini credentials, as three commercial plans, not roles. The
+currently implemented `billingFoundation.js` accepts only Trial and Pro as
+selectable/configurable plan codes; self-service plan selection
+(`POST /api/plans/me/select`) always returns HTTP 410, and Normal — while
+still defined in the architecture document and the database `plans.code`
+constraint — is not reachable through any current API or UI path. User-facing
+charges use integer credits in duration-based 30-second blocks with versioned
+plan rates.
 
 Required credit controls:
 

@@ -4,11 +4,13 @@ import { updateJob, getJob, getJobKeys, clearJobKeys } from '../services/jobMana
 import { getDuration, getStreamsDuration, extractWav, detectScenes, runFFmpeg } from '../ffmpeg/index.js';
 import { getSetting } from '../services/settings.js';
 import { GEMINI_RETRY_STAGE_MESSAGE, getGeminiFailureJobUpdate } from '../services/geminiRetryPolicy.js';
-import { transcribeWav, translateWithGemini, generateNarrationTTS, fingerprintFile } from '../ai/index.js';
+import { transcribeWav, translateWithGemini, fingerprintFile } from '../ai/index.js';
+import { generateNarrationTTS } from '../ai/sawaungthinTts.js';
 import {
     assertSafeJobPath,
     buildAtempoFilter,
     buildConcatManifest,
+    buildFinalExportArgs,
     buildSegmentFFmpegArgs,
     buildTimelineManifest,
     FFMPEG_VIDEO_THREADS,
@@ -19,6 +21,7 @@ import {
     validateFinalMedia
 } from './sceneRebuild.js';
 import { cleanupPipelineArtifacts } from './workflowCleanup.js';
+import { buildSubtitleCues } from '../services/subtitleChunking.js';
 import {
     WORKFLOW_VERSION,
     WORKFLOW_STAGE,
@@ -198,8 +201,8 @@ export const processRecapPipeline = async (jobId, {
                 narration_text: t.text,
                 scene_start: t.timestamp[0],
                 scene_end: t.timestamp[1],
-                kind: t.kind,
-                speaker: t.speaker || null
+                kind: 'narration',
+                speaker: null
             }));
             state.ttsAudioPath = await generateNarrationTTS(
                 mappedTranscript,
@@ -207,7 +210,7 @@ export const processRecapPipeline = async (jobId, {
                 voiceId,
                 state.originalTranscript,
                 state.originalVideoDuration,
-                { geminiApiKey, sourceFingerprint: state.sourceFingerprint, enableLegacyDurationFit: false, signal }
+                { sourceFingerprint: state.sourceFingerprint, signal }
             );
             saveState();
         }
@@ -243,37 +246,45 @@ export const processRecapPipeline = async (jobId, {
             const ttsSidecarPath = state.ttsAudioPath + '.timeline.json';
             if (!fs.existsSync(ttsSidecarPath)) throw new Error('Authoritative TTS timing sidecar not found.');
             const authTimeline = JSON.parse(fs.readFileSync(ttsSidecarPath, 'utf8'));
-            const anchoredSegments = authTimeline.flatMap(group => {
-                if (!group || !Array.isArray(group.segments)) {
-                    throw new Error('Pipeline Error: Invalid grouped authoritative timeline.');
-                }
-                return group.segments;
-            });
+            if (!Array.isArray(authTimeline) || authTimeline.length === 0 ||
+                authTimeline.some(record => !record || !Number.isFinite(record.orig_start) ||
+                    !Number.isFinite(record.orig_end) || !Number.isFinite(record.final_audio_start) ||
+                    !Number.isFinite(record.final_audio_end))) {
+                throw new Error('Pipeline Error: Invalid Sawaungthin authoritative TTS timeline.');
+            }
+            const anchoredSegments = authTimeline;
             state.mapping = mapRecordsChronologically(
                 anchoredSegments, state.scenes, state.originalVideoDuration, state.audioDuration);
             state.timelineManifest = buildTimelineManifest(
                 state.mapping, state.originalVideoDuration, state.audioDuration, state.sourceFingerprint);
-            state.timelineManifestPath = path.join(cacheDir, 'timeline-manifest.v2.json');
+            state.timelineManifestPath = path.join(cacheDir, 'timeline-manifest.v3.json');
             fs.writeFileSync(state.timelineManifestPath, JSON.stringify(state.timelineManifest, null, 2));
             state.timeline = state.timelineManifest.segments;
             state.narrationTranscript = anchoredSegments.map(segment => ({
                 text: segment.text,
                 timestamp: [segment.final_audio_start, segment.final_audio_end]
             }));
+            // Subtitle layout and chunking: each narration segment (a single
+            // authoritative TTS-timed group) is split into one or more
+            // display-ready cues here so no cue ever renders as 3+ lines.
+            // This only changes how a segment's own [start,end] window is
+            // subdivided among its cues -- it never changes TTS timing,
+            // scene rebuild, or export.
             let srt = '';
-            state.narrationTranscript.forEach((chunk, index) => {
-                const start = chunk.timestamp[0];
-                const end = chunk.timestamp[1] || start + 2;
+            const subtitleCues = buildSubtitleCues(state.narrationTranscript);
+            subtitleCues.forEach((cue, index) => {
+                const start = cue.timestamp[0];
+                const end = cue.timestamp[1] || start + 2;
                 srt += `${index + 1}\n`;
                 srt += `${formatTime(start)} --> ${formatTime(end)}\n`;
-                srt += `${chunk.text.trim()}\n\n`;
+                srt += `${cue.text.trim()}\n\n`;
             });
             state.srtFile = path.join(cacheDir, 'subs.srt');
             fs.writeFileSync(state.srtFile, srt);
             saveState();
             advanceStage(STAGES.BUILD_TIMELINE, 70, 'completed');
         } else {
-            state.timelineManifestPath = path.join(cacheDir, 'timeline-manifest.v2.json');
+            state.timelineManifestPath = path.join(cacheDir, 'timeline-manifest.v3.json');
             if (!fs.existsSync(state.timelineManifestPath)) {
                 throw new Error('Completed timeline stage has no manifest.');
             }
@@ -313,7 +324,7 @@ export const processRecapPipeline = async (jobId, {
                 writeArtifactMetadata(metadataPath, expectedMetadata);
             }
             const concatContent = buildConcatManifest(state.timelineManifest, jobTmpDir);
-            state.concatFile = assertSafeJobPath(path.join(jobTmpDir, 'concat.v2.txt'), jobTmpDir);
+            state.concatFile = assertSafeJobPath(path.join(jobTmpDir, 'concat.v3.txt'), jobTmpDir);
             fs.writeFileSync(state.concatFile, concatContent);
             state.renderedSegmentCount = state.timelineManifest.segments.length;
             saveState();
@@ -322,7 +333,7 @@ export const processRecapPipeline = async (jobId, {
             if (state.renderedSegmentCount !== state.timelineManifest.segments.length) {
                 throw new Error('Completed rebuild stage has an incomplete segment count.');
             }
-            state.concatFile = assertSafeJobPath(path.join(jobTmpDir, 'concat.v2.txt'), jobTmpDir);
+            state.concatFile = assertSafeJobPath(path.join(jobTmpDir, 'concat.v3.txt'), jobTmpDir);
             if (!fs.existsSync(state.concatFile) || fs.statSync(state.concatFile).size === 0) {
                 throw new Error('Completed rebuild stage has no valid concatenation manifest.');
             }
@@ -339,8 +350,8 @@ export const processRecapPipeline = async (jobId, {
 
         // 9. CONCATENATION AND FINAL EXPORT
         const outputPaths = getJobOutputPaths(outDir, jobId);
-        const finalFileTmp = assertSafeJobPath(path.join(jobTmpDir, 'export.v2.tmp.mp4'), jobTmpDir);
-        const exportMetadataPath = assertSafeJobPath(path.join(jobTmpDir, 'export.v2.json'), jobTmpDir);
+        const finalFileTmp = assertSafeJobPath(path.join(jobTmpDir, 'export.v3.tmp.mp4'), jobTmpDir);
+        const exportMetadataPath = assertSafeJobPath(path.join(jobTmpDir, 'export.v3.json'), jobTmpDir);
         const exportMetadata = {
             workflowVersion: WORKFLOW_VERSION,
             timelineFingerprint: fingerprintFile(state.timelineManifestPath),
@@ -353,16 +364,11 @@ export const processRecapPipeline = async (jobId, {
             if (state.renderedSegmentCount !== state.timelineManifest.segments.length) {
                 throw new Error('Not all intended timeline segments were rendered.');
             }
-            await runFFmpeg([
-                '-f', 'concat', '-safe', '0', '-i', state.concatFile,
-                '-i', path.resolve(state.ttsAudioPath),
-                '-map', '0:v:0', '-map', '1:a:0',
-                '-c:v', 'libx264', '-threads', String(FFMPEG_VIDEO_THREADS), '-preset', 'fast', '-crf', '20',
-                '-c:a', 'aac', '-b:a', '128k',
-                '-t', state.audioDuration.toFixed(6),
-                '-movflags', '+faststart', '-y', finalFileTmp
-            ], jobTmpDir, pct => updateJob(jobId, { progress: 94 + (pct * 0.05) }),
-            600000, { signal });
+            await runFFmpeg(
+                buildFinalExportArgs(state.concatFile, state.ttsAudioPath, finalFileTmp),
+                jobTmpDir, pct => updateJob(jobId, { progress: 94 + (pct * 0.05) }),
+                600000, { signal }
+            );
             validateFinalMedia(
                 await getStreamsDuration(finalFileTmp),
                 fs.existsSync(finalFileTmp) ? fs.statSync(finalFileTmp).size : 0,
@@ -381,14 +387,14 @@ export const processRecapPipeline = async (jobId, {
         if (!Number.isFinite(finalSpeed) || finalSpeed <= 0) {
             throw new Error(`Invalid final speed multiplier: ${finalSpeed}`);
         }
-        const speedMetadataPath = assertSafeJobPath(path.join(jobTmpDir, 'speed-adjustment.v2.json'), jobTmpDir);
+        const speedMetadataPath = assertSafeJobPath(path.join(jobTmpDir, 'speed-adjustment.v3.json'), jobTmpDir);
         const speedMetadata = { ...exportMetadata, multiplier: finalSpeed };
         if (!hasCompletedStage(job.stageId, STAGES.ADJUST_FINAL_SPEED)) {
             const speedOutcome = getFinalSpeedStageOutcome(finalSpeed);
             advanceStage(STAGES.ADJUST_FINAL_SPEED, 99, speedOutcome.stageOutcome);
             if (finalSpeed !== 1 && !artifactMetadataMatches(speedMetadataPath, speedMetadata)) {
                 const adjustedTmp = assertSafeJobPath(
-                    path.join(jobTmpDir, 'speed-adjusted.v2.tmp.mp4'), jobTmpDir);
+                    path.join(jobTmpDir, 'speed-adjusted.v3.tmp.mp4'), jobTmpDir);
                 await runFFmpeg([
                     '-i', outputPaths.mp4,
                     '-filter_complex',

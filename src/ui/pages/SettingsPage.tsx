@@ -1,10 +1,10 @@
-import { CheckCircle2, KeyRound, LogOut, ShieldCheck, Trash2 } from 'lucide-react';
 import { useState } from 'react';
 import { useLocation, useNavigate } from 'react-router-dom';
 import { useAuth } from '../../auth/AuthProvider';
-import { Avatar, Badge, Button, Card, Input, StatusBadge } from '../components';
+import { Avatar, Button, Input, StatusBadge } from '../components';
 import { useGeminiKey } from '../workspace/GeminiKeyContext';
 
+// No reference equivalent; built only from .panel/.pagetitle/.field/.btn/.chip.
 export function SettingsPage() {
   const { profile, logout } = useAuth();
   const { hasApiKey, saveApiKey, clearApiKey } = useGeminiKey();
@@ -18,103 +18,96 @@ export function SettingsPage() {
   const isGeminiSetup = Boolean(setupState?.geminiSetup && !hasApiKey);
   const signOut = async () => {
     await logout();
-    navigate('/login', { replace: true });
+    navigate('/', { replace: true });
   };
 
   return (
-    <div className="ds-page-container workspace-page">
-      <header className="workspace-page-header">
-        <h1>ဆက်တင်များ</h1>
-        <p>အကောင့်နှင့် AI ဆက်တင်များ</p>
-      </header>
+    <>
+      <div className="pagetitle">
+        <div><span className="kicker">ACCOUNT</span><h1>ဆက်တင်များ</h1><p>အကောင့်နှင့် AI ဆက်တင်များ</p></div>
+      </div>
 
-      <div className="workspace-settings-grid">
-        <Card title="ကိုယ်ရေးအချက်အလက်">
-          <div className="workspace-profile">
+      <div className="stack">
+        <div className="panel">
+          <h3 style={{ marginTop: 0 }}>ကိုယ်ရေးအချက်အလက်</h3>
+          <div className="row">
             <Avatar name={profile?.displayName || profile?.email || 'အကောင့်'} src={profile?.photoURL} size="lg" />
-            <div><strong>{profile?.displayName || 'Google အကောင့်'}</strong><span>{profile?.email}</span></div>
-            <Badge tone="accent"><ShieldCheck size={13} />{profile?.role === 'super_admin' ? 'စီမံခန့်ခွဲသူ' : 'အသုံးပြုသူ'}</Badge>
+            <div style={{ flex: 1 }}><strong>{profile?.displayName || 'Google အကောင့်'}</strong><div className="muted">{profile?.email}</div></div>
+            <span className="chip">{profile?.role === 'super_admin' ? 'စီမံခန့်ခွဲသူ' : 'အသုံးပြုသူ'}</span>
           </div>
-        </Card>
+        </div>
 
-        <Card title={isGeminiSetup ? 'Gemini API Key လိုအပ်ပါသည်' : 'Gemini API Key'}>
-          <div className="workspace-key-settings">
-            {isGeminiSetup && <p className="ds-modal-copy">ပထမဆုံး Recap ဖန်တီးရန် Gemini API Key ထည့်ပေးပါ။</p>}
-            <div className="workspace-key-status">
-              <StatusBadge status={hasApiKey ? 'complete' : 'queued'}>
-                {hasApiKey ? 'Key ရှိပါသည်' : 'Key လိုအပ်ပါသည်'}
-              </StatusBadge>
-            </div>
-            <Input
-              label={hasApiKey ? 'Gemini API Key ပြောင်းမည်' : 'Gemini API Key'}
-              type="password"
-              autoComplete="off"
-              leadingIcon={<KeyRound size={17} />}
-              value={draftKey}
-              onChange={event => {
-                setDraftKey(event.target.value);
-                setSaved(false);
+        <div className="panel">
+          <h3 style={{ marginTop: 0 }}>{isGeminiSetup ? 'Gemini API Key လိုအပ်ပါသည်' : 'Gemini API Key'}</h3>
+          {isGeminiSetup && <p className="muted">ပထမဆုံး Recap ဖန်တီးရန် Gemini API Key ထည့်ပေးပါ။</p>}
+          <div style={{ marginBottom: 14 }}><StatusBadge status={hasApiKey ? 'complete' : 'queued'}>{hasApiKey ? 'Key ရှိပါသည်' : 'Key လိုအပ်ပါသည်'}</StatusBadge></div>
+          <Input
+            label={hasApiKey ? 'Gemini API Key ပြောင်းမည်' : 'Gemini API Key'}
+            type="password"
+            autoComplete="off"
+            value={draftKey}
+            onChange={event => {
+              setDraftKey(event.target.value);
+              setSaved(false);
+              setVerificationError(null);
+            }}
+          />
+          <div className="row wrap">
+            <Button
+              loading={verifying}
+              disabled={!draftKey.trim() || verifying}
+              onClick={async () => {
+                setVerifying(true);
                 setVerificationError(null);
+                try {
+                  await saveApiKey(draftKey);
+                  setDraftKey('');
+                  setSaved(true);
+                  if (setupState?.returnTo) navigate(setupState.returnTo, { replace: true });
+                } catch (error) {
+                  setVerificationError(
+                    error instanceof Error
+                      ? error.message
+                      : 'Gemini API Key ကို စစ်ဆေး၍ မရပါ။ မှန်ကန်သော Key ထည့်ပြီး ထပ်မံကြိုးစားပါ။',
+                  );
+                } finally {
+                  setVerifying(false);
+                }
               }}
-            />
-            <div className="workspace-key-actions">
+            >
+              {isGeminiSetup ? 'သိမ်းပြီး ဆက်လုပ်မည်' : 'သိမ်းမည်'}
+            </Button>
+            {isGeminiSetup && (
+              <Button variant="ghost" disabled={verifying} onClick={() => navigate('/history', { replace: true })}>
+                မလုပ်တော့ပါ
+              </Button>
+            )}
+            {hasApiKey && (
               <Button
-                icon={<CheckCircle2 size={16} />}
-                loading={verifying}
-                disabled={!draftKey.trim() || verifying}
-                onClick={async () => {
-                  setVerifying(true);
-                  setVerificationError(null);
-                  try {
-                    await saveApiKey(draftKey);
-                    setDraftKey('');
-                    setSaved(true);
-                    if (setupState?.returnTo) navigate(setupState.returnTo, { replace: true });
-                  } catch (error) {
-                    setVerificationError(
-                      error instanceof Error
-                        ? error.message
-                        : 'Gemini API Key ကို စစ်ဆေး၍ မရပါ။ မှန်ကန်သော Key ထည့်ပြီး ထပ်မံကြိုးစားပါ။',
-                    );
-                  } finally {
-                    setVerifying(false);
-                  }
+                variant="ghost"
+                onClick={() => {
+                  void clearApiKey();
+                  setSaved(false);
                 }}
               >
-                {isGeminiSetup ? 'သိမ်းပြီး ဆက်လုပ်မည်' : 'သိမ်းမည်'}
+                ဖယ်ရှားမည်
               </Button>
-              {isGeminiSetup && (
-                <Button variant="ghost" disabled={verifying} onClick={() => navigate('/history', { replace: true })}>
-                  မလုပ်တော့ပါ
-                </Button>
-              )}
-              {hasApiKey && (
-                <Button
-                  variant="ghost"
-                  icon={<Trash2 size={16} />}
-                  onClick={() => {
-                    void clearApiKey();
-                    setSaved(false);
-                  }}
-                >
-                  ဖယ်ရှားမည်
-                </Button>
-              )}
-            </div>
-            {saved && <p className="workspace-inline-success" role="status">သိမ်းပြီးပါပြီ</p>}
-            {verificationError && (
-              <div className="workspace-upload-error" role="alert" style={{ whiteSpace: 'pre-wrap' }}>
-                {verificationError}
-              </div>
             )}
-            {hasApiKey && <span className="ds-sr-only">ဤအကောင့်တွင် Gemini API Key ရှိပါသည်။</span>}
           </div>
-        </Card>
+          {saved && <p style={{ color: 'var(--success)', margin: '10px 0 0' }} role="status">သိမ်းပြီးပါပြီ</p>}
+          {verificationError && (
+            <div className="alert error" role="alert" style={{ whiteSpace: 'pre-wrap', marginTop: 10 }}>
+              {verificationError}
+            </div>
+          )}
+          {hasApiKey && <span className="sr-only">ဤအကောင့်တွင် Gemini API Key ရှိပါသည်။</span>}
+        </div>
 
-        <Card title="အကောင့်မှ ထွက်ရန်">
-          <Button variant="secondary" icon={<LogOut size={17} />} onClick={() => void signOut()}>အကောင့်မှ ထွက်မည်</Button>
-        </Card>
+        <div className="panel">
+          <h3 style={{ marginTop: 0 }}>အကောင့်မှ ထွက်ရန်</h3>
+          <Button variant="secondary" onClick={() => void signOut()}>အကောင့်မှ ထွက်မည်</Button>
+        </div>
       </div>
-    </div>
+    </>
   );
 }

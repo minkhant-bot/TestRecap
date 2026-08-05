@@ -13,23 +13,19 @@ const source = [
     { timestamp: [1.2, 2.5], text: 'He walked away.' }
 ];
 const response = JSON.stringify([
-    { index: 0, timestamp: [0, 1], text: 'ရပ်လိုက်။', kind: 'dialogue', speaker: 'speaker_1' },
-    { index: 1, timestamp: [1.2, 2.5], text: 'သူ ထွက်သွားတယ်။', kind: 'narration' }
+    { index: 0, timestamp: [900, 901], text: 'ရပ်လိုက်။' },
+    { index: 1, timestamp: [902, 903], text: 'သူ ထွက်သွားတယ်။' }
 ]);
 
-test('structured translation preserves count, order, timestamps, kind, and speaker contract', () => {
+test('Gemini receives text only and program code preserves Whisper timestamps', () => {
     assert.deepEqual(parseStructuredTranslation(response, source), [
-        { timestamp: [0, 1], text: 'ရပ်လိုက်။', kind: 'dialogue', speaker: 'speaker_1' },
-        { timestamp: [1.2, 2.5], text: 'သူ ထွက်သွားတယ်။', kind: 'narration' }
+        { timestamp: [0, 1], text: 'ရပ်လိုက်။' },
+        { timestamp: [1.2, 2.5], text: 'သူ ထွက်သွားတယ်။' }
     ]);
     assert.throws(() => parseStructuredTranslation(JSON.stringify([
-        { index: 1, timestamp: [0, 1], text: 'x', kind: 'narration' },
-        { index: 0, timestamp: [1.2, 2.5], text: 'y', kind: 'narration' }
+        { index: 1, text: 'x' },
+        { index: 0, text: 'y' }
     ]), source), /order mismatch/);
-    assert.throws(() => parseStructuredTranslation(JSON.stringify([
-        { index: 0, timestamp: [0, 1.1], text: 'x', kind: 'narration' },
-        { index: 1, timestamp: [1.2, 2.5], text: 'y', kind: 'narration' }
-    ]), source), /changed timestamps/);
     assert.throws(() => parseStructuredTranslation('[]', source), /record count/);
 });
 
@@ -45,6 +41,7 @@ test('malformed structured responses retry within the bounded limit', async () =
     assert.equal(requests.length, 3);
     assert.equal(requests[0].config.responseMimeType, 'application/json');
     assert.ok(requests[0].config.responseSchema);
+    assert.doesNotMatch(requests[0].contents[0].parts[0].text, /"timestamp"/);
     assert.deepEqual(result.map(item => item.timestamp), source.map(item => item.timestamp));
 });
 
@@ -68,4 +65,30 @@ test('translation cache invalidates source transcript and settings changes', asy
     } finally {
         fs.rmSync(directory, { recursive: true, force: true });
     }
+});
+
+test('400/403 translation errors are not retried while 429 remains bounded and retryable', async () => {
+    let forbiddenCalls = 0;
+    await assert.rejects(translateTranscriptWithGemini({
+        sourceRecords: source, apiKey: 'test', sourceFingerprint: 'source-a',
+        model: 'test-model', settings: { instruction: 'translate' },
+        generateContent: async () => {
+            forbiddenCalls += 1;
+            throw Object.assign(new Error('403 permission denied'), { status: 403 });
+        },
+        sleep: async () => {}
+    }), /translation failed/);
+    assert.equal(forbiddenCalls, 1);
+
+    let quotaCalls = 0;
+    await assert.rejects(translateTranscriptWithGemini({
+        sourceRecords: source, apiKey: 'test', sourceFingerprint: 'source-a',
+        model: 'test-model', settings: { instruction: 'translate' },
+        generateContent: async () => {
+            quotaCalls += 1;
+            throw Object.assign(new Error('429 quota'), { status: 429 });
+        },
+        sleep: async () => {}
+    }), error => error.code === 'GEMINI_AVAILABILITY_EXHAUSTED');
+    assert.equal(quotaCalls, 3);
 });

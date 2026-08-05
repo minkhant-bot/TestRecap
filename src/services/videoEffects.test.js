@@ -6,6 +6,8 @@ import test from 'node:test';
 import {
     AUTO_COLOR_FILTER,
     COLOR_GRADING_FILTERS,
+    DEFAULT_SUBTITLE_COLOR,
+    SUBTITLE_COLOR_PRESETS,
     applyFinalVideoEffects,
     buildAssDocument,
     buildBlurFilter,
@@ -19,6 +21,7 @@ test('video effects are optional, bounded, and disabled by default', () => {
         flipVideoEnabled: false,
         burnSubtitlesEnabled: false,
         subtitlePosition: { xPct: 10, yPct: 78, widthPct: 80, heightPct: 12 },
+        subtitleColor: 'yellow',
         blurEnabled: false,
         blurBoxes: []
     });
@@ -27,15 +30,26 @@ test('video effects are optional, bounded, and disabled by default', () => {
         flipVideoEnabled: true,
         burnSubtitlesEnabled: true,
         subtitlePosition: { xPct: -5, yPct: 99, widthPct: 60, heightPct: 20 },
+        subtitleColor: 'red',
         blurEnabled: true,
         blurBoxes: [{ id: 'face', xPct: 90, yPct: -4, widthPct: 30, heightPct: 0, strength: 99 }]
     });
     assert.deepEqual(normalized.subtitlePosition, { xPct: 0, yPct: 80, widthPct: 60, heightPct: 20 });
     assert.equal(normalized.colorGrading, 'auto');
     assert.equal(normalized.flipVideoEnabled, true);
+    assert.equal(normalized.subtitleColor, 'red');
     assert.deepEqual(normalized.blurBoxes[0], {
         id: 'face', xPct: 70, yPct: 0, widthPct: 30, heightPct: 3, strength: 30
     });
+});
+
+test('subtitle color defaults to bright yellow and rejects unknown values', () => {
+    assert.equal(DEFAULT_SUBTITLE_COLOR, 'yellow');
+    assert.equal(normalizeVideoEffects({}).subtitleColor, 'yellow');
+    assert.equal(normalizeVideoEffects({ subtitleColor: 'blue' }).subtitleColor, 'blue');
+    assert.equal(normalizeVideoEffects({ subtitleColor: 'not-a-real-color' }).subtitleColor, 'yellow');
+    assert.equal(normalizeVideoEffects({ subtitleColor: '__proto__' }).subtitleColor, 'yellow');
+    assert.deepEqual(Object.keys(SUBTITLE_COLOR_PRESETS).sort(), ['blue', 'red', 'yellow']);
 });
 
 test('auto color is deterministic and intentionally subtle', () => {
@@ -273,4 +287,52 @@ test("reused Sawaungthin SRT-to-ASS flow preserves authoritative text, timing, a
     assert.match(ass, /PlayResY: 1920/);
     assert.match(ass, /Style: Default,Padauk,80,[^\n]+,8,162,162,1344,1/);
     assert.match(ass, /Dialogue: 0,0:00:01\.25,0:00:02\.75,[^\n]+မင်္ဂလာပါ\\Nဒုတိယလိုင်း/);
+});
+
+test('buildAssDocument defaults to bright yellow when no color is given', () => {
+    const srt = '1\n00:00:00,000 --> 00:00:01,000\nတစ်\n\n';
+    const ass = buildAssDocument(srt, { xPct: 10, yPct: 78, widthPct: 80, heightPct: 12 });
+    // &H00BBGGRR for RGB(255,255,0): B=00, G=FF, R=FF.
+    assert.match(ass, /Style: Default,Padauk,\d+,&H0000FFFF,/);
+});
+
+test('each preset (yellow/red/blue) renders its exact ASS color and leaves outline/shadow untouched', () => {
+    const srt = '1\n00:00:00,000 --> 00:00:01,000\nတစ်\n\n';
+    const position = { xPct: 10, yPct: 78, widthPct: 80, heightPct: 12 };
+    const expected = {
+        yellow: '&H0000FFFF', // RGB(255,255,0)
+        red: '&H00303BFF',    // RGB(255,59,48)
+        blue: '&H00FF9933',   // RGB(51,153,255)
+    };
+    for (const [color, assColor] of Object.entries(expected)) {
+        const ass = buildAssDocument(srt, position, color);
+        assert.match(
+            ass,
+            new RegExp(`Style: Default,Padauk,\\d+,${assColor},&H000000FF,&H00000000,&H80000000,-1,0,0,0,100,100,0,0,1,3,0,8,`),
+            `color=${color} must set PrimaryColour to ${assColor} and preserve SecondaryColour/OutlineColour/BackColour/Outline(3)/Shadow(0) unchanged`,
+        );
+    }
+});
+
+test('an unrecognized subtitleColor falls back to the bright yellow default rather than an invalid style', () => {
+    const srt = '1\n00:00:00,000 --> 00:00:01,000\nတစ်\n\n';
+    const ass = buildAssDocument(srt, { xPct: 10, yPct: 78, widthPct: 80, heightPct: 12 }, 'not-a-color');
+    assert.match(ass, /Style: Default,Padauk,\d+,&H0000FFFF,/);
+});
+
+test('the selected color applies uniformly to every subtitle cue -- never alternated, never per-speaker', () => {
+    const srt =
+        '1\n00:00:00,000 --> 00:00:01,000\nပထမစာကြောင်း\n\n' +
+        '2\n00:00:01,000 --> 00:00:02,000\nဒုတိယစာကြောင်း\n\n' +
+        '3\n00:00:02,000 --> 00:00:03,000\nတတိယစာကြောင်း\n\n';
+    const ass = buildAssDocument(srt, { xPct: 10, yPct: 78, widthPct: 80, heightPct: 12 }, 'blue');
+    const dialogueLines = ass.split('\n').filter(line => line.startsWith('Dialogue:'));
+    assert.equal(dialogueLines.length, 3);
+    // Every Dialogue event references the single "Default" style -- there is
+    // only one style defined in the whole document, so there is no
+    // mechanism by which different cues (or "speakers") could differ.
+    assert.equal((ass.match(/^Style: /gm) || []).length, 1);
+    for (const line of dialogueLines) {
+        assert.match(line, /^Dialogue: 0,[^,]+,[^,]+,Default,/);
+    }
 });

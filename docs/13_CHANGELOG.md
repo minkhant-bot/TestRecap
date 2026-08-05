@@ -1,5 +1,81 @@
 # Changelog
 
+## 2026-08-04 — Documentation audit (documentation only)
+
+- Audited the entire codebase, `/docs`, `CLAUDE.md`, database migrations, and
+  tests against the documentation set and corrected drift. No application
+  code, tests, configuration, or migrations were changed.
+- Recorded, as newly discovered uncommitted working-tree implementation not
+  previously documented:
+  - A UI restructuring that removed `DashboardPage.tsx`, `ProjectsPage.tsx`,
+    `ProjectDetailPage.tsx`, `UploadPage.tsx`, and `ProcessingPage.tsx` in
+    favor of a public `LandingPage.tsx` at `/`, upload/processing logic
+    extracted into `useUploadPanel.ts`/`useJobStatus.ts` hooks consumed by
+    `NewRecapPage.tsx`, and a tab-based Super Admin console (`SuperAdminPage.tsx`
+    at `/admin`: Overview, Users, Trial Requests, Purchases, Packages,
+    Credits, Audit Log, System Status). `/dashboard` and `/projects` remain
+    mounted only as redirects. `Modal.tsx`/`Toast.tsx`/`Dropdown.tsx` were
+    replaced by a single `Dialog.tsx` popup primitive and a new `StatCard.tsx`
+    tile component; `base.css`/`components.css`/`layout.css`/`tokens.css`
+    were replaced by `reference.css` (a byte-identical copy of
+    `BlinkAutomationFull_v2.jsx`'s reference styling) plus an additive
+    `app.css`. Buy Credits (`/buy-credits`) is now a real purchase flow
+    against the billing API, not a "coming soon" placeholder.
+  - A simplified Trial request/Owner-approval lifecycle (migration
+    `0003_trial_lifecycle.sql`, repository `src/db/repositories/trialRequests.js`,
+    new `trial_requests` table, two new nullable `trial_grants` columns) that
+    coexists with the original eligibility-assessment Trial flow. Grants a
+    fixed 12 credits expiring 120 hours after Owner approval, with automatic
+    forfeiture of unused balance at expiry. New routes: `GET/POST
+    /api/trial/request`, `GET /api/admin/billing/trial-requests`, `POST
+    /api/admin/billing/trial-requests/{id}/approve`. Gated behind the existing
+    `P2_BILLING_ENABLED`/`P2_LIVE_JOB_BILLING_ENABLED` flags; no new gate was
+    added.
+  - Self-service commercial-plan selection removed from application code:
+    `POST /api/plans/me/select` now always returns HTTP 410
+    `PLAN_SELF_SELECTION_REMOVED`. Only Trial and Pro remain
+    selectable/configurable plan codes in `billingFoundation.js`; Normal
+    remains defined in `17_P2_FOUNDATION_ARCHITECTURE.md` and the database
+    `plans.code` constraint for compatibility, but is not reachable through
+    any current API or UI path.
+  - An undocumented `ADJUST_FINAL_SPEED` pipeline stage (optional
+    atempo/setpts speed adjustment via `OUTPUT_SPEED_MULTIPLIER`, a no-op when
+    unset) running after export and before MP3 generation, and a
+    `TTS_CONCURRENCY` environment override (default 3, capped at 20) for the
+    Edge TTS worker pool size.
+- Updated `00`, `01`, `02`, `03`, `04`, `05`, `06`, `07`, `08`, `11`, `12`,
+  `14`, `15`, and `17` to reflect the above; removed stale references to the
+  deleted UI pages and the previous three-plan Trial/Normal/Pro self-service
+  model where it conflicted with current code.
+- Re-ran the automated suite: `node --test` 269 total, 265 passed, 0 failed, 4
+  skipped; `npm run lint` and `npm run build` both passed; `git diff --check`
+  passed clean. See `11_TEST_PLAN.md`.
+- No commit, push, or deployment occurred.
+
+## 2026-08-03 — Sawaungthin workflow-v3 pipeline restoration (documentation review)
+
+- Restored the Sawaungthin workflow as the authoritative Core AI Pipeline:
+  Faster-Whisper is the sole transcript/timestamp authority, and Gemini
+  performs Burmese text-only translation (batched index/text) with the
+  original Faster-Whisper timestamps always reattached. Gemini responses
+  cannot alter timestamps.
+- Removed the direct Gemini-audio-transcript hybrid path
+  (`geminiAudioTranscript.js`, `audioExtraction.js`,
+  `groupedAudioComposition.js`, `durationFit.js`, `numberNormalization.js`,
+  and their tests). No references to these modules remain in `src/`.
+- `WORKFLOW_VERSION` advanced to 3; workflow-v2 job checkpoints are
+  incompatible and are discarded and restarted from source rather than
+  resumed.
+- Automated regression result: 255 total, 252 passed, 0 failed, 3 skipped.
+  TypeScript (`npm run lint`), production build (`npm run build`), and
+  `git diff --check` all passed.
+- Real media end-to-end verification of the restored pipeline was
+  intentionally not completed and remains unverified. Blur, subtitle
+  position, flip, subtitle rendering, and MP3/MP4 output code is preserved
+  from the prior architecture, but its runtime output has not been
+  re-verified against real generated artifacts since the restoration.
+- No commit, push, or deployment occurred.
+
 ## 2026-08-01 — Super Admin credit-package management
 
 - Added gated backend create/edit/activate/deactivate/archive/reorder operations,
@@ -118,11 +194,22 @@ The working tree currently adds or changes:
 - Firebase Google authentication and session-cookie backend.
 - Workspace UI and job lifecycle.
 - Per-user Gemini key storage.
-- Gemini direct-audio transcript service.
+- Sawaungthin workflow-v3 Core AI Pipeline: Faster-Whisper transcript/timestamp
+  authority with Gemini Burmese text-only translation (the earlier Gemini
+  direct-audio-transcript hybrid service described in prior entries below has
+  since been removed; see the 2026-08-03 entry above).
 - Core workflow bridge.
 - Final effects editor and processor.
 - Workspace SSE, History, cancellation, and restart recovery.
-- Admin API/UI foundations and a credits UI placeholder.
+- A tab-based Super Admin console (`/admin`) connected to real admin/billing
+  APIs (Users, Trial Requests, Purchases, Packages, Credits, Audit Log,
+  System Status), and a real Buy Credits purchase flow, replacing the earlier
+  admin/credits UI placeholders.
+- A public Landing page at `/`; retired Dashboard/Projects/Upload/Processing
+  pages consolidated into New Recap, History, and the Admin console.
+- A simplified Trial request/Owner-approval credit-grant lifecycle, gated
+  behind the existing PostgreSQL billing flags, coexisting with the original
+  eligibility-assessment Trial flow; self-service plan selection removed.
 - Scoped development watcher and structured diagnostics.
 - Administrator-only authorization for global legacy settings and diagnostic routes.
 - Atomic two-active-workspace-job quota with structured HTTP 429 responses and admin-only legacy creation routes.

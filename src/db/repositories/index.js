@@ -11,3 +11,4 @@ export * as idempotencyKeysRepository from './idempotencyKeys.js';
 export * as bootstrapRepository from './bootstrap.js';
 export * as billingRepository from './billing.js';
 export * as workerLeasesRepository from './workerLeases.js';
+export * as trialRequestsRepository from './trialRequests.js';

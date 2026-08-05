@@ -9,7 +9,7 @@
 
 Blink Automation, whose package and repository still use the names `cinerecap-ai` and `TestRecap`, is an authenticated web application that converts an uploaded source video into a Burmese-narrated recap. It combines transcription, Burmese translation, text-to-speech, chronological scene reconstruction, final video export, and optional visual effects.
 
-This document is the entry point for developers and AI assistants. It describes the current working tree as of 2026-07-31.
+This document is the entry point for developers and AI assistants. It describes the current working tree as of 2026-08-04.
 
 ## Current Status
 
@@ -58,10 +58,18 @@ UI/UX plus Super Admin operational UI remain pending.
 - Pending-job editor and explicit Start Processing action.
 - Server-enforced limit of two active workspace jobs per user.
 - Durable, single-concurrency workspace queue.
-- Audio extraction, Gemini audio transcription/translation, workflow-v2 TTS, timeline construction, scene rebuild, MP4/MP3 export, and final effects.
+- Sawaungthin audio extraction, Faster-Whisper transcription/timestamps, Gemini Burmese text translation, TTS, timeline construction, scene rebuild, MP4/MP3 export, and final effects.
 - History, authenticated preview/download, coordinated workspace/core deletion, cancellation, and restart recovery foundations.
 - Coordinated 24-hour retention for completed workspace/core records and linked artifacts.
-- Super-admin API/UI foundations and a credits UI placeholder; neither is complete.
+- A tab-based Super Admin console (`/admin`: Overview, Users, Trial Requests,
+  Purchases, Packages, Credits, Audit Log, System Status) and a real Buy
+  Credits purchase flow, both connected to the gated PostgreSQL billing/admin
+  APIs; ban/unban and sole-owner enforcement remain incomplete.
+- A simplified Trial request/Owner-approval credit-grant lifecycle (fixed
+  12 credits, 120-hour expiry) alongside the original eligibility-assessment
+  Trial flow; self-service commercial-plan selection removed (`POST
+  /api/plans/me/select` now always returns HTTP 410). Only Trial and Pro
+  remain selectable; Normal is defined architecturally but not reachable.
 - Explicitly gated PostgreSQL billing services/APIs for plans, Trial grants,
   credit catalog/purchases, immutable ledger/balance, first-purchase bonus,
   estimates, adjustments, and financial audit.
@@ -95,12 +103,19 @@ UI/UX plus Super Admin operational UI remain pending.
 
 ### ZIP handoff status
 
-The repository is on branch `blink-baseline` at HEAD `5f5bfc9`. The working
-tree is intentionally dirty: 50 paths are changed or untracked, including
-documentation, the PostgreSQL foundation, billing services, and live-job
-integration. Existing changes belong to the project; do not reset, restore,
-stash, or assume a clean baseline. No deployment or authority cutover has been
-performed.
+This section originally described branch `blink-baseline` at HEAD `5f5bfc9`
+with 50 changed/untracked paths (2026-07-31). That snapshot is superseded:
+the repository is currently on branch `main` at HEAD `f5473aa`
+("Fix Railway volume permissions at startup"), and `git status --porcelain`
+now reports 122 changed/untracked paths, including further undocumented
+working-tree implementation (a UI restructuring — Landing page, retired
+Dashboard/Projects/Upload/Processing pages, a new tab-based Super Admin
+console, a real Buy Credits flow — and a Trial request/Owner-approval credit
+lifecycle) captured in this 2026-08-04 documentation audit. `blink-baseline`
+still exists as a separate branch but is not the branch currently checked
+out. The working tree remains intentionally dirty; existing changes belong to
+the project — do not reset, restore, stash, or assume a clean baseline. No
+deployment or authority cutover has been performed.
 
 | Roadmap grouping | Current status |
 |---|---|
@@ -150,9 +165,10 @@ Browser
   → User configures effects
   → Start Processing queues the job
   → WorkspaceWorker
-      → extract WAV
-      → Gemini audio transcript + Burmese translation
-      → core workflow-v2 bridge
+      → core Sawaungthin workflow-v3
+          → extract WAV and detect scenes
+          → Faster-Whisper source transcript/timestamps
+          → Gemini Burmese text translation only
           → TTS
           → timeline verification
           → scene rebuild
@@ -161,7 +177,7 @@ Browser
   → History and authenticated /output download
 ```
 
-The workspace layer owns user-facing state in `workspace-jobs.json`. The older core processor remains authoritative for workflow-v2 rendering and stores its state in `saas-state.json`.
+The workspace layer owns user-facing state in `workspace-jobs.json`. The Sawaungthin-compatible core processor is authoritative for workflow-v3 media processing and stores its resumable state in `saas-state.json` plus job-scoped cache artifacts.
 
 ## File References
 
@@ -176,7 +192,7 @@ The workspace layer owns user-facing state in `workspace-jobs.json`. The older c
 
 ## Important Decisions
 
-- Workflow version 2 is the only resumable core workflow.
+- Workflow version 3 is the only resumable Sawaungthin core workflow; older hybrid checkpoints restart from source.
 - Queue concurrency is one.
 - Processing starts only after upload and an explicit user action.
 - The canonical result path is `/output/{jobId}.mp4`.
@@ -188,4 +204,4 @@ The workspace layer owns user-facing state in `workspace-jobs.json`. The older c
 
 ## Future Work
 
-The approved P2 contract is in `17_P2_FOUNDATION_ARCHITECTURE.md`; sequencing is summarized in `14_ROADMAP.md`. It preserves BYOK for Trial and Normal, introduces Blink-funded Pro, and requires PostgreSQL accounting, private screenshot storage, manual Super Admin payment review, immutable ledger entries, atomic reservation, usable-output settlement, and full system-failure compensation. Any implementation requires separate approval and must preserve workflow-v2 output behavior and the current single-voice contract.
+The approved P2 contract is in `17_P2_FOUNDATION_ARCHITECTURE.md`; sequencing is summarized in `14_ROADMAP.md`. Its design preserves BYOK for Trial and Normal, introduces Blink-funded Pro, and requires PostgreSQL accounting, private screenshot storage, manual Super Admin payment review, immutable ledger entries, atomic reservation, usable-output settlement, and full system-failure compensation. As implemented, `billingFoundation.js` currently accepts only Trial and Pro (see "Implemented" above); reconciling or formally retiring the Normal design remains open. Any implementation requires separate approval and must preserve Sawaungthin workflow-v3 output behavior and the current single-voice contract.

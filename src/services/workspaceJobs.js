@@ -40,7 +40,7 @@ export const WORKSPACE_ACTIVE_JOB_STATUSES = Object.freeze([
 ]);
 export const WORKSPACE_ACTIVE_JOB_LIMIT = 2;
 export const WORKSPACE_JOB_STAGES = Object.freeze([
-    'pending', 'queued', 'preparing', 'audio_extraction', 'gemini_transcript',
+    'pending', 'queued', 'preparing', 'audio_extraction', 'transcript_translation',
     'voice_generation', 'timeline_verification', 'scene_rebuild', 'final_export',
     'completed', 'failed', 'cancelled'
 ]);
@@ -75,8 +75,13 @@ const publicJob = job => ({
     transcriptSegmentCount: job.transcriptSegmentCount,
     transcriptionStartedAt: job.transcriptionStartedAt,
     transcriptionCompletedAt: job.transcriptionCompletedAt,
-    videoUrl: job.videoUrl,
-    audioUrl: job.audioUrl,
+    // A job past the 24-hour completed-job retention window keeps its
+    // record (so a direct link can show "Expired") but never its media
+    // links -- the underlying files are already deleted by the sweep.
+    videoUrl: job.expired ? null : job.videoUrl,
+    audioUrl: job.expired ? null : job.audioUrl,
+    expired: Boolean(job.expired),
+    expiredAt: job.expiredAt || null,
     effects: normalizeVideoEffects(job.effects),
     billing: job.billing || null,
     cancellationRequested: Boolean(job.cancellationRequested)
@@ -165,9 +170,12 @@ export const createWorkspaceJob = data => {
     return publicJob(job);
 };
 
+// Recent Jobs / History show only completed jobs that have not expired;
+// an expired job's record still exists (for direct-link "Expired" access)
+// but is intentionally excluded from these list views.
 export const listWorkspaceJobs = ownerUid =>
     [...jobs.values()]
-        .filter(job => job.ownerUid === ownerUid)
+        .filter(job => job.ownerUid === ownerUid && !job.expired)
         .sort((left, right) => right.createdAt.localeCompare(left.createdAt))
         .map(publicJob);
 
@@ -175,6 +183,7 @@ export const getExpiredCompletedWorkspaceJobs = timeLimit =>
     [...jobs.values()]
         .filter(job =>
             job.status === 'completed' &&
+            !job.expired &&
             Number.isFinite(Date.parse(job.completedAt)) &&
             Date.parse(job.completedAt) < timeLimit)
         .map(job => ({ id: job.id, ownerUid: job.ownerUid }));
@@ -447,6 +456,27 @@ export const commitWorkspaceJobDeletion = prepared => {
     }
     jobs.delete(prepared.id);
     persist();
+    return true;
+};
+
+// Same safe artifact deletion as commitWorkspaceJobDeletion (the uploaded
+// source file, any recorded audio/transcript path, and the now-empty parent
+// upload directory), but for 24-hour completed-job retention: the record
+// itself is kept (and separately marked expired), not removed.
+export const commitWorkspaceJobExpiry = prepared => {
+    const job = jobs.get(prepared.id);
+    if (!job || job.ownerUid !== prepared.ownerUid) return false;
+    for (const artifactPath of prepared.artifactPaths) {
+        assertOwnedStoragePath(artifactPath);
+    }
+    for (const artifactPath of prepared.artifactPaths) {
+        if (fs.existsSync(artifactPath)) fs.unlinkSync(artifactPath);
+    }
+    if (prepared.parent !== path.resolve(storagePaths.uploads) &&
+        fs.existsSync(prepared.parent) &&
+        fs.readdirSync(prepared.parent).length === 0) {
+        fs.rmdirSync(prepared.parent);
+    }
     return true;
 };
 

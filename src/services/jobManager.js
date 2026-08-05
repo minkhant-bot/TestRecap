@@ -161,7 +161,8 @@ export const updateJob = (id, updates) => {
 
 export const getExpiredJobs = timeLimit =>
     [...jobsStore.values()]
-        .filter(job => job.status === 'complete' && job.completed_at != null && job.completed_at < timeLimit)
+        .filter(job => job.status === 'complete' && !job.expired &&
+            job.completed_at != null && job.completed_at < timeLimit)
         .map(job => ({ id: job.id }));
 
 export const deleteJob = id => {

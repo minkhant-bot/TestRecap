@@ -39,22 +39,12 @@ const validatePrivateFile = (target, root, label) => {
     return resolved;
 };
 
-const validateTranscript = target => {
-    const transcriptPath = validatePrivateFile(target, storagePaths.uploads, 'Transcript');
-    try {
-        const parsed = JSON.parse(fs.readFileSync(transcriptPath, 'utf8'));
-        if (!Array.isArray(parsed?.segments) || parsed.segments.length === 0) throw new Error();
-    } catch {
-        fail('Transcript checkpoint is corrupt.', 'RETRY_CHECKPOINT_CORRUPT');
-    }
-};
-
 const validateCoreCheckpoint = (workspaceJob, coreJob) => {
     if (coreJob.ownerUid && coreJob.ownerUid !== workspaceJob.ownerUid) {
         fail('Core checkpoint ownership does not match.', 'JOB_NOT_RECOVERABLE');
     }
     if (isLegacyJob(coreJob) || coreJob.workflowVersion !== WORKFLOW_VERSION) {
-        fail('This project uses an incompatible workflow checkpoint.', 'RETRY_CHECKPOINT_INCOMPATIBLE', 409);
+        return { resumeStage: 'upload', resumeProgress: 5, restartIncompatiblePipeline: true };
     }
     if (!coreJob.stageId) fail('Core resume-stage metadata is missing.', 'RETRY_CHECKPOINT_MISSING');
     if (coreJob.status === 'complete') {
@@ -65,6 +55,11 @@ const validateCoreCheckpoint = (workspaceJob, coreJob) => {
             path.join(storagePaths.output, `${workspaceJob.id}.mp4`),
             storagePaths.output,
             'Final video'
+        );
+        validatePrivateFile(
+            path.join(storagePaths.output, `${workspaceJob.id}.mp3`),
+            storagePaths.output,
+            'Final audio'
         );
     }
     const statePath = path.join(storagePaths.cache, workspaceJob.id, 'state.json');
@@ -104,24 +99,12 @@ export const inspectWorkspaceRetry = workspaceJob => {
         if (workspaceJob.billing && workspaceJob.billing.billingStatus !== 'reserved') {
             fail('The previous billing reservation is no longer active.', 'RETRY_BILLING_STATE_UNAVAILABLE', 409);
         }
-        if (workspaceJob.extractionCompletedAt || workspaceJob.audioPath) {
-            validatePrivateFile(workspaceJob.audioPath, storagePaths.uploads, 'Audio');
-        }
-        if (workspaceJob.transcriptionCompletedAt || workspaceJob.transcriptPath) {
-            validateTranscript(workspaceJob.transcriptPath);
-        }
         const coreJob = getJob(workspaceJob.id);
         if (coreJob) {
             const core = validateCoreCheckpoint(workspaceJob, coreJob);
             return { recoverable: true, ...core };
         }
-        if (workspaceJob.transcriptionCompletedAt && workspaceJob.transcriptPath) {
-            return { recoverable: true, resumeStage: 'generate_tts', resumeProgress: 30 };
-        }
-        if (workspaceJob.extractionCompletedAt && workspaceJob.audioPath) {
-            return { recoverable: true, resumeStage: 'gemini_transcript', resumeProgress: 20 };
-        }
-        return { recoverable: true, resumeStage: 'audio_extraction', resumeProgress: 10 };
+        return { recoverable: true, resumeStage: 'upload', resumeProgress: 5 };
     } catch (error) {
         if (!(error instanceof WorkspaceRetryError)) throw error;
         return { recoverable: false, code: error.code, reason: error.message };

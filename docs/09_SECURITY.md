@@ -33,7 +33,7 @@ Document the current trust boundaries, protections, sensitive data, known vulner
 
 ### Planned or Placeholder
 
-- Approved P2 preserves encrypted BYOK for Trial and Normal and introduces explicitly selected Blink-funded Pro using a platform-owned Gemini credential held in secret management.
+- The approved P2 design preserves encrypted BYOK for Trial and Normal and introduces explicitly selected Blink-funded Pro using a platform-owned Gemini credential held in secret management. The currently implemented plans are Trial and Pro only; Normal remains architecturally defined but is not selectable through any current API (`POST /api/plans/me/select` always returns HTTP 410) — see `07_CREDITS_SYSTEM.md` "Plan model".
 - PostgreSQL is authoritative for Super Admin permission on the gated financial
   API. Global application-role cutover and live reservation,
   settlement/refund/release authority remain pending.

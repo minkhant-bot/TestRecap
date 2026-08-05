@@ -16,7 +16,7 @@ Define the behavior the current product actually implements, while separating pl
 - Upload creates a pending project; processing does not start automatically.
 - The user can preview and configure Color Grading, Flip Video, Blur masks, and burned subtitles before starting.
 - Start Processing submits the complete effects object and queues the same job.
-- The UI reports seven user-facing workflow stages: Upload, Audio Extraction, Gemini Transcript, Voice Generation, Timeline Verification, Scene Rebuild, and Final Export.
+- The UI reports seven user-facing workflow stages: Upload, Audio & Scene Analysis, Whisper + Burmese, Voice Generation, Timeline Verification, Scene Rebuild, and Final Export.
 - Completed recaps appear in History and can be previewed or downloaded.
 - Pending, queued, processing, completed, failed, and cancelled states are displayed.
 - A user can explicitly cancel an active workspace job and delete a non-active workspace record together with its linked core record, credentials, source, cache, and canonical outputs.
@@ -81,8 +81,8 @@ Define the behavior the current product actually implements, while separating pl
 ## File References
 
 - New recap journey: `src/ui/pages/NewRecapPage.tsx`
-- Upload behavior: `src/ui/pages/UploadPage.tsx`
-- Processing presentation: `src/ui/pages/ProcessingPage.tsx`
+- Upload behavior: `src/ui/workspace/useUploadPanel.ts` (extracted from the former `UploadPage.tsx`, now deleted; consumed by `NewRecapPage.tsx`)
+- Processing presentation: `src/ui/workspace/useJobStatus.ts` (extracted from the former `ProcessingPage.tsx`, now deleted; consumed by `NewRecapPage.tsx`)
 - Effects editor: `src/ui/workspace/VideoEffectsEditor.tsx`
 - History: `src/ui/pages/HistoryPage.tsx`
 - Product types: `src/ui/workspace/types.ts`
@@ -90,13 +90,13 @@ Define the behavior the current product actually implements, while separating pl
 
 ## Important Decisions
 
-- The normal user’s home is New Recap; super-admin currently lands on Dashboard.
+- The normal user’s home is New Recap; super-admin currently lands on the `/admin` Super Admin console (`src/ui/pages/SuperAdminPage.tsx`). The former dedicated `/dashboard` and `/projects` pages were removed; those routes now redirect to `/admin` or `/new-recap` respectively so old links still resolve.
 - Upload and processing are separate actions.
 - Effects become read-only after the job leaves `pending`.
 - Processing is FIFO and single-concurrency.
-- User-facing stages intentionally aggregate many internal workflow-v2 stages.
-- Gemini BYOK is currently required. Under approved P2 rules, Trial and Normal remain BYOK while Pro is explicitly Blink-funded; there is no automatic fallback between modes.
-- Trial, Normal, and Pro are commercial plans, not authorization roles.
+- User-facing stages intentionally aggregate the more detailed Sawaungthin workflow-v3 stages.
+- Gemini BYOK is currently required. Under the approved P2 design, Trial and Normal remain BYOK while Pro is explicitly Blink-funded; there is no automatic fallback between modes. The currently implemented `billingFoundation.js` only accepts and configures Trial and Pro — Normal is defined in the architecture and the `plans.code` database constraint but is not selectable through any current API (`POST /api/plans/me/select` always returns HTTP 410). See `07_CREDITS_SYSTEM.md` "Plan model".
+- Trial and Pro are the currently implemented commercial plans (Normal remains architecturally defined but unreachable); none are authorization roles.
 - Future user-facing charges are integer credits calculated from authoritative source duration in 30-second blocks using versioned plan rates.
 - Do not claim 15-minute support is verified until a real near-15-minute E2E passes.
 

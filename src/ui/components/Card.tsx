@@ -1,24 +1,19 @@
 import type { HTMLAttributes, ReactNode } from 'react';
 
-export interface CardProps extends HTMLAttributes<HTMLElement> {
-  title?: string;
-  description?: string;
-  action?: ReactNode;
+export interface CardProps extends Omit<HTMLAttributes<HTMLElement>, 'title'> {
+  title?: ReactNode;
+  description?: ReactNode;
 }
 
-export function Card({ title, description, action, children, className = '', ...props }: CardProps) {
+// Reference (BlinkAutomationFull_v2.jsx) ".panel" is a single flat padded
+// box with no header/content split — a heading, if any, is just a plain
+// <h3> at the top of the box.
+export function Card({ title, description, children, className = '', ...props }: CardProps) {
   return (
-    <section className={`ds-card ${className}`} {...props}>
-      {(title || description || action) && (
-        <header className="ds-card__header">
-          <div>
-            {title && <h2>{title}</h2>}
-            {description && <p>{description}</p>}
-          </div>
-          {action}
-        </header>
-      )}
-      <div className="ds-card__content">{children}</div>
+    <section className={`panel ${className}`} {...props}>
+      {title && <h3 style={{ marginTop: 0 }}>{title}</h3>}
+      {description && <p className="muted" style={{ marginTop: title ? -8 : 0 }}>{description}</p>}
+      {children}
     </section>
   );
 }

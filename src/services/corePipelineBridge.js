@@ -1,67 +1,23 @@
 import fs from 'node:fs';
 import path from 'node:path';
-import { detectScenes, getDuration } from '../ffmpeg/index.js';
-import { fingerprintFile } from '../ai/index.js';
 import { WORKFLOW_STAGE, WORKFLOW_VERSION } from '../domain/workflow.js';
 import { ensureStoragePaths, getStoragePaths } from '../config/runtime.js';
-import { createJob, getJob, updateJob } from './jobManager.js';
+import {
+    createJob,
+    deleteJob,
+    getJob,
+    getJobKeys,
+    setJobKeys,
+    updateJob
+} from './jobManager.js';
 import { processRecapPipeline } from '../workers/processor.js';
-import { throwIfAborted } from './cancellation.js';
 
 const storagePaths = ensureStoragePaths(getStoragePaths());
 
-const readWorkspaceTranscript = transcriptPath => {
-    const parsed = JSON.parse(fs.readFileSync(transcriptPath, 'utf8'));
-    if (!Array.isArray(parsed?.segments) || parsed.segments.length === 0) {
-        throw new Error('The validated Gemini transcript artifact is missing segments.');
-    }
-    return parsed.segments;
-};
-
-export const prepareCorePipelineState = async ({
-    job,
-    audioPath,
-    transcriptPath,
-    detect = detectScenes,
-    duration = getDuration,
-    fingerprint = fingerprintFile,
-    signal
-}) => {
-    throwIfAborted(signal);
-    const segments = readWorkspaceTranscript(transcriptPath);
-    const sourceFingerprint = fingerprint(audioPath);
-    const sourceVideoFingerprint = fingerprint(job.storedPath);
-    const originalVideoDuration = await duration(job.storedPath);
-    throwIfAborted(signal);
-    const cacheDir = path.join(storagePaths.cache, job.id);
-    fs.mkdirSync(cacheDir, { recursive: true });
-    const scenes = await detect(job.storedPath, path.join(cacheDir, 'scenes.json'), {
-        sourceFingerprint: sourceVideoFingerprint,
-        signal
-    });
-    throwIfAborted(signal);
-    const state = {
-        workflowVersion: WORKFLOW_VERSION,
-        stageId: WORKFLOW_STAGE.GENERATE_TTS,
-        stageOutcome: null,
-        sourceVideoFingerprint,
-        sourceFingerprint,
-        originalVideoDuration,
-        audioDuration: await duration(audioPath),
-        scenes,
-        originalTranscript: segments.map(segment => ({
-            timestamp: [segment.start_time, segment.end_time],
-            text: segment.original_text
-        })),
-        translatedTranscript: segments.map(segment => ({
-            timestamp: [segment.start_time, segment.end_time],
-            text: segment.burmese_text,
-            kind: segment.type,
-            speaker: segment.speaker || null
-        }))
-    };
-    fs.writeFileSync(path.join(cacheDir, 'state.json'), JSON.stringify(state, null, 2));
-    return state;
+const regularNonemptyFile = target => {
+    if (!fs.existsSync(target)) return false;
+    const stat = fs.lstatSync(target);
+    return !stat.isSymbolicLink() && stat.isFile() && stat.size > 0;
 };
 
 const mirrorCoreJob = (jobId, onProgress) => {
@@ -70,25 +26,47 @@ const mirrorCoreJob = (jobId, onProgress) => {
 };
 
 export const assertCompletedCoreOutput = (jobId, result, outputDirectory = storagePaths.output) => {
-    const expectedUrl = `/output/${jobId}.mp4`;
-    if (result?.videoUrl !== expectedUrl) {
-        throw new Error('The completed core job has no authoritative final video URL.');
+    const expectedVideoUrl = `/output/${jobId}.mp4`;
+    const expectedAudioUrl = `/output/${jobId}.mp3`;
+    if (result?.videoUrl !== expectedVideoUrl || result?.audioUrl !== expectedAudioUrl) {
+        throw new Error('The completed core job has no authoritative MP4 and MP3 URLs.');
     }
-    const outputPath = path.join(outputDirectory, `${jobId}.mp4`);
-    if (!fs.existsSync(outputPath)) {
-        throw new Error('The completed core job has no final MP4 artifact.');
-    }
-    const stat = fs.lstatSync(outputPath);
-    if (stat.isSymbolicLink() || !stat.isFile() || stat.size === 0) {
+    const mp4Path = path.join(outputDirectory, `${jobId}.mp4`);
+    const mp3Path = path.join(outputDirectory, `${jobId}.mp3`);
+    if (!regularNonemptyFile(mp4Path)) {
         throw new Error('The completed core job final MP4 artifact is invalid.');
+    }
+    if (!regularNonemptyFile(mp3Path)) {
+        throw new Error('The completed core job final MP3 artifact is invalid.');
     }
     return result;
 };
 
+export const prepareCorePipelineState = ({ job }) => ({
+    workflowVersion: WORKFLOW_VERSION,
+    stageId: WORKFLOW_STAGE.UPLOAD,
+    ownerUid: job.ownerUid,
+    videoPath: job.storedPath
+});
+
+const replaceIncompatibleCoreJob = job => {
+    const existing = getJob(job.id);
+    if (!existing || existing.workflowVersion === WORKFLOW_VERSION) return existing;
+    const credentials = getJobKeys(job.id);
+    deleteJob(job.id);
+    const cacheDir = path.join(storagePaths.cache, job.id);
+    if (fs.existsSync(cacheDir)) fs.rmSync(cacheDir, { recursive: true, force: true });
+    const created = createJob(job.id, {
+        ownerUid: job.ownerUid,
+        videoPath: job.storedPath,
+        originalFilename: job.filename
+    });
+    if (credentials.geminiApiKey) setJobKeys(job.id, credentials);
+    return created;
+};
+
 export const continueWithCorePipeline = async ({
     job,
-    audioPath,
-    transcriptPath,
     signal,
     isCancellationRequested = () => false,
     onProgress,
@@ -97,40 +75,25 @@ export const continueWithCorePipeline = async ({
     if (signal?.aborted) {
         throw Object.assign(new Error('Processing cancelled.'), { name: 'AbortError' });
     }
-    const existing = getJob(job.id);
+    let existing = replaceIncompatibleCoreJob(job);
     if (existing?.status === 'complete') {
         return assertCompletedCoreOutput(job.id, existing.result);
     }
     if (!existing) {
-        await prepareCorePipelineState({ job, audioPath, transcriptPath, signal });
-        createJob(job.id, {
+        existing = createJob(job.id, {
             ownerUid: job.ownerUid,
             videoPath: job.storedPath,
-            audioPath,
             originalFilename: job.filename
         });
-        updateJob(job.id, {
-            ownerUid: job.ownerUid,
-            videoPath: job.storedPath,
-            audioPath,
-            status: 'processing',
-            stageId: WORKFLOW_STAGE.GENERATE_TTS,
-            stageOutcome: null,
-            progress: 35,
-            error: null
-        });
-    } else {
-        // A workspace retry has already validated the persisted workflow-v2 state.
-        // Preserve its exact stageId (especially translate_burmese) so the existing
-        // pipeline checkpoint logic skips all earlier completed stages.
-        updateJob(job.id, {
-            ownerUid: job.ownerUid,
-            videoPath: job.storedPath,
-            audioPath,
-            status: 'processing',
-            error: null
-        });
     }
+    updateJob(job.id, {
+        ownerUid: job.ownerUid,
+        videoPath: job.storedPath,
+        audioPath: null,
+        workflowVersion: WORKFLOW_VERSION,
+        status: 'processing',
+        error: null
+    });
     mirrorCoreJob(job.id, onProgress);
     const monitor = setInterval(() => mirrorCoreJob(job.id, onProgress), 200);
     monitor.unref?.();

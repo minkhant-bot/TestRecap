@@ -7,6 +7,9 @@ const schema = fs.readFileSync(`${migrationsDirectory}/0001_p2_foundation.sql`, 
 const packageMigration = fs.readFileSync(
   `${migrationsDirectory}/0002_credit_package_management.sql`, 'utf8',
 );
+const trialLifecycleMigration = fs.readFileSync(
+  `${migrationsDirectory}/0003_trial_lifecycle.sql`, 'utf8',
+);
 
 test('schema separates roles from commercial plans', () => {
   assert.match(schema, /role IN \('user', 'admin', 'super_admin'\)/);
@@ -32,6 +35,17 @@ test('bootstrap Super Admin and retained financial history have database protect
   assert.match(schema, /CREATE TRIGGER user_roles_protect_bootstrap/);
   assert.match(schema, /CREATE TRIGGER credit_purchase_requests_no_delete/);
   assert.match(schema, /CREATE TRIGGER credit_reservations_no_delete/);
+});
+
+test('trial lifecycle migration adds a request/approve flow and expiry without narrowing existing constraints', () => {
+  assert.match(trialLifecycleMigration, /CREATE TABLE trial_requests/);
+  assert.match(trialLifecycleMigration, /status TEXT NOT NULL CHECK \(status IN \('pending', 'approved'\)\)/);
+  assert.match(trialLifecycleMigration, /ALTER COLUMN assessment_id DROP NOT NULL/);
+  assert.match(trialLifecycleMigration, /ADD COLUMN expires_at TIMESTAMPTZ/);
+  assert.match(trialLifecycleMigration, /ADD COLUMN expired_at TIMESTAMPTZ/);
+  assert.match(trialLifecycleMigration, /CREATE TRIGGER trial_requests_no_delete/);
+  // Additive-only: no existing table's CHECK constraints are dropped/redefined.
+  assert.doesNotMatch(trialLifecycleMigration, /DROP CONSTRAINT/);
 });
 
 test('credit packages retain historical references and support bonus, note, and archival', () => {

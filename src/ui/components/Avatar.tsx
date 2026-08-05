@@ -15,9 +15,9 @@ function initials(name: string) {
 
 export function Avatar({ name, src, size = 'md' }: AvatarProps) {
   return (
-    <span className={`ds-avatar ds-avatar--${size}`} title={name}>
+    <span className={`avatar avatar--${size}`} title={name}>
       {src ? <img src={src} alt="" /> : <span aria-hidden="true">{initials(name)}</span>}
-      <span className="ds-sr-only">{name}</span>
+      <span className="sr-only">{name}</span>
     </span>
   );
 }

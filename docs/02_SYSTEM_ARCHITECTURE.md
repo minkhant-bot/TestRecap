@@ -41,12 +41,23 @@ React SPA
   └── /output/* ──────── Authenticated filesystem delivery
 
 WorkspaceWorker
-  ├── audioExtraction
-  ├── geminiAudioTranscript
   ├── corePipelineBridge
-  │     └── processRecapPipeline (workflow-v2)
-  └── videoEffects
+  │     └── processRecapPipeline (Sawaungthin workflow-v3)
+  │           ├── Faster-Whisper timestamp authority
+  │           ├── Gemini Burmese translation only
+  │           └── TTS/timeline/rebuild/MP4+MP3 export
+  ├── videoEffects
+  └── liveJobBilling (only when P2_LIVE_JOB_BILLING_ENABLED)
+        lease acquire/heartbeat/release, paid-provider-start marker,
+        settle/release/mark-review-required on completion/cancel/failure
+```
 
+When the separately gated live-job billing integration is active, each
+`WorkspaceWorker` tick interleaves PostgreSQL worker-lease and
+reserve/settle/release calls around pipeline execution; when it is inactive
+(the default), the worker runs exactly as shown without that dependency.
+
+```text
 Persistent DATA_DIR
   ├── admission-state.json
   ├── workspace-jobs.json
@@ -89,7 +100,7 @@ Persistent DATA_DIR
 
 - One process and one replica are assumed.
 - The workspace job ID is reused as the core job ID.
-- Core workflow-v2 is preserved rather than reimplemented.
+- The accepted Sawaungthin ZIP pipeline is the authoritative workflow-v3 media engine.
 - Filesystem paths are rooted beneath a configured storage root.
 - JSON writes generally use temporary-file plus rename semantics.
 - Admission state is durable and single-writer; policy is user-scoped and independent of billing.

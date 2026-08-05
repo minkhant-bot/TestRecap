@@ -41,7 +41,7 @@ const env = {
   GEMINI_API_KEY: 'integration-platform-key',
 };
 const adminIdentity = {
-  uid: 'billing-admin', email: 'admin@example.test', displayName: 'Billing Admin',
+  uid: 'billing-admin', email: 'admin@example.test', displayName: 'Billing Admin', role: 'super_admin',
 };
 const userIdentity = {
   uid: 'billing-user', email: 'user@example.test', displayName: 'Billing User',
@@ -147,41 +147,15 @@ integration('P2 billing services preserve atomic, idempotent, one-time-credit in
       }, { env, deps, ...headers('policy-trial-overlap') }),
       error => error.code === 'PLAN_POLICY_OVERLAP',
     );
-    for (const [code, name] of [['normal', 'Normal'], ['pro', 'Pro']]) {
-      await configurePlan(adminIdentity, {
-        code, name, description: '', active: true, displayOrder: code === 'normal' ? 2 : 3,
-      }, { env, deps, ...headers(`plan-${code}`) });
-    }
-    await createPlanPolicy(adminIdentity, 'normal', {
-      version: 1,
-      creditsPerBlock: 3,
-      trialAllowanceCredits: 0,
-      billingMode: 'byok',
-      active: true,
-      effectiveFrom: '2026-01-01T00:00:00.000Z',
-      entitlements: [
-        { key: 'blur', enabled: false },
-        { key: 'flip', enabled: false },
-        { key: 'byok_mode', enabled: true },
-        { key: 'blink_funded_mode', enabled: false },
-      ],
-    }, { env, deps, ...headers('policy-normal') });
+    // Rule #4 (frozen): Normal plan removed entirely — only Trial and Pro exist.
+    await configurePlan(adminIdentity, {
+      code: 'pro', name: 'Pro', description: '', active: true, displayOrder: 2,
+    }, { env, deps, ...headers('plan-pro') });
     await assert.rejects(
-      createPlanPolicy(adminIdentity, 'pro', {
-        version: 1,
-        creditsPerBlock: 3,
-        trialAllowanceCredits: 0,
-        billingMode: 'blink_funded',
-        active: true,
-        effectiveFrom: '2026-01-01T00:00:00.000Z',
-        entitlements: [
-          { key: 'blur', enabled: true },
-          { key: 'flip', enabled: true },
-          { key: 'byok_mode', enabled: false },
-          { key: 'blink_funded_mode', enabled: true },
-        ],
-      }, { env, deps, ...headers('policy-pro-invalid-rate') }),
-      error => error.code === 'INVALID_PLAN_RATE',
+      configurePlan(adminIdentity, {
+        code: 'normal', name: 'Normal', description: '', active: true, displayOrder: 3,
+      }, { env, deps, ...headers('plan-normal-removed') }),
+      error => error.code === 'INVALID_INPUT',
     );
     await createPlanPolicy(adminIdentity, 'pro', {
       version: 1,
@@ -359,6 +333,57 @@ integration('P2 billing services preserve atomic, idempotent, one-time-credit in
     const ledgerTotal = await ledger.sumPostedCredits(user.id, { client: pool });
     assert.equal(projection.postedBalance, ledgerTotal);
     assert.equal(ledgerTotal, 31n);
+
+    // Package-level bonus_credits (Super Admin package management) must
+    // actually be granted on purchase approval as one combined total, not
+    // just configured and silently dropped. Uses a separate identity so this
+    // never disturbs the ledgerTotal=31n assertion above.
+    await linkPackageBank(adminIdentity, {
+      creditPlanId: managedPackageId,
+      bankAccountId: bankResult.body.bank.id,
+      active: true,
+    }, { env, deps, ...headers('managed-package-bank-link') });
+    const bonusBuyerIdentity = {
+      uid: 'billing-bonus-buyer', email: 'bonus-buyer@example.test', displayName: 'Bonus Buyer',
+    };
+    const bonusBuyer = await users.ensureUser({
+      firebaseUid: bonusBuyerIdentity.uid,
+      email: bonusBuyerIdentity.email,
+      displayName: bonusBuyerIdentity.displayName,
+    }, { client: pool });
+    const bonusScreenshot = await createScreenshotIntent(bonusBuyerIdentity, {
+      originalFilename: 'bonus-payment.png', mimeType: 'image/png', sizeBytes: 100,
+      sha256: 'b'.repeat(64),
+    }, { env, deps, ...headers('bonus-screenshot') });
+    await completeScreenshotUpload(bonusBuyerIdentity, bonusScreenshot.body.id, {
+      mimeType: 'image/png', sizeBytes: 100, sha256: 'b'.repeat(64),
+    }, { env, deps, ...headers('bonus-screenshot-complete') });
+    // managedPackageId is currently active with creditAmount=27, bonusCredits=6
+    // (edited above): 27 base + 6 bonus must grant exactly 33 credits.
+    const bonusPurchase = await submitPurchase(bonusBuyerIdentity, {
+      creditPlanId: managedPackageId,
+      bankAccountId: bankResult.body.bank.id,
+      screenshotFileId: bonusScreenshot.body.id,
+    }, { env, deps, ...headers('bonus-submit') });
+    const bonusApproved = await reviewPurchase(
+      adminIdentity, bonusPurchase.body.purchase.id, { decision: 'approved' },
+      { env, deps, ...headers('bonus-approve') },
+    );
+    assert.equal(bonusApproved.body.purchase.credits, '27');
+    assert.equal(bonusApproved.body.purchase.packageBonusCredits, '6');
+    assert.equal(bonusApproved.body.purchaseLedger.amount, '33');
+    const bonusBalance = await balances.findBalanceAccount(bonusBuyer.id, { client: pool });
+    assert.equal(bonusBalance.postedBalance, 33n);
+    // Repeated approval of the same purchase must never double-grant credits.
+    await assert.rejects(
+      reviewPurchase(adminIdentity, bonusPurchase.body.purchase.id, { decision: 'approved' }, {
+        env, deps, ...headers('bonus-approve-again'),
+      }),
+      error => error.code === 'INVALID_PURCHASE_STATE',
+    );
+    const bonusBalanceAfterRetry = await balances.findBalanceAccount(bonusBuyer.id, { client: pool });
+    assert.equal(bonusBalanceAfterRetry.postedBalance, 33n);
+
     await archiveCreditPackage(adminIdentity, managedPackageId, { confirmed: true }, {
       env, deps, ...headers('managed-package-archive'),
     });

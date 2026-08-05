@@ -13,6 +13,7 @@ import { ensureStoragePaths, getServerBinding, getStoragePaths } from './src/con
 import { formatFasterWhisperStartupConfig, getFasterWhisperRuntimeConfig } from './src/ai/fasterWhisper.js';
 import { canAccessJob, requireAuth } from './src/middleware/auth.js';
 import { workspaceWorker } from './src/services/workspaceWorker.js';
+import { reconcileStrandedLiveJobs } from './src/services/liveJobRecovery.js';
 import { admissionService } from './src/services/admissionControl.js';
 import { listWorkspaceJobsForAdmission } from './src/services/workspaceJobs.js';
 import { getDatabaseConfiguration, getRedactedDatabaseConfiguration } from './src/config/database.js';
@@ -53,6 +54,13 @@ app.get('/output/:filename', requireAuth, (req, res) => {
   const job = getJob(match[1]);
   if (!canAccessJob(req.user, job) || job.status !== 'complete') {
     return res.status(job ? 403 : 404).end();
+  }
+  // 24-hour completed-job retention: the record is kept (status stays
+  // 'complete') but the file is already gone once expired, so this must be
+  // checked and reported distinctly rather than attempting sendFile and
+  // surfacing a raw filesystem error.
+  if (job.expired) {
+    return res.status(410).json({ error: 'This recap has expired.', code: 'JOB_EXPIRED' });
   }
   return res.sendFile(path.join(storagePaths.output, req.params.filename));
 });
@@ -116,6 +124,23 @@ async function startServer() {
       ]);
       admissionService.prune();
       workspaceWorker.start();
+      // Reconciles any live-billing job left stranded (reserved/settled)
+      // by a prior crash. No-ops when P2_LIVE_JOB_BILLING_ENABLED is off
+      // (the default) or when PostgreSQL is unavailable/optional; never
+      // blocks startup or the workspace worker.
+      void reconcileStrandedLiveJobs()
+        .then(result => {
+          if (result.enabled && (result.reconciled > 0 || result.total > 0)) {
+            console.info(JSON.stringify({
+              event: 'billing.startup_reconciliation.complete',
+              ...result,
+            }));
+          }
+        })
+        .catch(error => console.error(JSON.stringify({
+          event: 'billing.startup_reconciliation.failed',
+          message: error?.message || String(error),
+        })));
     } catch (error) {
       console.error(JSON.stringify({
         event: 'workspace.background_start.failed',

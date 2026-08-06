@@ -182,6 +182,16 @@ test('concurrent duplicate reservation is idempotent and cannot overspend', asyn
   assert.equal(harness.state.balance.reservedBalance, 6n);
 });
 
+test('a missing Idempotency-Key is still rejected before any reservation is made -- backend enforcement is unchanged', async () => {
+  const harness = createHarness();
+  await assert.rejects(
+    reserveLiveJob(request({ idempotencyKey: '' }), { env, repositories: harness.repositories }),
+    error => error.code === 'IDEMPOTENCY_KEY_REQUIRED',
+  );
+  assert.equal(harness.state.job, null);
+  assert.equal(harness.state.balance.reservedBalance, 0n);
+});
+
 test('plan and explicit mode cannot be switched automatically', async () => {
   const harness = createHarness();
   await assert.rejects(

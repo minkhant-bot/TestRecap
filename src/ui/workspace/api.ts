@@ -60,14 +60,14 @@ export const retryWorkspaceJob = async (jobId: string, idempotencyKey: string) =
     },
   ));
 
-export const queueWorkspaceJob = async (jobId: string, effects?: VideoEffects) => {
+export const queueWorkspaceJob = async (jobId: string, idempotencyKey: string, effects?: VideoEffects) => {
   const body = { effects };
   const url = `/api/workspace/jobs/${encodeURIComponent(jobId)}/queue`;
   try {
     return parseResponse<WorkspaceJobStatus>(await fetch(url, {
       method: 'POST',
       credentials: 'include',
-      headers: { 'Content-Type': 'application/json' },
+      headers: { 'Content-Type': 'application/json', 'Idempotency-Key': idempotencyKey },
       body: JSON.stringify(body),
     }));
   } catch (error) {

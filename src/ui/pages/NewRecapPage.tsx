@@ -174,6 +174,11 @@ export function NewRecapPage() {
   const [insufficientCredits, setInsufficientCredits] = useState(false);
   const [effects, setEffects] = useState<VideoEffects>(DEFAULT_VIDEO_EFFECTS);
   const latestEffectsRef = useRef<VideoEffects>(DEFAULT_VIDEO_EFFECTS);
+  // Stable per-job Idempotency-Key: reused across automatic/manual retries
+  // of the same Start Recap attempt (including the credit-reservation gate
+  // inside the queue endpoint), regenerated only when the user starts a
+  // genuinely new job (a different jobId).
+  const queueKeyRef = useRef<{ jobId: string; key: string } | null>(null);
 
   const activeJobCount = jobs.filter(job => ACTIVE_STATUSES.has(job.status)).length;
   const activeLimitReached = activeJobCount >= 2;
@@ -193,8 +198,11 @@ export function NewRecapPage() {
     setStarting(true);
     setStartError(null);
     setInsufficientCredits(false);
+    const current = queueKeyRef.current;
+    const key = current?.jobId === job.id ? current.key : crypto.randomUUID();
+    queueKeyRef.current = { jobId: job.id, key };
     try {
-      await queueWorkspaceJob(job.id, latestEffectsRef.current);
+      await queueWorkspaceJob(job.id, key, latestEffectsRef.current);
       await refresh();
     } catch (requestError) {
       if (requestError instanceof WorkspaceApiError && requestError.code === 'INSUFFICIENT_CREDITS') {

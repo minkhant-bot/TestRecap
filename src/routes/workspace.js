@@ -320,7 +320,13 @@ export const createWorkspaceRouter = ({
                     idempotencyKey: req.headers['idempotency-key'],
                     effects: configured.effects
                 });
-                reserved = true;
+                // Only a reservation THIS request actually created needs
+                // compensating on a later failure below. A replayed
+                // reservation (a duplicate submission reusing the same
+                // attempt's key) belongs to an earlier, already-succeeded
+                // request -- releasing it here would wrongly cancel a
+                // legitimately queued/processing job's credits.
+                reserved = !result.replayed;
                 updateWorkspaceJobBilling(internal.id, req.user.uid, result.snapshot);
             }
             const job = admission.withProcessingAdmission(

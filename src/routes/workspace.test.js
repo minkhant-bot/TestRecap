@@ -324,6 +324,89 @@ test('queueing under live billing never demands a BYOK key, even though the clie
     }
 });
 
+test('a missing Idempotency-Key still returns the existing validation error, and a duplicate submission with the reused key creates only one reservation', async () => {
+    authenticatedUser = { ...owner, uid: `live-duplicate-${randomUUID()}` };
+    const reservedKeysByJob = new Map();
+    let reservationCount = 0;
+    let releaseCount = 0;
+    const liveApp = express();
+    liveApp.use(express.json());
+    liveApp.use('/api/workspace', requireAuth, createWorkspaceRouter({
+        verifyKey: async () => ({ valid: true }),
+        liveBillingEnabled: () => true,
+        readSourceDuration: async () => 12,
+        // Mirrors reserveLiveJob's real idempotency contract (see
+        // liveJobBilling.js): the same jobId+key pair replays the existing
+        // reservation instead of creating a new one; a missing key is
+        // rejected before any reservation is made.
+        reserveBilling: async ({ jobId, idempotencyKey }) => {
+            const key = String(idempotencyKey || '').trim();
+            if (!key) {
+                const error = new Error('Idempotency-Key is required.');
+                error.name = 'BillingError';
+                error.code = 'IDEMPOTENCY_KEY_REQUIRED';
+                error.status = 400;
+                throw error;
+            }
+            const existingKey = reservedKeysByJob.get(jobId);
+            if (existingKey === key) {
+                return { snapshot: { billingStatus: 'reserved' }, replayed: true };
+            }
+            reservationCount += 1;
+            reservedKeysByJob.set(jobId, key);
+            return { snapshot: { billingStatus: 'reserved' }, replayed: false };
+        },
+        releaseBilling: async () => { releaseCount += 1; return { billingStatus: 'released' }; }
+    }));
+    const liveServer = await new Promise(resolve => {
+        const listener = liveApp.listen(0, '127.0.0.1', () => resolve(listener));
+    });
+    const liveUrl = `http://127.0.0.1:${liveServer.address().port}/api/workspace`;
+    try {
+        const body = new FormData();
+        body.append('video', new Blob([Buffer.alloc(512)], { type: 'video/mp4' }), 'duplicate.mp4');
+        const uploaded = await fetch(`${liveUrl}/jobs`, { method: 'POST', headers: authenticated, body });
+        assert.equal(uploaded.status, 201);
+        const job = await uploaded.json();
+
+        const missingKey = await fetch(`${liveUrl}/jobs/${job.id}/queue`, {
+            method: 'POST',
+            headers: { ...authenticated, 'Content-Type': 'application/json' },
+            body: JSON.stringify({ effects: {} })
+        });
+        assert.equal(missingKey.status, 400);
+        assert.equal((await missingKey.json()).code, 'IDEMPOTENCY_KEY_REQUIRED');
+        assert.equal(reservationCount, 0);
+
+        const first = await fetch(`${liveUrl}/jobs/${job.id}/queue`, {
+            method: 'POST',
+            headers: { ...authenticated, 'Content-Type': 'application/json', 'Idempotency-Key': 'attempt-key-1' },
+            body: JSON.stringify({ effects: {} })
+        });
+        assert.equal(first.status, 202);
+        assert.equal(reservationCount, 1);
+
+        // A duplicate submission reusing the same attempt's key (as the
+        // frontend now does on a retried Start Recap click) must not create
+        // a second reservation, and must not release the first, valid one
+        // just because the job is already queued.
+        const duplicate = await fetch(`${liveUrl}/jobs/${job.id}/queue`, {
+            method: 'POST',
+            headers: { ...authenticated, 'Content-Type': 'application/json', 'Idempotency-Key': 'attempt-key-1' },
+            body: JSON.stringify({ effects: {} })
+        });
+        assert.equal(duplicate.status, 409);
+        assert.equal(reservationCount, 1);
+        assert.equal(releaseCount, 0);
+
+        await fetch(`${liveUrl}/jobs/${job.id}/cancel`, { method: 'POST', headers: authenticated });
+        await fetch(`${liveUrl}/jobs/${job.id}`, { method: 'DELETE', headers: authenticated });
+    } finally {
+        await new Promise(resolve => liveServer.close(resolve));
+        authenticatedUser = owner;
+    }
+});
+
 test('a missing server-managed Gemini key blocks job creation, queueing, and retry with a 503 service configuration error', async () => {
     const unconfiguredOwner = { ...owner, uid: `unconfigured-${randomUUID()}` };
     authenticatedUser = unconfiguredOwner;

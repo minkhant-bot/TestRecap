@@ -121,7 +121,7 @@ test('subtitle and blur setup happens on the uploaded (pending) job before expli
 
   assert.match(page, /job\?\.status === 'pending'/);
   assert.match(page, /VideoEffectsEditor/);
-  assert.match(page, /queueWorkspaceJob\(job\.id, latestEffectsRef\.current\)/);
+  assert.match(page, /queueWorkspaceJob\(job\.id, key, latestEffectsRef\.current\)/);
   assert.match(editor, /burnSubtitlesEnabled: false/);
   assert.match(editor, /blurEnabled: false/);
   assert.match(editor, /colorGrading: 'original'/);
@@ -179,7 +179,7 @@ test('Color Grading and Flip Video are optional effects persisted with the pendi
   assert.match(editor, /effects-editor__video--flipped/);
   assert.match(app, /\.effects-editor__video--flipped \{ transform: scaleX\(-1\); \}/);
   assert.match(editor, /effects-editor__media-controls/);
-  assert.match(page, /queueWorkspaceJob\(job\.id, latestEffectsRef\.current\)/);
+  assert.match(page, /queueWorkspaceJob\(job\.id, key, latestEffectsRef\.current\)/);
   assert.match(page, /latestEffectsRef\.current = nextEffects;[\s\S]*setEffects\(nextEffects\)/);
   assert.match(api, /const body = \{ effects \}/);
   assert.match(api, /body: JSON\.stringify\(body\)/);
@@ -317,4 +317,25 @@ test('pipeline/status labels are concise English (technical, not translated); do
   assert.match(page, /Download Video/);
   assert.match(html, /<html lang="my">/);
   assert.match(reference, /body\{font-family:"Noto Sans Myanmar","Manrope"/);
+});
+
+test('Start Recap sends a stable, per-job Idempotency-Key: reused on retry of the same attempt, regenerated only for a new job', () => {
+  const api = read('./workspace/api.ts');
+  const page = read('./pages/NewRecapPage.tsx');
+
+  // The queue API client requires and forwards a real key -- it must never
+  // fall back to a fixed/global value or omit the header.
+  assert.match(api, /export const queueWorkspaceJob = async \(jobId: string, idempotencyKey: string, effects\?: VideoEffects\)/);
+  assert.match(api, /headers: \{ 'Content-Type': 'application\/json', 'Idempotency-Key': idempotencyKey \}/);
+
+  // One key per intentional Start Recap attempt: stable across re-clicks on
+  // the same job (a retry of the same attempt after e.g. a transient
+  // failure), regenerated only when the tracked job actually changes (a
+  // genuinely new upload/job) -- the same pattern already used for the
+  // failed-job Retry button's key (retryKeyRef in useJobStatus.ts).
+  assert.match(page, /const queueKeyRef = useRef<\{ jobId: string; key: string \} \| null>\(null\);/);
+  assert.match(page, /const current = queueKeyRef\.current;/);
+  assert.match(page, /const key = current\?\.jobId === job\.id \? current\.key : crypto\.randomUUID\(\);/);
+  assert.match(page, /queueKeyRef\.current = \{ jobId: job\.id, key \};/);
+  assert.match(page, /await queueWorkspaceJob\(job\.id, key, latestEffectsRef\.current\);/);
 });

@@ -272,6 +272,58 @@ test('normal users and Owner/Super Admin both process through the server-managed
     authenticatedUser = owner;
 });
 
+test('queueing under live billing never demands a BYOK key, even though the client never sends billingMode', async () => {
+    authenticatedUser = { ...owner, uid: `live-blink-funded-${randomUUID()}` };
+    let reserveArgs = null;
+    const liveApp = express();
+    liveApp.use(express.json());
+    liveApp.use('/api/workspace', requireAuth, createWorkspaceRouter({
+        verifyKey: async () => ({ valid: true }),
+        liveBillingEnabled: () => true,
+        readSourceDuration: async () => 12,
+        reserveBilling: async args => {
+            reserveArgs = args;
+            return {
+                snapshot: {
+                    planCode: 'trial', billingMode: 'blink_funded',
+                    billingBlocks: '1', totalCredits: '1', billingStatus: 'reserved'
+                }
+            };
+        },
+        releaseBilling: async () => ({ billingStatus: 'released' })
+    }));
+    const liveServer = await new Promise(resolve => {
+        const listener = liveApp.listen(0, '127.0.0.1', () => resolve(listener));
+    });
+    const liveUrl = `http://127.0.0.1:${liveServer.address().port}/api/workspace`;
+    try {
+        const body = new FormData();
+        body.append('video', new Blob([Buffer.alloc(512)], { type: 'video/mp4' }), 'no-billing-mode.mp4');
+        const uploaded = await fetch(`${liveUrl}/jobs`, { method: 'POST', headers: authenticated, body });
+        assert.equal(uploaded.status, 201);
+        const job = await uploaded.json();
+
+        // The real frontend never sends billingMode/planCode on queue (see
+        // src/ui/workspace/api.ts's queueWorkspaceJob) -- this reproduces the
+        // exact production request shape that used to return "A verified BYOK
+        // Gemini key is required." even though no plan has ever supported BYOK
+        // since the Trial/Pro simplification.
+        const queued = await fetch(`${liveUrl}/jobs/${job.id}/queue`, {
+            method: 'POST',
+            headers: { ...authenticated, 'Content-Type': 'application/json', 'Idempotency-Key': 'no-billing-mode-1' },
+            body: JSON.stringify({ effects: {} })
+        });
+        assert.equal(queued.status, 202);
+        assert.doesNotMatch(JSON.stringify(await queued.json()), /byok|BYOK/i);
+        assert.equal(reserveArgs.requestedMode, 'blink_funded');
+        await fetch(`${liveUrl}/jobs/${job.id}/cancel`, { method: 'POST', headers: authenticated });
+        await fetch(`${liveUrl}/jobs/${job.id}`, { method: 'DELETE', headers: authenticated });
+    } finally {
+        await new Promise(resolve => liveServer.close(resolve));
+        authenticatedUser = owner;
+    }
+});
+
 test('a missing server-managed Gemini key blocks job creation, queueing, and retry with a 503 service configuration error', async () => {
     const unconfiguredOwner = { ...owner, uid: `unconfigured-${randomUUID()}` };
     authenticatedUser = unconfiguredOwner;

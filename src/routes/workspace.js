@@ -32,10 +32,6 @@ import {
     WorkspaceRetryError
 } from '../services/workspaceRetry.js';
 import { verifyGeminiApiKey } from '../services/geminiKeyVerification.js';
-// getUserGeminiApiKey remains for the dormant live-billing 'byok' plan mode
-// below (P2_LIVE_JOB_BILLING_ENABLED, currently off) -- not for any
-// user-facing personal-key management, which has been removed.
-import { getUserGeminiApiKey } from '../services/userGeminiKeys.js';
 import { checkCreditSufficiency } from '../services/billingFoundation.js';
 import { getBillingConfiguration } from '../config/billing.js';
 import {
@@ -278,50 +274,20 @@ export const createWorkspaceRouter = ({
                 effects: req.body?.effects || null
             }));
             const liveBilling = liveBillingEnabled();
-            const requestedMode = String(req.body?.billingMode || '').trim();
             const requestedPlanCode = String(req.body?.planCode || '').trim();
-            // Outside live billing (the current default), every authorized user
-            // processes through the server-managed key -- there is no personal-key
-            // fallback and a missing/invalid key is a service configuration issue,
-            // never something the user is asked to fix.
-            const geminiApiKey = liveBilling
-                ? requestedMode === 'byok'
-                    ? getUserGeminiApiKey(req.user.uid)
-                    : requestedMode === 'blink_funded'
-                        ? String(process.env.GEMINI_API_KEY || '').trim()
-                        : null
-                : resolveServerGeminiKey();
+            // Every plan (Trial and Pro) is blink_funded-only now -- there is no
+            // BYOK mode and no personal Gemini key to resolve or verify. Every
+            // authorized user, live billing or not, processes through the single
+            // server-managed key; a missing/invalid key is always a generic
+            // service configuration issue, never something the user is asked to
+            // fix.
+            const requestedMode = 'blink_funded';
+            const geminiApiKey = resolveServerGeminiKey();
             if (!geminiApiKey) {
-                if (!liveBilling) {
-                    return res.status(503).json({
-                        error: 'Recap processing is temporarily unavailable due to a service configuration issue. Please try again later.',
-                        code: 'GEMINI_KEY_NOT_CONFIGURED'
-                    });
-                }
-                const pro = requestedMode === 'blink_funded';
-                return res.status(pro ? 503 : 422).json({
-                    error: pro
-                        ? 'Blink-funded Gemini processing is unavailable.'
-                        : 'A verified BYOK Gemini key is required.',
-                    code: pro ? 'PLATFORM_PROVIDER_UNAVAILABLE' : 'BYOK_REQUIRED'
+                return res.status(503).json({
+                    error: 'Recap processing is temporarily unavailable due to a service configuration issue. Please try again later.',
+                    code: 'GEMINI_KEY_NOT_CONFIGURED'
                 });
-            }
-            if (liveBilling && requestedMode === 'byok') {
-                const verification = await verifyKey(geminiApiKey);
-                if (!verification.valid) {
-                    const status = verification.providerError?.httpStatus ||
-                        verification.providerError?.body?.error?.code;
-                    const quota = Number(status) === 429;
-                    return res.status(quota || verification.retryable ? 503 : 422).json({
-                        error: quota ? 'The BYOK Gemini quota is exhausted.'
-                            : verification.retryable
-                                ? 'The BYOK Gemini provider is temporarily unavailable.'
-                                : 'The BYOK Gemini key is invalid.',
-                        code: quota ? 'BYOK_QUOTA_EXHAUSTED'
-                            : verification.retryable ? 'BYOK_PROVIDER_UNAVAILABLE' : 'BYOK_INVALID',
-                        retryable: Boolean(verification.retryable)
-                    });
-                }
             }
             // Credit gate: outside live billing (which reserves credits itself
             // below), a user must never be able to queue a job they cannot

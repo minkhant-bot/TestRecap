@@ -13,7 +13,6 @@ import {
   trialRequestsRepository,
   usersRepository,
 } from '../db/repositories/index.js';
-import { hasUserGeminiApiKey } from './userGeminiKeys.js';
 import { getFirebaseAdminAuth, toUserProfile } from './firebaseAdmin.js';
 
 // Rule #2 (frozen): Trial is always exactly 12 credits (1 credit = 30s of
@@ -136,7 +135,6 @@ const dependencies = {
   plans: plansRepository,
   roles: rolesRepository,
   users: usersRepository,
-  hasByok: hasUserGeminiApiKey,
   trialRequests: trialRequestsRepository,
   // Firebase is the authoritative identity source; PostgreSQL's users row is
   // only ever created lazily (on someone's own first billing-touching
@@ -316,7 +314,6 @@ export const getTrialEligibility = async (identity, {
     riskReasons: assessment?.risk_reasons || [],
     alreadyGranted: Boolean(grant),
     allowanceCredits: policy?.trialAllowanceCredits ?? null,
-    byokPresent: deps.hasByok(identity.uid),
   };
 };
 
@@ -339,12 +336,11 @@ export const grantTrial = async (identity, input = {}, {
         actor.user.id, { client, forUpdate: true },
       );
       if (assessment?.decision !== 'eligible') fail('Trial is not currently eligible.', 'TRIAL_NOT_ELIGIBLE', 403);
-      if (!deps.hasByok(identity.uid)) fail('Trial requires a verified user Gemini key.', 'BYOK_REQUIRED', 422);
       const plan = await deps.plans.findPlanByCode('trial', { client });
       const policy = plan?.active
         ? await deps.plans.findEffectivePlanPolicy(plan.id, new Date(), { client })
         : null;
-      if (!policy || policy.billingMode !== 'byok' || policy.trialAllowanceCredits <= 0n) {
+      if (!policy || policy.billingMode !== 'blink_funded' || policy.trialAllowanceCredits <= 0n) {
         fail('Trial policy is unavailable.', 'TRIAL_POLICY_UNAVAILABLE', 422);
       }
       const ledger = await deps.ledger.insertLedgerEntry({
@@ -562,7 +558,6 @@ export const estimateCredits = async (identity, input, {
   const requiredCredits = blocks * policy.creditsPerBlock;
   const balance = await deps.balances.findBalanceAccount(actor.user.id);
   const reasons = [];
-  if (requestedMode === 'byok' && !deps.hasByok(identity.uid)) reasons.push('BYOK_REQUIRED');
   if (requestedMode === 'blink_funded' && planCode !== 'pro') reasons.push('PRO_REQUIRED');
   if (requestedMode === 'blink_funded' && !String(env.GEMINI_API_KEY || '').trim()) {
     reasons.push('PLATFORM_PROVIDER_UNAVAILABLE');

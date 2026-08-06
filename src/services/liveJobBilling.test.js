@@ -192,6 +192,140 @@ test('a missing Idempotency-Key is still rejected before any reservation is made
   assert.equal(harness.state.balance.reservedBalance, 0n);
 });
 
+test('an active Trial user with sufficient credits starts successfully -- the server derives the plan from the assignment, no planCode sent', async () => {
+  const harness = createHarness({ planCode: 'trial', mode: 'blink_funded', balance: 12n });
+  harness.repositories.billing = { findTrialGrant: async () => null };
+  const result = await reserveLiveJob(
+    request({ requestedPlanCode: '', requestedMode: 'blink_funded', sourceDurationSeconds: 30 }),
+    { env, repositories: harness.repositories },
+  );
+  assert.equal(result.replayed, false);
+  assert.equal(result.snapshot.planCode, 'trial');
+  assert.equal(result.snapshot.totalCredits, '3');
+  assert.equal(harness.state.balance.reservedBalance, 3n);
+});
+
+test('an active Pro user starts successfully using their own assignment -- no planCode sent', async () => {
+  const harness = createHarness({ planCode: 'pro', mode: 'blink_funded', balance: 12n });
+  const result = await reserveLiveJob(
+    request({ requestedPlanCode: '', requestedMode: 'blink_funded', sourceDurationSeconds: 30 }),
+    { env, repositories: harness.repositories },
+  );
+  assert.equal(result.replayed, false);
+  assert.equal(result.snapshot.planCode, 'pro');
+  assert.equal(result.snapshot.totalCredits, '3');
+  assert.equal(harness.state.balance.reservedBalance, 3n);
+});
+
+test('a stale or spoofed client-supplied plan cannot override the authoritative server assignment -- rejected as a genuine mismatch, no reservation made', async () => {
+  const harness = createHarness({ planCode: 'pro', mode: 'blink_funded', balance: 12n });
+  await assert.rejects(
+    reserveLiveJob(
+      request({ requestedPlanCode: 'trial', requestedMode: 'blink_funded' }),
+      { env, repositories: harness.repositories },
+    ),
+    error => error.code === 'PLAN_NOT_ASSIGNED',
+  );
+  assert.equal(harness.state.job, null);
+  assert.equal(harness.state.balance.reservedBalance, 0n);
+});
+
+test('no active plan assignment still returns a clear, stable error', async () => {
+  const harness = createHarness({ planCode: 'pro', mode: 'blink_funded' });
+  harness.repositories.assignments.findCurrentPlanAssignment = async () => null;
+  await assert.rejects(
+    reserveLiveJob(request({ requestedPlanCode: '' }), { env, repositories: harness.repositories }),
+    error => error.code === 'PLAN_NOT_ASSIGNED' && error.message === 'No active plan is assigned.',
+  );
+});
+
+test('an assignment change (e.g. Trial approved to Pro) is reflected on the very next reservation, with no manual refresh or caching', async () => {
+  const state = {
+    user: { id: '00000000-0000-4000-8000-000000000002' },
+    balance: { postedBalance: 20n, reservedBalance: 0n },
+    jobs: new Map(),
+    reservations: new Map(),
+  };
+  let currentPlanCode = 'trial';
+  const repositories = {
+    transaction: work => work({}),
+    users: { ensureUser: async () => state.user },
+    assignments: {
+      findCurrentPlanAssignment: async () => ({
+        userId: state.user.id, planId: `plan-${currentPlanCode}`, planCode: currentPlanCode,
+      }),
+    },
+    plans: {
+      findPlanByCode: async code => ({ id: `plan-${code}`, code, active: true }),
+      findEffectivePlanPolicy: async () => ({
+        id: 'policy-1', version: 1, billingBlockSeconds: 30,
+        creditsPerBlock: 3n, billingMode: 'blink_funded', effectiveFrom: new Date('2026-01-01'),
+      }),
+      listPlanEntitlements: async () => [
+        { key: 'blur', enabled: true, integerLimit: null, textValue: null },
+        { key: 'flip', enabled: true, integerLimit: null, textValue: null },
+      ],
+    },
+    balances: {
+      ensureBalanceAccountForUpdate: async () => state.balance,
+      reserveCredits: async (_userId, amount) => {
+        state.balance.reservedBalance += amount;
+        return state.balance;
+      },
+    },
+    jobs: {
+      findBillingJob: async jobId => state.jobs.get(jobId) || null,
+      insertBillingJob: async job => {
+        const record = { ...job, status: 'pending', billingStatus: 'not_reserved' };
+        state.jobs.set(job.id, record);
+        return record;
+      },
+      attachBillingSnapshot: async job => {
+        const record = {
+          ...state.jobs.get(job.id), planCodeSnapshot: job.planCode,
+          billingMode: job.billingMode, billingStatus: 'reserved',
+        };
+        state.jobs.set(job.id, record);
+        return record;
+      },
+    },
+    reservations: {
+      insertReservation: async reservation => {
+        const record = { id: `reservation-${reservation.jobId}`, ...reservation, status: 'reserved' };
+        state.reservations.set(reservation.jobId, record);
+        return record;
+      },
+    },
+    ledger: { insertLedgerEntry: async entry => entry },
+    audit: { insertAuditLog: async entry => entry },
+    // Consulted by checkAndExpireTrial (Rule #2's expiry check) whenever the
+    // current assignment is Trial; no grant on file means "not expired".
+    billing: { findTrialGrant: async () => null },
+  };
+
+  const trialResult = await reserveLiveJob(request({
+    identity: { uid: 'assignment-change-user' },
+    jobId: '20000000-0000-4000-8000-000000000001',
+    requestedPlanCode: '', requestedMode: 'blink_funded', idempotencyKey: 'assignment-change-1',
+    sourceDurationSeconds: 30,
+  }), { env, repositories });
+  assert.equal(trialResult.snapshot.planCode, 'trial');
+
+  // The user's Trial is approved to Pro server-side (e.g. via an Owner
+  // purchase approval) -- no frontend refresh or new session, just the
+  // next request.
+  currentPlanCode = 'pro';
+
+  const proResult = await reserveLiveJob(request({
+    identity: { uid: 'assignment-change-user' },
+    jobId: '20000000-0000-4000-8000-000000000002',
+    requestedPlanCode: '', requestedMode: 'blink_funded', idempotencyKey: 'assignment-change-2',
+    sourceDurationSeconds: 30,
+  }), { env, repositories });
+  assert.equal(proResult.snapshot.planCode, 'pro');
+  assert.equal(state.balance.reservedBalance, 6n);
+});
+
 test('plan and explicit mode cannot be switched automatically', async () => {
   const harness = createHarness();
   await assert.rejects(

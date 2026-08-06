@@ -72,7 +72,7 @@ export const reserveLiveJob = async ({
     const existing = await repositories.jobs.findBillingJob(jobId, { client, forUpdate: true });
     if (existing) {
       if (existing.userId !== user.id || existing.idempotencyKey !== idempotencyKey ||
-          existing.planCodeSnapshot !== requestedPlanCode ||
+          (requestedPlanCode && existing.planCodeSnapshot !== requestedPlanCode) ||
           existing.billingMode !== requestedMode ||
           existing.sourceDurationMs !== BigInt(Math.ceil(seconds * 1000))) {
         fail('Job reservation idempotency conflict.', 'IDEMPOTENCY_CONFLICT', 409);
@@ -82,10 +82,20 @@ export const reserveLiveJob = async ({
       }
       return { snapshot: publicSnapshot(existing), replayed: true };
     }
+    // The backend-stored assignment is the sole source of truth for which
+    // plan a job reserves against -- self-service plan selection is
+    // retired (Rule #4), so the client never legitimately chooses a plan.
+    // A caller-supplied planCode is accepted only as an optional
+    // defense-in-depth check: present and mismatched is a genuine,
+    // rejected conflict; absent (the normal case -- the frontend never
+    // sends one) never blocks a correctly assigned user.
     const assignment = await repositories.assignments.findCurrentPlanAssignment(
       user.id, { client, forUpdate: true },
     );
-    if (!assignment || assignment.planCode !== requestedPlanCode) {
+    if (!assignment) {
+      fail('No active plan is assigned.', 'PLAN_NOT_ASSIGNED', 422);
+    }
+    if (requestedPlanCode && assignment.planCode !== requestedPlanCode) {
       fail('Requested plan is not the active assigned plan.', 'PLAN_NOT_ASSIGNED', 422);
     }
     // Rule #2 (frozen): expiry blocks only new job creation, checked at the
@@ -100,7 +110,7 @@ export const reserveLiveJob = async ({
       const expiry = await checkAndExpireTrial(user.id, { client, deps: repositories });
       if (expiry) return { trialExpired: true };
     }
-    const plan = await repositories.plans.findPlanByCode(requestedPlanCode, { client });
+    const plan = await repositories.plans.findPlanByCode(assignment.planCode, { client });
     const policy = plan?.active
       ? await repositories.plans.findEffectivePlanPolicy(plan.id, new Date(), { client })
       : null;

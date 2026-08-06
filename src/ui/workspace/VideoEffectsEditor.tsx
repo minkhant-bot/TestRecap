@@ -283,8 +283,14 @@ export function VideoEffectsEditor({ jobId, effects, onChange, readOnly = false 
         </div>
       </div>
 
+      {/* Explicit grid rows (not flex-wrap's unpredictable wrapping) so the
+          required mobile grouping is guaranteed at every width: Color
+          Grading alone; Flip Video + Burn Subtitles as a two-column row;
+          Subtitle Color beneath Burn Subtitles only when enabled; Blur
+          Masks alone; Add Blur Box + Blur Strength stacked full-width
+          beneath it. */}
       <div className="effects-editor__controls">
-        <label className="effects-editor__grading">
+        <label className="effects-editor__grading effects-editor__row--full">
           <span><Sparkles size={14} />Color Grading</span>
           <select
             value={effects.colorGrading}
@@ -301,35 +307,39 @@ export function VideoEffectsEditor({ jobId, effects, onChange, readOnly = false 
             <option value="cool">Cool</option>
           </select>
         </label>
-        <label>
-          <input
-            type="checkbox"
-            checked={effects.flipVideoEnabled}
-            disabled={readOnly}
-            onChange={event => {
-              const nextEffects = mergeVideoEffects(latestEffectsRef.current, {
-                flipVideoEnabled: event.target.checked,
-              });
-              commitEffects(() => nextEffects);
-            }}
-          />
-          <FlipHorizontal2 size={14} />
-          Flip Video
-        </label>
-        <label>
-          <input
-            type="checkbox"
-            checked={effects.burnSubtitlesEnabled}
-            disabled={readOnly}
-            onChange={event => {
-              const enabled = event.target.checked;
-              commitEffects(current => mergeVideoEffects(current, { burnSubtitlesEnabled: enabled }));
-            }}
-          />
-          Burn subtitles
-        </label>
+
+        <div className="effects-editor__row effects-editor__row--two-col">
+          <label className="effects-editor__toggle">
+            <input
+              type="checkbox"
+              checked={effects.flipVideoEnabled}
+              disabled={readOnly}
+              onChange={event => {
+                const nextEffects = mergeVideoEffects(latestEffectsRef.current, {
+                  flipVideoEnabled: event.target.checked,
+                });
+                commitEffects(() => nextEffects);
+              }}
+            />
+            <FlipHorizontal2 size={14} />
+            Flip Video
+          </label>
+          <label className="effects-editor__toggle">
+            <input
+              type="checkbox"
+              checked={effects.burnSubtitlesEnabled}
+              disabled={readOnly}
+              onChange={event => {
+                const enabled = event.target.checked;
+                commitEffects(current => mergeVideoEffects(current, { burnSubtitlesEnabled: enabled }));
+              }}
+            />
+            Burn subtitles
+          </label>
+        </div>
+
         {effects.burnSubtitlesEnabled && (
-          <div className="effects-editor__subtitle-color" role="radiogroup" aria-label="Subtitle color">
+          <div className="effects-editor__subtitle-color effects-editor__row--full" role="radiogroup" aria-label="Subtitle color">
             <span className="hint">Subtitle color</span>
             <div className="row" style={{ gap: 8 }}>
               {SUBTITLE_COLOR_SWATCHES.map(swatch => (
@@ -342,21 +352,19 @@ export function VideoEffectsEditor({ jobId, effects, onChange, readOnly = false 
                   title={swatch.label}
                   disabled={readOnly}
                   onClick={() => commitEffects(current => mergeVideoEffects(current, { subtitleColor: swatch.id }))}
+                  className="effects-editor__swatch"
                   style={{
-                    width: 28,
-                    height: 28,
-                    borderRadius: '50%',
                     background: swatch.hex,
                     border: effects.subtitleColor === swatch.id ? '3px solid var(--accent, #333)' : '2px solid var(--line2, #999)',
                     cursor: readOnly ? 'default' : 'pointer',
-                    padding: 0,
                   }}
                 />
               ))}
             </div>
           </div>
         )}
-        <label>
+
+        <label className="effects-editor__toggle effects-editor__row--full">
           <input
             type="checkbox"
             checked={effects.blurEnabled}
@@ -369,12 +377,19 @@ export function VideoEffectsEditor({ jobId, effects, onChange, readOnly = false 
           Blur masks
         </label>
         {effects.blurEnabled && (
-          <Button type="button" variant="secondary" icon={<Plus size={15} />} disabled={readOnly} onClick={addBlurBox}>
+          <Button
+            type="button"
+            variant="secondary"
+            icon={<Plus size={15} />}
+            disabled={readOnly}
+            onClick={addBlurBox}
+            className="effects-editor__row--full"
+          >
             Add blur box
           </Button>
         )}
         {effects.blurEnabled && effects.blurBoxes.map(box => (
-          <label key={`${box.id}-strength`} className="effects-editor__strength">
+          <label key={`${box.id}-strength`} className="effects-editor__strength effects-editor__row--full">
             Blur strength
             <input
               type="range"

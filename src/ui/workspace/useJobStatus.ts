@@ -20,6 +20,7 @@ export function useJobStatus(projectId: string | null) {
   const [mediaRetry, setMediaRetry] = useState(0);
   const [downloading, setDownloading] = useState(false);
   const [downloadError, setDownloadError] = useState<string | null>(null);
+  const [degraded, setDegraded] = useState(false);
   const pollingRef = useRef<number | null>(null);
 
   const refresh = useCallback(async () => {
@@ -77,8 +78,20 @@ export function useJobStatus(projectId: string | null) {
       'job.retry_accepted',
     ]) events.addEventListener(eventName, accept as EventListener);
     events.onerror = () => {
+      setDegraded(true);
       if (pollingRef.current === null) {
         pollingRef.current = window.setInterval(() => void refresh(), 3000);
+      }
+    };
+    // The browser's own EventSource retries the connection automatically;
+    // once it reopens (including after a temporary network loss), the
+    // polling fallback above must stop -- otherwise SSE and polling both
+    // keep running forever after a single transient blip.
+    events.onopen = () => {
+      setDegraded(false);
+      if (pollingRef.current !== null) {
+        window.clearInterval(pollingRef.current);
+        pollingRef.current = null;
       }
     };
     return () => {
@@ -212,7 +225,7 @@ export function useJobStatus(projectId: string | null) {
   return {
     job, loading, error, cancelling, retrying, retryEligibility, retryFeedback,
     mediaUrl, mediaError, setMediaRetry: () => setMediaRetry(value => value + 1),
-    downloading, downloadError, downloadVideo,
+    downloading, downloadError, downloadVideo, degraded,
     cancelJob, retryFailedJob,
   };
 }

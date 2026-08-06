@@ -1,13 +1,16 @@
 import { useEffect, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
-import { ConfirmBody, Dialog, EmptyState, ErrorPanel, Skeleton } from '../components';
+import { ConfirmBody, Dialog, EmptyState, ErrorPanel, LiveStatusHint, Skeleton } from '../components';
 import { deleteWorkspaceJob, getWorkspaceRetryEligibility, retryWorkspaceJob } from '../workspace/api';
 import { JobList } from '../workspace/JobList';
 import type { WorkspaceJob, WorkspaceRetryEligibility } from '../workspace/types';
 import { useWorkspaceJobs } from '../workspace/useWorkspaceJobs';
 
 export function HistoryPage() {
-  const { jobs, loading, error, refresh } = useWorkspaceJobs();
+  // Refresh cadence matches this page's own previous ad-hoc interval; now
+  // routed through useWorkspaceJobs' single controlled mechanism instead of
+  // a second, duplicate setInterval living here.
+  const { jobs, loading, error, refresh, degraded } = useWorkspaceJobs(undefined, { intervalMs: 3000 });
   const [deleting, setDeleting] = useState<WorkspaceJob | null>(null);
   const [deleteBusy, setDeleteBusy] = useState(false);
   const [deleteError, setDeleteError] = useState<string | null>(null);
@@ -19,10 +22,6 @@ export function HistoryPage() {
   useEffect(() => {
     window.scrollTo({ top: 0, left: 0, behavior: 'auto' });
   }, []);
-  useEffect(() => {
-    const interval = window.setInterval(() => void refresh(true), 3000);
-    return () => window.clearInterval(interval);
-  }, [refresh]);
   useEffect(() => {
     let current = true;
     const failed = jobs.filter(job => job.status === 'failed');
@@ -78,6 +77,7 @@ export function HistoryPage() {
           <p className="hint">Completed videos are available for 24 hours.</p>
         </div>
       </div>
+      <LiveStatusHint degraded={degraded} />
       {loading && <div style={{ display: 'grid', gap: 12 }}><Skeleton height="4.5rem" /><Skeleton height="4.5rem" /></div>}
       {!loading && error && <ErrorPanel title="မှတ်တမ်း မရရှိနိုင်ပါ" description={error} action={{ label: 'ထပ်ကြိုးစားမည်', onClick: () => void refresh() }} />}
       {!loading && !error && jobs.length === 0 && <EmptyState title="မှတ်တမ်းမရှိသေးပါ" />}

@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useState, useRef } from 'react';
-import { Button, Dialog, EmptyState, ErrorPanel, Skeleton, Tabs } from '../components';
+import { Button, Dialog, EmptyState, ErrorPanel, LiveStatusHint, Skeleton, Tabs } from '../components';
 import { listActiveCreditPackages, type CreditPackage } from '../creditPackages/api';
+import { useAutoRefresh } from '../hooks/useAutoRefresh';
 import {
   getBillingOverview,
   getMyTrialRequest,
@@ -180,21 +181,22 @@ export function BuyCreditsPage() {
   const [activityTab, setActivityTab] = useState<'ledger' | 'requests'>('ledger');
   const [currencyFilter, setCurrencyFilter] = useState<string | null>(null);
 
-  const loadPackages = useCallback(async () => {
-    setLoading(true);
-    setLoadError(null);
+  const loadPackages = useCallback(async (silent = false) => {
+    if (!silent) { setLoading(true); setLoadError(null); }
     try {
       const items = await listActiveCreditPackages();
       setPackages(items.filter(item => item.active && !item.archivedAt));
     } catch (error) {
       if (isBillingDisabledError(error)) setBillingUnavailable(true);
-      else setLoadError(errorMessage(error));
+      else if (!silent) setLoadError(errorMessage(error));
+      if (silent) throw error;
     } finally {
-      setLoading(false);
+      if (!silent) setLoading(false);
     }
   }, []);
 
   useEffect(() => { void loadPackages(); }, [loadPackages]);
+  const { degraded: packagesDegraded } = useAutoRefresh(loadPackages);
 
   // Owner-created packages stay in whichever currency they were created in
   // -- no conversion, ever. This only filters which already-separate records
@@ -214,23 +216,32 @@ export function BuyCreditsPage() {
     [packages, currencyFilter],
   );
 
-  const loadBilling = useCallback(async () => {
-    setBillingLoading(true);
-    setBillingError(null);
+  const loadBilling = useCallback(async (silent = false) => {
+    if (!silent) { setBillingLoading(true); setBillingError(null); }
     try {
       setBilling(await getBillingOverview());
     } catch (error) {
       if (isBillingDisabledError(error)) setBillingUnavailable(true);
-      else setBillingError(errorMessage(error));
+      else if (!silent) setBillingError(errorMessage(error));
+      if (silent) throw error;
     } finally {
-      setBillingLoading(false);
+      if (!silent) setBillingLoading(false);
     }
   }, []);
 
   useEffect(() => { void loadBilling(); }, [loadBilling]);
+  const { degraded: billingDegraded } = useAutoRefresh(loadBilling);
 
   // Rule #1 (frozen): Guest taps "Request Trial" -> pending -> Owner approves.
-  useEffect(() => { void getMyTrialRequest().then(setTrialRequest); }, []);
+  const loadTrialRequest = useCallback(async (silent = false) => {
+    try {
+      setTrialRequest(await getMyTrialRequest());
+    } catch (error) {
+      if (silent) throw error;
+    }
+  }, []);
+  useEffect(() => { void loadTrialRequest(); }, [loadTrialRequest]);
+  const { degraded: trialRequestDegraded } = useAutoRefresh(loadTrialRequest);
 
   const submitTrialRequest = async () => {
     if (requestingTrial) return;
@@ -375,6 +386,7 @@ export function BuyCreditsPage() {
         </div>
         {billing && <span className="chip">{billing.assignment?.planName || 'No plan'}</span>}
       </div>
+      <LiveStatusHint degraded={packagesDegraded || billingDegraded || trialRequestDegraded} />
 
       {billingUnavailable ? (
         <EmptyState

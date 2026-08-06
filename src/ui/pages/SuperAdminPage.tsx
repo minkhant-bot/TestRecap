@@ -9,17 +9,17 @@ import {
   type ScreenshotMetadata, type SystemStatus,
 } from '../admin/api';
 import {
-  archiveCreditPackage, configureBank, configurePlan, createCreditPackage, createPlanPolicy,
+  archiveCreditPackage, configureBank, configurePlan, createCreditPackage,
   editCreditPackage, linkPackageBank, listCreditPackageAudit, listManagedBankAccounts,
   listManagedCreditPackages, listManagedPlans, reorderCreditPackages, setCreditPackageActive,
+  TRIAL_GRANT_CREDITS, TRIAL_GRANT_MINUTES,
   type BankAccount, type CommercialPlan, type CreditPackage, type CreditPackageAuditEvent, type CreditPackageInput,
 } from '../creditPackages/api';
 import { purchaseTotalCredits, type PurchaseRequest, type TrialRequest } from '../billing/api';
-import { Button, ConfirmBody, Dialog, EmptyState, ErrorPanel, Input, Skeleton, StatCard, Tabs } from '../components';
-import { JobList } from '../workspace/JobList';
-import { useWorkspaceJobs } from '../workspace/useWorkspaceJobs';
+import { Button, ConfirmBody, Dialog, EmptyState, ErrorPanel, Input, LiveStatusHint, Skeleton, StatCard, Tabs } from '../components';
+import { useAutoRefresh } from '../hooks/useAutoRefresh';
 
-type TabId = 'overview' | 'users' | 'trial' | 'purchases' | 'packages' | 'credits' | 'audit' | 'system';
+type TabId = 'users' | 'trial' | 'purchases' | 'packages' | 'credits' | 'audit' | 'system';
 
 interface PackageDraft {
   name: string; price: string; currency: string; creditAmount: string;
@@ -59,50 +59,39 @@ const validationError = (draft: PackageDraft) => {
 };
 
 interface PlanDraft {
-  name: string; description: string; active: boolean; displayOrder: string;
-  creditsPerBlock: string; version: string;
+  name: string; description: string; active: boolean;
 }
 const PLAN_LABEL: Record<'trial' | 'pro', string> = { trial: 'Trial', pro: 'Pro' };
 const emptyPlanDraft = (code: 'trial' | 'pro'): PlanDraft => ({
-  name: PLAN_LABEL[code], description: '', active: true, displayOrder: '0',
-  creditsPerBlock: '1', version: '1',
+  name: PLAN_LABEL[code], description: '', active: true,
 });
 const planDraftFromExisting = (plan: CommercialPlan): PlanDraft => ({
   name: plan.name, description: plan.description, active: plan.active,
-  displayOrder: String(plan.displayOrder), creditsPerBlock: '1', version: '1',
 });
 const planValidationError = (draft: PlanDraft) => {
   if (!draft.name.trim()) return 'Plan name is required.';
-  const displayOrder = Number(draft.displayOrder);
-  const creditsPerBlock = Number(draft.creditsPerBlock);
-  const version = Number(draft.version);
-  if (!Number.isSafeInteger(displayOrder) || displayOrder < 0) return 'Display order must be a non-negative integer.';
-  if (!Number.isSafeInteger(creditsPerBlock) || creditsPerBlock < 1) return 'Credits per 30-second block must be a positive integer.';
-  if (!Number.isSafeInteger(version) || version < 1) return 'Policy version must be a positive integer.';
   return null;
 };
 
+const BANK_CURRENCIES = ['MMK', 'THB'] as const;
 interface BankDraft {
-  code: string; bankName: string; accountName: string; accountNumber: string;
-  branch: string; currency: string; instructions: string; active: boolean; displayOrder: string;
+  bankName: string; accountName: string; accountNumber: string;
+  branch: string; currency: string; instructions: string; active: boolean;
 }
 const emptyBankDraft = (): BankDraft => ({
-  code: '', bankName: '', accountName: '', accountNumber: '',
-  branch: '', currency: 'MMK', instructions: '', active: true, displayOrder: '0',
+  bankName: '', accountName: '', accountNumber: '',
+  branch: '', currency: 'MMK', instructions: '', active: true,
 });
 const bankDraftFromExisting = (bank: BankAccount): BankDraft => ({
-  code: bank.code, bankName: bank.bank_name, accountName: bank.account_name,
+  bankName: bank.bank_name, accountName: bank.account_name,
   accountNumber: bank.account_number, branch: bank.branch ?? '', currency: bank.currency,
-  instructions: bank.instructions, active: bank.active, displayOrder: String(bank.display_order),
+  instructions: bank.instructions, active: bank.active,
 });
 const bankValidationError = (draft: BankDraft) => {
-  if (!draft.code.trim()) return 'Bank code is required.';
   if (!draft.bankName.trim()) return 'Bank name is required.';
   if (!draft.accountName.trim()) return 'Account name is required.';
   if (!draft.accountNumber.trim()) return 'Account number is required.';
-  if (!/^[A-Z]{3}$/.test(draft.currency.trim().toUpperCase())) return 'Currency must be a 3-letter uppercase code.';
-  const displayOrder = Number(draft.displayOrder);
-  if (!Number.isSafeInteger(displayOrder) || displayOrder < 0) return 'Display order must be a non-negative integer.';
+  if (!BANK_CURRENCIES.includes(draft.currency as typeof BANK_CURRENCIES[number])) return 'Currency must be MMK or THB.';
   return null;
 };
 
@@ -133,7 +122,7 @@ const ROLE_OPTIONS: AdminUser['role'][] = ['user', 'admin', 'super_admin'];
 // the title, close control, and backdrop/scroll-lock chrome.
 export function SuperAdminPage() {
   const { profile } = useAuth();
-  const [tab, setTab] = useState<TabId>('overview');
+  const [tab, setTab] = useState<TabId>('users');
   const [users, setUsers] = useState<AdminUser[]>([]);
   const [purchases, setPurchases] = useState<PurchaseRequest[]>([]);
   const [logs, setLogs] = useState<AdminAuditEvent[]>([]);
@@ -203,85 +192,98 @@ export function SuperAdminPage() {
   const [linkPackageChoice, setLinkPackageChoice] = useState<Record<string, string>>({});
   const [linkingBankId, setLinkingBankId] = useState<string | null>(null);
 
-  const { jobs: recentJobs, loading: jobsLoading } = useWorkspaceJobs(5);
-
-  const load = useCallback(async () => {
-    setLoading(true);
-    setError(null);
-    setBillingError(null);
-    setAuditError(null);
-    setSystemError(null);
+  // Every loader below follows the same silent-background-poll contract as
+  // useWorkspaceJobs: a foreground call (mount, manual retry) still shows
+  // its loading/error state exactly as before; a silent call (driven by
+  // useAutoRefresh) never flashes a skeleton and rethrows on failure only
+  // so the shared hook can detect and surface a degraded connection.
+  const load = useCallback(async (silent = false) => {
+    if (!silent) {
+      setLoading(true);
+      setError(null);
+      setBillingError(null);
+      setAuditError(null);
+      setSystemError(null);
+    }
     const [usersResult, logsResult, systemResult, purchasesResult, auditResult] = await Promise.allSettled([
       listAdminUsers(), listAdminLogs(), getSystemStatus(), listAdminPurchases(), listBillingAudit(),
     ]);
     if (usersResult.status === 'fulfilled') {
       setUsers(usersResult.value);
-    } else setError(requestError(usersResult.reason));
+    } else if (!silent) setError(requestError(usersResult.reason));
     if (logsResult.status === 'fulfilled') setLogs(logsResult.value);
-    else setAuditError(requestError(logsResult.reason));
+    else if (!silent) setAuditError(requestError(logsResult.reason));
     if (systemResult.status === 'fulfilled') setSystem(systemResult.value);
-    else setSystemError(requestError(systemResult.reason));
+    else if (!silent) setSystemError(requestError(systemResult.reason));
     if (purchasesResult.status === 'fulfilled') setPurchases(purchasesResult.value);
-    else setBillingError(requestError(purchasesResult.reason));
+    else if (!silent) setBillingError(requestError(purchasesResult.reason));
     if (auditResult.status === 'fulfilled') setBillingAudit(auditResult.value);
-    else setAuditError(current => current || requestError(auditResult.reason));
-    setLoading(false);
+    else if (!silent) setAuditError(current => current || requestError(auditResult.reason));
+    if (!silent) setLoading(false);
+    if (silent && [usersResult, logsResult, systemResult, purchasesResult, auditResult].some(item => item.status === 'rejected')) {
+      throw new Error('One or more admin overview requests failed.');
+    }
   }, []);
 
   useEffect(() => { void load(); }, [load]);
+  const { degraded: adminDataDegraded } = useAutoRefresh(load);
 
-  const loadTrialRequests = useCallback(async () => {
-    setTrialRequestsLoading(true);
-    setTrialRequestsError(null);
+  const loadTrialRequests = useCallback(async (silent = false) => {
+    if (!silent) { setTrialRequestsLoading(true); setTrialRequestsError(null); }
     try {
       setTrialRequests(await listTrialRequests());
     } catch (requestFailure) {
-      setTrialRequestsError(requestError(requestFailure));
+      if (!silent) setTrialRequestsError(requestError(requestFailure));
+      if (silent) throw requestFailure;
     } finally {
-      setTrialRequestsLoading(false);
+      if (!silent) setTrialRequestsLoading(false);
     }
   }, []);
   useEffect(() => { void loadTrialRequests(); }, [loadTrialRequests]);
+  const { degraded: trialDegraded } = useAutoRefresh(loadTrialRequests);
 
-  const loadPackages = useCallback(async () => {
-    setPackagesLoading(true);
-    setPackagesError(null);
+  const loadPackages = useCallback(async (silent = false) => {
+    if (!silent) { setPackagesLoading(true); setPackagesError(null); }
     try {
       setPackages(await listManagedCreditPackages());
     } catch (error) {
-      setPackagesError(requestError(error));
+      if (!silent) setPackagesError(requestError(error));
+      if (silent) throw error;
     } finally {
-      setPackagesLoading(false);
+      if (!silent) setPackagesLoading(false);
     }
   }, []);
 
   useEffect(() => { void loadPackages(); }, [loadPackages]);
+  const { degraded: packagesDegraded } = useAutoRefresh(loadPackages);
 
-  const loadPlans = useCallback(async () => {
-    setPlansLoading(true);
-    setPlansError(null);
+  const loadPlans = useCallback(async (silent = false) => {
+    if (!silent) { setPlansLoading(true); setPlansError(null); }
     try {
       setPlans(await listManagedPlans());
     } catch (error) {
-      setPlansError(requestError(error));
+      if (!silent) setPlansError(requestError(error));
+      if (silent) throw error;
     } finally {
-      setPlansLoading(false);
+      if (!silent) setPlansLoading(false);
     }
   }, []);
   useEffect(() => { void loadPlans(); }, [loadPlans]);
+  const { degraded: plansDegraded } = useAutoRefresh(loadPlans);
 
-  const loadBanks = useCallback(async () => {
-    setBanksLoading(true);
-    setBanksError(null);
+  const loadBanks = useCallback(async (silent = false) => {
+    if (!silent) { setBanksLoading(true); setBanksError(null); }
     try {
       setBanks(await listManagedBankAccounts());
     } catch (error) {
-      setBanksError(requestError(error));
+      if (!silent) setBanksError(requestError(error));
+      if (silent) throw error;
     } finally {
-      setBanksLoading(false);
+      if (!silent) setBanksLoading(false);
     }
   }, []);
   useEffect(() => { void loadBanks(); }, [loadBanks]);
+  const { degraded: banksDegraded } = useAutoRefresh(loadBanks);
 
   useEffect(() => () => {
     if (proofUrl) URL.revokeObjectURL(proofUrl);
@@ -438,12 +440,9 @@ export function SuperAdminPage() {
     try {
       await configurePlan(planEditing, {
         name: planDraft.name.trim(), description: planDraft.description.trim(),
-        active: planDraft.active, displayOrder: Number(planDraft.displayOrder),
+        active: planDraft.active,
       });
-      await createPlanPolicy(planEditing, {
-        version: Number(planDraft.version), creditsPerBlock: Number(planDraft.creditsPerBlock),
-      });
-      setFeedback({ tone: 'success', title: `${PLAN_LABEL[planEditing]} plan configured`, message: `${planDraft.creditsPerBlock} credits per 30-second block.` });
+      setFeedback({ tone: 'success', title: `${PLAN_LABEL[planEditing]} plan configured`, message: planEditing === 'trial' ? `${TRIAL_GRANT_CREDITS} credits · up to ${TRIAL_GRANT_MINUTES} minutes.` : undefined });
       setPlanEditing(null);
       await loadPlans();
     } catch (requestFailure) {
@@ -470,13 +469,13 @@ export function SuperAdminPage() {
     setBankFormError(null);
     setBankMutating(true);
     try {
-      await configureBank(bankDraft.code.trim(), {
+      await configureBank({
         bankName: bankDraft.bankName.trim(), accountName: bankDraft.accountName.trim(),
         accountNumber: bankDraft.accountNumber.trim(), branch: bankDraft.branch.trim() || null,
-        currency: bankDraft.currency.trim().toUpperCase(), instructions: bankDraft.instructions.trim(),
-        active: bankDraft.active, displayOrder: Number(bankDraft.displayOrder),
+        currency: bankDraft.currency, instructions: bankDraft.instructions.trim(),
+        active: bankDraft.active,
       });
-      setFeedback({ tone: 'success', title: 'Bank account saved', message: `${bankDraft.bankName}: ${bankDraft.currency.toUpperCase()}.` });
+      setFeedback({ tone: 'success', title: 'Bank account saved', message: `${bankDraft.bankName}: ${bankDraft.currency}.` });
       setBankEditing(null);
       await loadBanks();
     } catch (requestFailure) {
@@ -603,26 +602,6 @@ export function SuperAdminPage() {
     ...billingAudit.map(event => ({ id: event.id, time: event.occurred_at, type: event.event_type, details: event.resource_type })),
     ...logs.map((event, index) => ({ id: `${event.timestamp}-${index}`, time: event.timestamp, type: event.type, details: '' })),
   ].sort((a, b) => b.time.localeCompare(a.time)), [billingAudit, logs]);
-  const activeJobs = recentJobs.filter(job => ['pending', 'queued', 'processing'].includes(job.status)).length;
-  const pendingPurchases = purchases.filter(purchase => purchase.status === 'pending').length;
-
-  const overviewContent = (
-    <>
-      <div className="adminGrid" style={{ marginBottom: 20 }}>
-        <StatCard variant="adminCard" value={jobsLoading ? '…' : activeJobs} label="Active jobs" />
-        <StatCard variant="adminCard" value={loading ? '…' : users.length} label="Registered users" />
-        <StatCard variant="adminCard" value={loading ? '…' : pendingPurchases} label="Awaiting manual credit" />
-        <StatCard variant="adminCard" value={system?.status ?? '—'} label="Application status" />
-      </div>
-      <div className="panel">
-        <h3 style={{ marginTop: 0 }}>Recent workspace jobs</h3>
-        {jobsLoading ? <Skeleton height="4.5rem" />
-          : recentJobs.length === 0 ? <EmptyState title="No jobs yet" />
-            : <JobList jobs={recentJobs} compact />}
-      </div>
-    </>
-  );
-
   const usersContent = loading ? <Skeleton height="16rem" /> : error ? <ErrorPanel title="Users are unavailable" description={error} action={{ label: 'Try again', onClick: () => void load() }} /> : (
     <>
       <div style={{ maxWidth: 360 }}>
@@ -734,7 +713,10 @@ export function SuperAdminPage() {
             const plan = plans.find(item => item.code === code);
             return (
               <div className="adminRow" key={code}>
-                <div><strong>{PLAN_LABEL[code]}</strong><small>{plan ? plan.name : 'Not configured yet'}</small></div>
+                <div>
+                  <strong>{PLAN_LABEL[code]}</strong>
+                  <small>{plan ? plan.name : 'Not configured yet'}{code === 'trial' && ` · ${TRIAL_GRANT_CREDITS} credits · up to ${TRIAL_GRANT_MINUTES} minutes`}</small>
+                </div>
                 <span><i className={`statusDot ${plan?.active ? '' : 'warn'}`} />{plan?.active ? 'Active' : plan ? 'Inactive' : 'Not configured'}</span>
                 <div className="adminActions">
                   <Button variant="secondary" onClick={() => openPlanConfig(code)}>{plan ? 'Edit' : 'Configure'}</Button>
@@ -747,17 +729,14 @@ export function SuperAdminPage() {
       <Dialog open={planEditing !== null} onClose={() => { if (!planMutating) setPlanEditing(null); }} busy={planMutating} title={planEditing ? `Configure ${PLAN_LABEL[planEditing]} plan` : 'Configure plan'}>
         <form onSubmit={event => void submitPlanForm(event)}>
           {planFormError && <div className="alert error" role="alert" style={{ marginBottom: 12 }}>{planFormError}</div>}
+          {planEditing === 'trial' && (
+            <p className="hint" style={{ marginTop: 0 }}>Trial grant: <strong>{TRIAL_GRANT_CREDITS} credits · up to {TRIAL_GRANT_MINUTES} minutes</strong> (fixed, read-only).</p>
+          )}
           <Input label="Name" value={planDraft.name} maxLength={100} required onChange={event => setPlanDraft({ ...planDraft, name: event.target.value })} />
           <label className="field">
             <span>Description (optional)</span>
             <textarea value={planDraft.description} maxLength={1000} rows={2} onChange={event => setPlanDraft({ ...planDraft, description: event.target.value })} />
           </label>
-          <div className="packageFormGrid">
-            <Input label="Credits per 30-second block" type="number" min="1" step="1" value={planDraft.creditsPerBlock} required onChange={event => setPlanDraft({ ...planDraft, creditsPerBlock: event.target.value })} />
-            <Input label="Policy version" type="number" min="1" step="1" value={planDraft.version} required onChange={event => setPlanDraft({ ...planDraft, version: event.target.value })} />
-            <Input label="Display order" type="number" min="0" step="1" value={planDraft.displayOrder} required onChange={event => setPlanDraft({ ...planDraft, displayOrder: event.target.value })} />
-          </div>
-          <p className="hint">{planEditing === 'trial' ? 'BYOK only -- Blur and Flip stay off for Trial.' : 'Blink-funded -- Blur and Flip are included for Pro.'} This is fixed by product rule and is not editable here.</p>
           <label className="checkline">
             <input type="checkbox" checked={planDraft.active} onChange={event => setPlanDraft({ ...planDraft, active: event.target.checked })} />
             Active
@@ -999,14 +978,17 @@ export function SuperAdminPage() {
       <Dialog open={bankEditing !== null} onClose={() => { if (!bankMutating) setBankEditing(null); }} busy={bankMutating} title={bankEditing === 'new' ? 'Create bank account' : 'Edit bank account'}>
         <form onSubmit={event => void submitBankForm(event)}>
           {bankFormError && <div className="alert error" role="alert" style={{ marginBottom: 12 }}>{bankFormError}</div>}
-          <Input label="Bank code" value={bankDraft.code} maxLength={50} required disabled={bankEditing !== 'new'} onChange={event => setBankDraft({ ...bankDraft, code: event.target.value })} />
           <Input label="Bank name" value={bankDraft.bankName} maxLength={100} required onChange={event => setBankDraft({ ...bankDraft, bankName: event.target.value })} />
           <div className="packageFormGrid">
             <Input label="Account name" value={bankDraft.accountName} maxLength={100} required onChange={event => setBankDraft({ ...bankDraft, accountName: event.target.value })} />
             <Input label="Account number" value={bankDraft.accountNumber} maxLength={100} required onChange={event => setBankDraft({ ...bankDraft, accountNumber: event.target.value })} />
             <Input label="Branch (optional)" value={bankDraft.branch} maxLength={100} onChange={event => setBankDraft({ ...bankDraft, branch: event.target.value })} />
-            <Input label="Currency code" value={bankDraft.currency} minLength={3} maxLength={3} required onChange={event => setBankDraft({ ...bankDraft, currency: event.target.value.toUpperCase() })} />
-            <Input label="Display order" type="number" min="0" step="1" value={bankDraft.displayOrder} required onChange={event => setBankDraft({ ...bankDraft, displayOrder: event.target.value })} />
+            <label className="field">
+              <span>Currency</span>
+              <select value={bankDraft.currency} onChange={event => setBankDraft({ ...bankDraft, currency: event.target.value })}>
+                {BANK_CURRENCIES.map(currency => <option key={currency} value={currency}>{currency}</option>)}
+              </select>
+            </label>
           </div>
           <label className="field">
             <span>Instructions (optional)</span>
@@ -1106,7 +1088,6 @@ export function SuperAdminPage() {
   ) : <ErrorPanel title="System status is unavailable" description={systemError || undefined} />;
 
   const items = [
-    { id: 'overview', label: 'Overview', content: overviewContent },
     { id: 'users', label: 'Users', content: usersContent },
     { id: 'trial', label: 'Trial Requests', content: trialContent },
     { id: 'purchases', label: 'Purchases', content: purchasesContent },
@@ -1122,6 +1103,7 @@ export function SuperAdminPage() {
         <div><span className="kicker">RESTRICTED</span><h1>Super Admin</h1><p>{profile?.email} — real operational controls available to the protected Owner authority.</p></div>
         <span className="chip">Owner access only</span>
       </div>
+      <LiveStatusHint degraded={adminDataDegraded || trialDegraded || packagesDegraded || plansDegraded || banksDegraded} />
       {feedback && (
         <div className={`alert ${feedback.tone === 'success' ? 'success' : 'error'}`}>
           <div className="row between"><strong>{feedback.title}</strong><button className="btn ghost iconBtn" aria-label="Dismiss" onClick={() => setFeedback(null)}><X size={16} aria-hidden="true" /></button></div>

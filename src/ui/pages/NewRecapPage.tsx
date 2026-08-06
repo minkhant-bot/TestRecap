@@ -1,8 +1,8 @@
 import { useRef, useState } from 'react';
-import { useSearchParams } from 'react-router-dom';
-import { Button } from '../components';
+import { useNavigate, useSearchParams } from 'react-router-dom';
+import { Button, LiveStatusHint } from '../components';
 import { formatDuration, formatFileSize } from '../workspace/format';
-import { queueWorkspaceJob } from '../workspace/api';
+import { queueWorkspaceJob, WorkspaceApiError } from '../workspace/api';
 import { useJobStatus } from '../workspace/useJobStatus';
 import { useUploadPanel } from '../workspace/useUploadPanel';
 import type { WorkspaceJob, WorkspaceJobStatus, VideoEffects } from '../workspace/types';
@@ -165,11 +165,13 @@ function NewRecapUpload({
  * NewRecap / (setup) / Processing / Completed / ErrorState screens
  * ---------------------------------------------------------------------- */
 export function NewRecapPage() {
+  const navigate = useNavigate();
   const [searchParams, setSearchParams] = useSearchParams();
   const { jobs, loading, refresh } = useWorkspaceJobs();
   const [activeJobId, setActiveJobId] = useState<string | null>(() => searchParams.get('job'));
   const [starting, setStarting] = useState(false);
   const [startError, setStartError] = useState<string | null>(null);
+  const [insufficientCredits, setInsufficientCredits] = useState(false);
   const [effects, setEffects] = useState<VideoEffects>(DEFAULT_VIDEO_EFFECTS);
   const latestEffectsRef = useRef<VideoEffects>(DEFAULT_VIDEO_EFFECTS);
 
@@ -190,11 +192,17 @@ export function NewRecapPage() {
     if (!job) return;
     setStarting(true);
     setStartError(null);
+    setInsufficientCredits(false);
     try {
       await queueWorkspaceJob(job.id, latestEffectsRef.current);
       await refresh();
     } catch (requestError) {
-      setStartError(requestError instanceof Error ? requestError.message : 'ဤ Recap ကို စတင်လုပ်ဆောင်၍ မရပါ။');
+      if (requestError instanceof WorkspaceApiError && requestError.code === 'INSUFFICIENT_CREDITS') {
+        setInsufficientCredits(true);
+        setStartError(requestError.message);
+      } else {
+        setStartError(requestError instanceof Error ? requestError.message : 'ဤ Recap ကို စတင်လုပ်ဆောင်၍ မရပါ။');
+      }
     } finally {
       setStarting(false);
     }
@@ -204,6 +212,7 @@ export function NewRecapPage() {
     setActiveJobId(null);
     setSearchParams({}, { replace: true });
     setStartError(null);
+    setInsufficientCredits(false);
     setEffects(DEFAULT_VIDEO_EFFECTS);
     latestEffectsRef.current = DEFAULT_VIDEO_EFFECTS;
     void refresh();
@@ -222,6 +231,7 @@ export function NewRecapPage() {
         <div><span className="kicker">NEW RECAP</span><h1>Recap အသစ်</h1><p>ဗီဒီယိုတင်ခြင်းမှ export အထိ တစ်နေရာတည်းတွင် လုပ်ဆောင်ပါ။</p></div>
         {chip && <span className="chip">{chip}</span>}
       </div>
+      {job && ['queued', 'processing'].includes(job.status) && <LiveStatusHint degraded={status.degraded} />}
 
       {!job && (
         loading ? (
@@ -247,11 +257,20 @@ export function NewRecapPage() {
             readOnly={starting}
           />
           <div className="row wrap" style={{ marginTop: 18 }}>
-            <Button loading={starting} disabled={starting} onClick={() => void beginProcessing()}>Recap စတင်ဖန်တီးမည် →</Button>
+            <Button loading={starting} disabled={starting || insufficientCredits} onClick={() => void beginProcessing()}>Recap စတင်ဖန်တီးမည် →</Button>
           </div>
         </div>
       )}
-      {startError && <div className="alert error" role="alert">{startError}</div>}
+      {startError && (
+        <div className="alert error" role="alert">
+          {startError}
+          {insufficientCredits && (
+            <div style={{ marginTop: 10 }}>
+              <Button onClick={() => navigate('/buy-credits')}>Buy Credits / Request Trial</Button>
+            </div>
+          )}
+        </div>
+      )}
 
       {job && ['queued', 'processing'].includes(job.status) && (
         <div className="panel">

@@ -1,19 +1,24 @@
-import { useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { NavLink, Outlet, useLocation, useNavigate } from 'react-router-dom';
-import { Clapperboard, ChevronDown, History as HistoryIcon, LogOut, Settings as SettingsIcon, ShieldCheck, Wallet } from 'lucide-react';
+import { Clapperboard, ChevronDown, History as HistoryIcon, LayoutDashboard, LogOut, Settings as SettingsIcon, ShieldCheck, Wallet } from 'lucide-react';
 import { useAuth } from '../../auth/AuthProvider';
 import { Avatar } from '../components';
+import { useAutoRefresh } from '../hooks/useAutoRefresh';
 
 // Premium-SaaS refinement pass: the original reference (BlinkAutomationFull_v2.jsx)
 // used plain text labels with no icons anywhere. Real mobile SaaS navigation
 // (this brief's explicit ask) needs a consistent icon per destination, so
 // lucide-react (already a dependency, already used by VideoEffectsEditor) is
 // used here as the one icon set for nav + header + account menu.
+// Order is significant: Dashboard | New Recap | History | Plans & Credits |
+// Admin -- Dashboard and Admin are Owner/Super Admin only (same audience
+// and permission as before; see DashboardAccess/SuperAdminAccess).
 const navigation = [
+  { to: '/dashboard', label: 'Dashboard', superAdminOnly: true, Icon: LayoutDashboard },
   { to: '/new-recap', label: 'New Recap', Icon: Clapperboard },
   { to: '/history', label: 'History', Icon: HistoryIcon },
   { to: '/buy-credits', label: 'Plans & Credits', Icon: Wallet },
-  { to: '/admin', label: 'Super Admin', superAdminOnly: true, Icon: ShieldCheck },
+  { to: '/admin', label: 'Admin', superAdminOnly: true, Icon: ShieldCheck },
 ];
 
 interface BillingSummary {
@@ -143,25 +148,30 @@ export function AppShell() {
   const availableNavigation = navigation.filter(item => !item.superAdminOnly || isSuperAdmin);
   const accountName = profile?.displayName || profile?.email || 'Google အကောင့်';
 
+  const loadBillingSummary = useCallback(async (silent = false) => {
+    const [balanceResponse, planResponse] = await Promise.all([
+      fetch('/api/credits/balance', { credentials: 'include' }),
+      fetch('/api/plans/me', { credentials: 'include' }),
+    ]);
+    if (!balanceResponse.ok || !planResponse.ok) {
+      if (silent) throw new Error('Billing summary request failed.');
+      return;
+    }
+    const [balance, plan] = await Promise.all([balanceResponse.json(), planResponse.json()]);
+    setBillingSummary({
+      credits: formatCreditBalance(balance?.availableBalance),
+      plan: typeof plan?.planName === 'string' && plan.planName.trim() ? plan.planName.trim() : null,
+    });
+  }, []);
+
   useEffect(() => {
-    let active = true;
     setBillingSummary({ credits: null, plan: null });
-    const loadBillingSummary = async () => {
-      const [balanceResponse, planResponse] = await Promise.all([
-        fetch('/api/credits/balance', { credentials: 'include' }),
-        fetch('/api/plans/me', { credentials: 'include' }),
-      ]);
-      if (!active || !balanceResponse.ok || !planResponse.ok) return;
-      const [balance, plan] = await Promise.all([balanceResponse.json(), planResponse.json()]);
-      if (!active) return;
-      setBillingSummary({
-        credits: formatCreditBalance(balance?.availableBalance),
-        plan: typeof plan?.planName === 'string' && plan.planName.trim() ? plan.planName.trim() : null,
-      });
-    };
     void loadBillingSummary().catch(() => undefined);
-    return () => { active = false; };
-  }, [profile?.uid]);
+  }, [profile?.uid, loadBillingSummary]);
+  // Credit balance shown in the header/sidebar refreshes on its own (a
+  // purchase approval, manual adjustment, or Trial grant elsewhere must
+  // never require a manual reload here to be reflected).
+  useAutoRefresh(loadBillingSummary);
 
   const signOut = async () => {
     if (signingOut) return;
@@ -231,16 +241,11 @@ export function AppShell() {
       </div>
 
       <nav className="mobileNav" aria-label="အဓိက လမ်းညွှန်">
-        {availableNavigation.filter(item => item.to !== '/admin').map(({ to, label, Icon }) => (
+        {availableNavigation.map(({ to, label, Icon }) => (
           <NavLink key={to} to={to} className={({ isActive }) => (isActive ? 'active' : '')}>
             <Icon size={22} aria-hidden="true" /><span>{label}</span>
           </NavLink>
         ))}
-        {isSuperAdmin && (
-          <NavLink to="/admin" className={({ isActive }) => (isActive ? 'active' : '')}>
-            <ShieldCheck size={22} aria-hidden="true" /><span>Admin</span>
-          </NavLink>
-        )}
       </nav>
     </div>
   );

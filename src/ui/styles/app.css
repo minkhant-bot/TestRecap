@@ -522,12 +522,51 @@ button {
 .effects-handle--resize { width: 8px; height: 8px; border: 1px solid #fff; background: var(--accent); cursor: nwse-resize; }
 .effects-handle--delete { width: 14px; height: 14px; display: grid; place-items: center; background: var(--danger); color: #fff; transform: translate(45%, -55%); }
 .effects-handle--delete svg { width: 9px; height: 9px; }
-.effects-editor__controls { padding: 12px; display: flex; flex-wrap: wrap; align-items: center; gap: 8px; background: var(--panel2); }
-.effects-editor__controls label { min-height: 36px; padding: 0 12px; display: flex; align-items: center; gap: 8px; border: 1px solid var(--line2); border-radius: 999px; color: var(--muted); font-size: 13px; cursor: pointer; }
+/* Explicit grid rows (not flex-wrap, whose wrapping point silently shifts
+   with content length/width) so the required grouping is guaranteed at
+   every viewport: Color Grading full-width; Flip Video + Burn Subtitles as
+   one two-column row; Subtitle Color full-width beneath Burn Subtitles only
+   when enabled; Blur Masks full-width; Add Blur Box + Blur Strength
+   stacked full-width beneath it. */
+.effects-editor__controls { padding: 14px; display: grid; grid-template-columns: 1fr 1fr; gap: 10px 12px; align-items: start; background: var(--panel2); }
+.effects-editor__row--full { grid-column: 1 / -1; }
+.effects-editor__row--two-col { grid-column: 1 / -1; display: grid; grid-template-columns: 1fr 1fr; gap: 10px 12px; }
+.effects-editor__controls label,
+.effects-editor__toggle {
+  min-height: 44px;
+  min-width: 0;
+  padding: 0 14px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  border: 1px solid var(--line2);
+  border-radius: 999px;
+  color: var(--muted);
+  font-size: 13px;
+  cursor: pointer;
+}
 .effects-editor__controls label:has(input:checked) { border-color: var(--accent); background: rgba(255, 45, 125, 0.1); color: #fff; }
-.effects-editor__grading select { min-height: 28px; border: 0; background: transparent; color: var(--text); }
-.effects-editor__strength input { width: 6rem; accent-color: var(--accent); }
+.effects-editor__grading { min-width: 0; }
+.effects-editor__grading select { min-height: 28px; min-width: 0; flex: 1; border: 0; background: transparent; color: var(--text); }
+.effects-editor__subtitle-color { display: grid; gap: 8px; }
+.effects-editor__swatch { width: 32px; height: 32px; min-width: 32px; min-height: 32px; border-radius: 50%; padding: 0; }
+.effects-editor__strength {
+  flex-direction: column;
+  align-items: stretch;
+  height: auto;
+  min-height: 44px;
+  padding: 10px 14px;
+  gap: 6px;
+}
+.effects-editor__strength input { width: 100%; accent-color: var(--accent); }
 .effects-editor--readonly .effects-editor__controls { opacity: 0.65; }
+
+@media (max-width: 480px) {
+  .effects-editor__controls { padding: 12px; gap: 8px 10px; }
+  .effects-editor__row--two-col { gap: 8px 10px; }
+  .effects-editor__controls label,
+  .effects-editor__toggle { font-size: 12.5px; padding: 0 10px; }
+}
 
 /* Real <video> playback inside the reference's decorative .videoBox */
 .videoBox { overflow: hidden; }

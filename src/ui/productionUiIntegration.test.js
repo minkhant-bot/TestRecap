@@ -8,13 +8,15 @@ test('production screen mapping keeps real authentication, routes, and job state
   const login = read('./pages/LoginPage.tsx');
   const routes = read('./AppFoundation.tsx');
   const admin = read('./pages/SuperAdminPage.tsx');
+  const dashboard = read('./pages/DashboardPage.tsx');
   const jobStatus = read('./workspace/useJobStatus.ts');
 
   assert.match(login, /await signInWithGoogle\(\)/);
   assert.doesNotMatch(login, /setTimeout|MOCK_/);
   assert.match(routes, /path="\/admin" element=\{<SuperAdminAccess \/>\}/);
+  assert.match(routes, /path="\/dashboard" element=\{<DashboardAccess \/>\}/);
   assert.match(routes, /profile\?\.role === 'super_admin'/);
-  assert.match(admin, /useWorkspaceJobs\(5\)/);
+  assert.match(dashboard, /useWorkspaceJobs\(5\)/);
   assert.match(admin, /listAdminUsers\(\)/);
   assert.match(admin, /listAdminPurchases\(\)/);
   assert.doesNotMatch(admin, /\/api\/health/i);
@@ -65,14 +67,20 @@ test('Owner screen binds every supported admin and package API and does not infe
   assert.doesNotMatch(page, /import \{[^}]*Toast[^}]*\} from '\.\.\/components'/);
 });
 
-test('Super Admin has an Overview tab (merged former Dashboard), a Trial Requests tab (Rule #1), and 8 tabs total', () => {
+test('Super Admin has a Trial Requests tab (Rule #1) and 7 tabs total; Overview moved to a dedicated Dashboard page', () => {
   const page = read('./pages/SuperAdminPage.tsx');
+  const dashboard = read('./pages/DashboardPage.tsx');
 
-  const tabIds = ['overview', 'users', 'trial', 'purchases', 'packages', 'credits', 'audit', 'system'];
+  const tabIds = ['users', 'trial', 'purchases', 'packages', 'credits', 'audit', 'system'];
   for (const id of tabIds) assert.match(page, new RegExp(`id: '${id}'`));
-  assert.equal((page.match(/id: '(overview|users|trial|purchases|packages|credits|audit|system)'/g) || []).length, 8);
-  assert.match(page, /overviewContent/);
-  assert.match(page, /StatCard variant="adminCard"/);
+  assert.equal((page.match(/id: '(users|trial|purchases|packages|credits|audit|system)'/g) || []).length, 7);
+  assert.doesNotMatch(page, /id: 'overview'/, 'Overview must no longer be a Super Admin tab selector option');
+  assert.doesNotMatch(page, /overviewContent/);
+
+  // The metrics themselves still exist, just on their own page now.
+  assert.match(dashboard, /StatCard variant="adminCard"/);
+  assert.match(dashboard, /Active jobs/);
+  assert.match(dashboard, /Recent workspace jobs/);
 });
 
 test('production design tokens expose pink as the only brand accent (BlinkAutomationFull_v2.jsx palette)', () => {

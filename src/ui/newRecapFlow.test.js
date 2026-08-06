@@ -11,16 +11,21 @@ const stripComments = source => source
   .replace(/\/\*[\s\S]*?\*\//g, '')
   .replace(/(^|[^:])\/\/.*$/gm, '$1');
 
-test('all roles share New Recap/History/Plans navigation; Super Admin is role-gated', () => {
+test('all roles share New Recap/History/Plans navigation; Dashboard and Admin are role-gated and ordered first/last', () => {
   const shell = read('./layout/AppShell.tsx');
   const foundation = read('./AppFoundation.tsx');
 
+  assert.match(shell, /to: '\/dashboard', label: 'Dashboard', superAdminOnly: true/);
   assert.match(shell, /to: '\/new-recap', label: 'New Recap'/);
   assert.match(shell, /to: '\/history', label: 'History'/);
   assert.match(shell, /to: '\/buy-credits', label: 'Plans & Credits'/);
-  assert.match(shell, /to: '\/admin', label: 'Super Admin', superAdminOnly: true/);
+  assert.match(shell, /to: '\/admin', label: 'Admin', superAdminOnly: true/);
+  // Order matters: Dashboard | New Recap | History | Plans & Credits | Admin.
+  const order = ['/dashboard', '/new-recap', '/history', '/buy-credits', '/admin']
+    .map(path => shell.indexOf(`to: '${path}'`));
+  assert.deepEqual(order, [...order].sort((a, b) => a - b), 'nav items must appear in the required order');
   assert.match(shell, /availableNavigation = navigation\.filter\(item => !item\.superAdminOnly \|\| isSuperAdmin\)/);
-  assert.match(foundation, /profile\?\.role === 'super_admin' \? '\/admin' : '\/new-recap'/);
+  assert.match(foundation, /profile\?\.role === 'super_admin' \? '\/dashboard' : '\/new-recap'/);
 });
 
 test('one valid video uploads automatically without a submission button', () => {

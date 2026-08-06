@@ -1,6 +1,7 @@
 import { Navigate, Route, Routes } from 'react-router-dom';
 import { ProtectedRoute } from '../auth/ProtectedRoute';
 import { AppShell } from './layout/AppShell';
+import { DashboardPage } from './pages/DashboardPage';
 import { LandingPage } from './pages/LandingPage';
 import { LoginPage } from './pages/LoginPage';
 import { NewRecapPage } from './pages/NewRecapPage';
@@ -13,7 +14,15 @@ import { useAuth } from '../auth/AuthProvider';
 
 function DefaultHome() {
   const { profile } = useAuth();
-  return <Navigate to={profile?.role === 'super_admin' ? '/admin' : '/new-recap'} replace />;
+  return <Navigate to={profile?.role === 'super_admin' ? '/dashboard' : '/new-recap'} replace />;
+}
+
+// Same permission as before (Dashboard is the former Admin Overview tab,
+// unchanged audience): Owner/Super Admin only, everyone else bounces to
+// New Recap exactly like the Admin route already does.
+function DashboardAccess() {
+  const { profile } = useAuth();
+  return profile?.role === 'super_admin' ? <DashboardPage /> : <Navigate to="/new-recap" replace />;
 }
 
 function SuperAdminAccess() {
@@ -29,14 +38,14 @@ export default function AppFoundation() {
       <Route path="/unauthorized" element={<UnauthorizedPage />} />
       <Route element={<ProtectedRoute />}>
         <Route element={<AppShell />}>
+            <Route path="/dashboard" element={<DashboardAccess />} />
             <Route path="/new-recap" element={<NewRecapPage />} />
             <Route path="/history" element={<HistoryPage />} />
             <Route path="/buy-credits" element={<BuyCreditsPage />} />
             <Route path="/settings" element={<SettingsPage />} />
             <Route path="/admin" element={<SuperAdminAccess />} />
-            {/* Retired routes (Dashboard/Projects merged into New Recap, History, and the Admin
-                Overview tab) — kept as redirects so old bookmarks/links still resolve. */}
-            <Route path="/dashboard" element={<DefaultHome />} />
+            {/* Retired routes (Projects merged into New Recap and History) —
+                kept as redirects so old bookmarks/links still resolve. */}
             <Route path="/projects" element={<Navigate to="/new-recap" replace />} />
             <Route path="/projects/new" element={<Navigate to="/new-recap" replace />} />
             <Route path="/projects/:projectId" element={<Navigate to="/new-recap" replace />} />

@@ -132,54 +132,23 @@ export const reorderCreditPackages = (items: Array<{ id: string; displayOrder: n
     { confirmed: true, items },
   );
 
+// Trial's fixed grant, mirrored here only for display -- the actual grant
+// amount is a backend constant (TRIAL_GRANT_CREDITS in billingFoundation.js)
+// and is never sent from or computed by the client.
+export const TRIAL_GRANT_CREDITS = 12;
+export const TRIAL_GRANT_MINUTES = 6;
+
 export interface PlanConfigInput {
   name: string;
   description: string;
   active: boolean;
-  displayOrder: number;
 }
 
+// Owner configures only name/description/active; every technical field
+// (credits per block, policy version, display order, billing mode,
+// entitlements) is a backend-owned default applied server-side.
 export const configurePlan = (code: 'trial' | 'pro', input: PlanConfigInput) =>
-  mutation<{ plan: CommercialPlan }>(`/api/admin/billing/plans/${code}`, 'PUT', input);
-
-// Rule #4 (frozen): Trial is BYOK-only with no Blur/Flip; Pro is
-// Blink-funded with Blur/Flip. These entitlement flags and the billing mode
-// are derived from the plan code, never owner-editable, so this form can
-// never submit a policy that violates that frozen rule.
-const FROZEN_POLICY_SHAPE: Record<'trial' | 'pro', {
-  billingMode: string; trialAllowanceCredits: number;
-  entitlements: Array<{ key: string; enabled: boolean }>;
-}> = {
-  trial: {
-    billingMode: 'byok',
-    trialAllowanceCredits: 12,
-    entitlements: [
-      { key: 'blur', enabled: false },
-      { key: 'flip', enabled: false },
-      { key: 'byok_mode', enabled: true },
-      { key: 'blink_funded_mode', enabled: false },
-    ],
-  },
-  pro: {
-    billingMode: 'blink_funded',
-    trialAllowanceCredits: 0,
-    entitlements: [
-      { key: 'blur', enabled: true },
-      { key: 'flip', enabled: true },
-      { key: 'byok_mode', enabled: false },
-      { key: 'blink_funded_mode', enabled: true },
-    ],
-  },
-};
-
-export const createPlanPolicy = (code: 'trial' | 'pro', input: { version: number; creditsPerBlock: number }) =>
-  mutation<{ policy: unknown }>(`/api/admin/billing/plans/${code}/policies`, 'POST', {
-    version: input.version,
-    creditsPerBlock: input.creditsPerBlock,
-    active: true,
-    effectiveFrom: new Date().toISOString(),
-    ...FROZEN_POLICY_SHAPE[code],
-  });
+  mutation<{ plan: CommercialPlan; policy: unknown }>(`/api/admin/billing/plans/${code}/defaults`, 'PUT', input);
 
 export interface BankConfigInput {
   bankName: string;
@@ -189,11 +158,12 @@ export interface BankConfigInput {
   currency: string;
   instructions: string;
   active: boolean;
-  displayOrder: number;
 }
 
-export const configureBank = (code: string, input: BankConfigInput) =>
-  mutation<{ bank: BankAccount }>(`/api/admin/billing/banks/${encodeURIComponent(code)}`, 'PUT', input);
+// No code field: the backend generates and safely de-duplicates a stable
+// code from bank name + currency + account identity.
+export const configureBank = (input: BankConfigInput) =>
+  mutation<{ bank: BankAccount }>('/api/admin/billing/banks', 'POST', input);
 
 export const linkPackageBank = (creditPlanId: string, bankAccountId: string, active: boolean) =>
   mutation<{ link: unknown }>(

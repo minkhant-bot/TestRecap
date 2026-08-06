@@ -178,6 +178,19 @@ export const findOverlappingPlanPolicy = async ({
   [planId, effectiveFrom, effectiveUntil],
 ));
 
+// Closes an open-ended active policy's effective window so a freshly
+// inserted policy for the same plan never overlaps it (see
+// findOverlappingPlanPolicy) -- used only by the backend-owned-defaults
+// configuration path, which auto-versions and never asks the Owner for an
+// effective window.
+export const closePlanPolicyWindow = async (policyId, until, { client }) =>
+  firstRow(await client.query(
+    `UPDATE plan_policy_versions SET effective_until=$2
+     WHERE id=$1 AND effective_until IS NULL
+     RETURNING id, effective_until`,
+    [policyId, until],
+  ));
+
 export const replaceCurrentAssignment = async ({
   userId, planId, source, actorUserId = null,
 }, { client }) => {
@@ -348,6 +361,11 @@ export const findCreditPlanById = async (id, { client = null } = {}) =>
 export const findBankAccountById = async (id, { client = null } = {}) =>
   firstRow(await databaseExecutor(client).query(
     `SELECT * FROM bank_accounts WHERE id=$1`, [id],
+  ));
+
+export const findBankAccountByCode = async (code, { client = null } = {}) =>
+  firstRow(await databaseExecutor(client).query(
+    `SELECT * FROM bank_accounts WHERE code=$1`, [code],
   ));
 
 export const upsertBankAccount = async (bank, { client }) =>

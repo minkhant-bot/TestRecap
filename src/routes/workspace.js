@@ -36,6 +36,8 @@ import { verifyGeminiApiKey } from '../services/geminiKeyVerification.js';
 // below (P2_LIVE_JOB_BILLING_ENABLED, currently off) -- not for any
 // user-facing personal-key management, which has been removed.
 import { getUserGeminiApiKey } from '../services/userGeminiKeys.js';
+import { checkCreditSufficiency } from '../services/billingFoundation.js';
+import { getBillingConfiguration } from '../config/billing.js';
 import {
     admissionService,
     createMutationAdmissionMiddleware,
@@ -90,7 +92,16 @@ export const createWorkspaceRouter = ({
     // there is no personal-key fallback here (Product rule: users are never
     // asked to provide/save/manage a personal Gemini key). Kept injectable
     // so tests can stub it without touching process.env.
-    resolveServerGeminiKey = () => String(process.env.GEMINI_API_KEY || '').trim()
+    resolveServerGeminiKey = () => String(process.env.GEMINI_API_KEY || '').trim(),
+    // Credit gate: a user with insufficient credits must never reach job
+    // creation/queueing. Only invoked outside live billing (which already
+    // enforces its own reservation-based gate via reserveBilling above).
+    checkCredits = checkCreditSufficiency,
+    // Whether the credit gate applies at all -- false when the PostgreSQL
+    // billing foundation itself isn't configured/enabled, preserving
+    // existing behavior for deployments that never activated it. Injectable
+    // so tests can exercise the gate without a real DATABASE_URL.
+    billingConfigured = () => getBillingConfiguration().enabled
 } = {}) => {
     const router = express.Router();
     const admitMutation = endpoint => createMutationAdmissionMiddleware(admission, endpoint);
@@ -309,6 +320,23 @@ export const createWorkspaceRouter = ({
                         code: quota ? 'BYOK_QUOTA_EXHAUSTED'
                             : verification.retryable ? 'BYOK_PROVIDER_UNAVAILABLE' : 'BYOK_INVALID',
                         retryable: Boolean(verification.retryable)
+                    });
+                }
+            }
+            // Credit gate: outside live billing (which reserves credits itself
+            // below), a user must never be able to queue a job they cannot
+            // afford. No job mutation happens above this point on failure.
+            // Skipped entirely when the PostgreSQL billing foundation itself
+            // isn't configured/enabled, preserving existing behavior for
+            // deployments that never activated it.
+            if (!liveBilling && billingConfigured()) {
+                const sufficiency = await checkCredits(req.user, { sourceDurationSeconds });
+                if (!sufficiency.sufficient) {
+                    return res.status(402).json({
+                        error: 'You do not have enough credits to process this recap.',
+                        code: 'INSUFFICIENT_CREDITS',
+                        requiredCredits: String(sufficiency.requiredCredits),
+                        availableCredits: String(sufficiency.availableCredits)
                     });
                 }
             }

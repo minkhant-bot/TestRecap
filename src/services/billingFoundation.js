@@ -20,8 +20,12 @@ import { getFirebaseAdminAuth, toUserProfile } from './firebaseAdmin.js';
 // uploaded/source video, existing block system unchanged) and always expires
 // exactly 120 hours after Owner approval, whichever comes first with
 // exhaustion. Fixed by product decision, not admin-configurable.
-const TRIAL_GRANT_CREDITS = 12n;
+export const TRIAL_GRANT_CREDITS = 12n;
 const TRIAL_DURATION_MS = 120 * 60 * 60 * 1000;
+// 1 credit = one 30-second processing block (system-wide, backend-owned
+// rate) => 12 credits = 360 seconds = 6 minutes of processing.
+export const CREDITS_PER_BLOCK_DEFAULT = 1n;
+export const TRIAL_GRANT_MINUTES = Number(TRIAL_GRANT_CREDITS * 30n) / 60;
 
 // Rule #4 (frozen): Normal plan removed. Only Trial (request/approve only,
 // never self-selected) and Pro (assigned automatically on purchase approval,
@@ -31,6 +35,23 @@ const ENTITLEMENT_KEYS = new Set([
   'blur', 'flip', 'byok_mode', 'blink_funded_mode',
   'active_job_limit', 'storage_limit_bytes', 'retention_hours',
 ]);
+
+// Backend-owned plan defaults (new authoritative product rules supersede
+// the former BYOK-Trial/Blink-funded-Pro split): the Owner configures only
+// name/description/active from the UI. Every technical value below is
+// fixed here and never accepted from client input -- Trial is no longer
+// BYOK-only and gets every current recap feature, identically to Pro.
+export const PLAN_POLICY_DEFAULTS = Object.freeze({
+  creditsPerBlock: CREDITS_PER_BLOCK_DEFAULT,
+  billingMode: 'blink_funded',
+  entitlements: Object.freeze([
+    Object.freeze({ key: 'blur', enabled: true }),
+    Object.freeze({ key: 'flip', enabled: true }),
+    Object.freeze({ key: 'byok_mode', enabled: false }),
+    Object.freeze({ key: 'blink_funded_mode', enabled: true }),
+  ]),
+});
+const PLAN_DISPLAY_ORDER = Object.freeze({ trial: 0, pro: 1 });
 const PURCHASE_STATES = new Set(['pending', 'approved', 'rejected']);
 const TRIAL_DECISIONS = new Set(['eligible', 'ineligible', 'review_required']);
 const PAYMENT_PROOF_EXTENSIONS = new Map([
@@ -562,6 +583,35 @@ export const estimateCredits = async (identity, input, {
   };
 };
 
+// Credit gate: a user with insufficient available credits must never reach
+// job creation/queueing (see workspace.js's use of this before
+// createWorkspaceJob/queueWorkspaceJob). Read-only -- reserves nothing, so
+// it is safe to call for a preflight check as well as at queue time.
+// Falls back to the backend-owned default rate (1 credit/30s block, see
+// PLAN_POLICY_DEFAULTS) for a user with no active plan/policy yet, so an
+// unassigned user is still correctly gated rather than treated as free.
+export const checkCreditSufficiency = async (identity, { sourceDurationSeconds }, {
+  env = process.env, deps = dependencies,
+} = {}) => {
+  requireEnabled(env);
+  const actor = await ensureActor(identity, { deps });
+  const seconds = Number(sourceDurationSeconds);
+  if (!Number.isFinite(seconds) || seconds <= 0) fail('sourceDurationSeconds must be positive.', 'INVALID_DURATION');
+  const assignment = await deps.assignments.findCurrentPlanAssignment(actor.user.id);
+  const policy = assignment
+    ? await deps.plans.findEffectivePlanPolicy(assignment.planId)
+    : null;
+  const creditsPerBlock = policy?.creditsPerBlock ?? PLAN_POLICY_DEFAULTS.creditsPerBlock;
+  const blocks = BigInt(Math.ceil(seconds / 30));
+  const requiredCredits = blocks * creditsPerBlock;
+  const balance = await deps.balances.findBalanceAccount(actor.user.id);
+  const availableCredits = balance?.availableBalance ?? 0n;
+  return {
+    sufficient: availableCredits >= requiredCredits,
+    requiredCredits, availableCredits,
+  };
+};
+
 export const listCreditPackages = async (identity, {
   env = process.env, currency = null, deps = dependencies,
 } = {}) => {
@@ -980,8 +1030,11 @@ export const createPlanPolicy = async (identity, planCode, input, options = {}) 
   const creditsPerBlock = integer(input?.creditsPerBlock, 'creditsPerBlock', { min: 1 });
   const trialAllowanceCredits = integer(input?.trialAllowanceCredits ?? 0, 'trialAllowanceCredits');
   const billingMode = text(input?.billingMode, 'billingMode', { max: 30 });
-  const expectedMode = planCode === 'pro' ? 'blink_funded' : 'byok';
-  if (billingMode !== expectedMode) fail(`${planCode} requires ${expectedMode}.`, 'INVALID_PLAN_POLICY', 422);
+  // New authoritative product rule (supersedes the former frozen Rule #4):
+  // Trial is no longer BYOK-only -- every authorized user, Trial or Pro,
+  // processes through the server-managed Gemini key and gets every current
+  // recap feature. Both plans require blink_funded; BYOK mode is retired.
+  if (billingMode !== 'blink_funded') fail(`${planCode} requires blink_funded.`, 'INVALID_PLAN_POLICY', 422);
   if (planCode !== 'trial' && trialAllowanceCredits !== 0n) fail('Only Trial may have an allowance.', 'INVALID_PLAN_POLICY', 422);
   const entitlements = Array.isArray(input?.entitlements) ? input.entitlements.map(item => ({
     key: text(item?.key, 'entitlement key', { max: 50 }),
@@ -993,10 +1046,8 @@ export const createPlanPolicy = async (identity, planCode, input, options = {}) 
   })) : [];
   if (entitlements.some(item => !ENTITLEMENT_KEYS.has(item.key))) fail('Unsupported entitlement.', 'INVALID_ENTITLEMENT');
   const flags = Object.fromEntries(entitlements.map(item => [item.key, item.enabled]));
-  const pro = planCode === 'pro';
-  if (Boolean(flags.blur) !== pro || Boolean(flags.flip) !== pro ||
-      Boolean(flags.byok_mode) === pro || Boolean(flags.blink_funded_mode) !== pro) {
-    fail('Entitlements must enforce BYOK Trial and Pro-only Blur/Flip/funded mode.', 'INVALID_PLAN_POLICY', 422);
+  if (!flags.blur || !flags.flip || flags.byok_mode || !flags.blink_funded_mode) {
+    fail('Entitlements must enable Blur, Flip, and Blink-funded mode for every plan; BYOK mode is no longer supported.', 'INVALID_PLAN_POLICY', 422);
   }
   const request = {
     planCode, version, creditsPerBlock, trialAllowanceCredits, billingMode,
@@ -1026,6 +1077,52 @@ export const createPlanPolicy = async (identity, planCode, input, options = {}) 
         afterState: publicJson(request),
       }, { client });
       return { status: 201, resourceId: policy.id, body: { policy, entitlements } };
+    },
+  });
+};
+
+// Owner-facing simplification of configurePlan + createPlanPolicy: accepts
+// only name/description/active. Every technical field (credits per block,
+// billing mode, entitlements, display order, policy version) is applied
+// from PLAN_POLICY_DEFAULTS/PLAN_DISPLAY_ORDER, never from client input.
+// Auto-versions and closes the previous open-ended policy window so
+// re-saving an already-configured plan never hits PLAN_POLICY_OVERLAP.
+export const configurePlanDefaults = async (identity, planCode, input, options = {}) => {
+  const { env = process.env, idempotencyKey, deps = dependencies } = options;
+  if (!PLAN_CODES.has(planCode)) fail('code must be trial or pro.', 'INVALID_INPUT');
+  const request = {
+    code: planCode,
+    name: text(input?.name, 'name', { max: 100 }),
+    description: text(input?.description, 'description', { max: 1000, optional: true }),
+    active: Boolean(input?.active),
+  };
+  return withSuperAdminMutation(identity, {
+    env, idempotencyKey, operation: 'plan.configure_defaults', request,
+    resourceType: 'plan', deps,
+    work: async (client, actor) => {
+      const plan = await deps.billing.upsertPlan({
+        ...request, displayOrder: PLAN_DISPLAY_ORDER[planCode], actorUserId: actor.user.id,
+      }, { client });
+      const now = new Date();
+      const latest = await deps.plans.findEffectivePlanPolicy(plan.id, now, { client });
+      if (latest) await deps.billing.closePlanPolicyWindow(latest.id, now, { client });
+      const policyRequest = {
+        planCode, version: (latest?.version || 0) + 1,
+        creditsPerBlock: PLAN_POLICY_DEFAULTS.creditsPerBlock,
+        trialAllowanceCredits: planCode === 'trial' ? TRIAL_GRANT_CREDITS : 0n,
+        billingMode: PLAN_POLICY_DEFAULTS.billingMode,
+        active: true, effectiveFrom: now, effectiveUntil: null,
+        entitlements: PLAN_POLICY_DEFAULTS.entitlements,
+      };
+      const policy = await deps.billing.insertPlanPolicy({
+        ...policyRequest, planId: plan.id, actorUserId: actor.user.id,
+      }, { client });
+      await deps.audit.insertAuditLog({
+        actorUserId: actor.user.id, eventType: 'plan.configured_with_defaults',
+        resourceType: 'plan', resourceId: plan.id,
+        afterState: publicJson({ ...request, policy: policyRequest }),
+      }, { client });
+      return { status: 200, resourceId: plan.id, body: { plan, policy } };
     },
   });
 };
@@ -1243,6 +1340,64 @@ export const configureBank = async (identity, input, options = {}) => {
         actorUserId: actor.user.id, eventType: 'bank_account.configured',
         resourceType: 'bank_account', resourceId: bank.id,
         afterState: { ...request, accountNumber: '[REDACTED]' },
+      }, { client });
+      return { status: 200, resourceId: bank.id, body: { bank } };
+    },
+  });
+};
+
+const SUPPORTED_BANK_CURRENCIES = new Set(['MMK', 'THB']);
+const slugify = value => value
+  .normalize('NFKD').replace(/[̀-ͯ]/g, '')
+  .toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '');
+
+// Generates a stable, unique bank code from bank name + currency + the last
+// 4 digits of the account number -- the same real-world bank identity
+// always yields the same code (so re-saving an existing bank account
+// updates it instead of creating a duplicate), while a genuine collision
+// between two different accounts is disambiguated with a numeric suffix
+// rather than silently overwritten.
+const generateBankCode = async (request, { client, deps }) => {
+  const base = slugify(
+    `${request.bankName} ${request.currency} ${request.accountNumber.slice(-4)}`,
+  ).slice(0, 40) || 'bank';
+  let candidate = base;
+  for (let suffix = 1; ; suffix += 1) {
+    const existing = await deps.billing.findBankAccountByCode(candidate, { client });
+    if (!existing || existing.account_number === request.accountNumber) return candidate;
+    candidate = `${base}-${suffix}`;
+  }
+};
+
+// Owner-facing simplification of configureBank: the Owner never types a
+// bank code (generateBankCode derives one automatically and safely), and
+// display order is backend-managed (new banks are appended last).
+export const configureBankAutoCode = async (identity, input, options = {}) => {
+  const { env = process.env, idempotencyKey, deps = dependencies } = options;
+  const request = {
+    bankName: text(input?.bankName, 'bankName', { max: 100 }),
+    accountName: text(input?.accountName, 'accountName', { max: 100 }),
+    accountNumber: text(input?.accountNumber, 'accountNumber', { max: 100 }),
+    branch: text(input?.branch, 'branch', { max: 100, optional: true }) || null,
+    currency: text(input?.currency, 'currency', { max: 3 }).toUpperCase(),
+    instructions: text(input?.instructions, 'instructions', { max: 1000, optional: true }),
+    active: Boolean(input?.active),
+  };
+  if (!SUPPORTED_BANK_CURRENCIES.has(request.currency)) fail('currency must be MMK or THB.', 'INVALID_INPUT');
+  return withSuperAdminMutation(identity, {
+    env, idempotencyKey, operation: 'bank.configure_auto_code', request,
+    resourceType: 'bank_account', deps,
+    work: async (client, actor) => {
+      const code = await generateBankCode(request, { client, deps });
+      const existingBanks = await deps.billing.listBankAccounts({ client, includeInactive: true });
+      const displayOrder = existingBanks.length;
+      const bank = await deps.billing.upsertBankAccount({
+        ...request, code, displayOrder, actorUserId: actor.user.id,
+      }, { client });
+      await deps.audit.insertAuditLog({
+        actorUserId: actor.user.id, eventType: 'bank_account.configured',
+        resourceType: 'bank_account', resourceId: bank.id,
+        afterState: { ...request, code, accountNumber: '[REDACTED]' },
       }, { client });
       return { status: 200, resourceId: bank.id, body: { bank } };
     },

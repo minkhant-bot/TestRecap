@@ -203,6 +203,29 @@ test('approveTrialRequest grants exactly 12 credits, sets a 120-hour expiry, and
   assert.equal(state.audit.some(entry => entry.eventType === 'trial.approved'), true);
 });
 
+test('repeated approval of the same Trial request never double-grants credits: identical idempotency key replays, a different key on an already-reviewed request is rejected', async () => {
+  const { state, deps } = createHarness();
+  const { body } = await requestTrial(requester, { env, deps, idempotencyKey: 'req-repeat' });
+
+  const first = await approveTrialRequest(owner, body.request.id, { env, deps, idempotencyKey: 'approve-repeat' });
+  assert.equal(first.replayed, false);
+  assert.equal(state.balances.get('requester-id').postedBalance, 12n);
+
+  // Exact idempotency replay: same key, same request -- no new grant.
+  const replay = await approveTrialRequest(owner, body.request.id, { env, deps, idempotencyKey: 'approve-repeat' });
+  assert.equal(replay.replayed, true);
+  assert.equal(state.balances.get('requester-id').postedBalance, 12n);
+
+  // A second, non-idempotent attempt (different key) on the now-reviewed
+  // request must be rejected outright, never grant a second time.
+  await assert.rejects(
+    approveTrialRequest(owner, body.request.id, { env, deps, idempotencyKey: 'approve-repeat-2' }),
+    error => error instanceof BillingError && error.code === 'INVALID_STATE',
+  );
+  assert.equal(state.balances.get('requester-id').postedBalance, 12n);
+  assert.equal(state.trialGrants.size, 1, 'exactly one grant must ever exist for this user');
+});
+
 test('a granted Trial can never be requested or granted again', async () => {
   const { deps } = createHarness();
   const { body } = await requestTrial(requester, { env, deps, idempotencyKey: 'req-4' });

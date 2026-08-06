@@ -339,6 +339,127 @@ test('a missing server-managed Gemini key blocks job creation, queueing, and ret
     }
 });
 
+test('insufficient credits block queueing with a 402 INSUFFICIENT_CREDITS error, and the job is never queued', async () => {
+    authenticatedUser = { ...owner, uid: `insufficient-credits-${randomUUID()}` };
+    let creditCheckCalls = 0;
+    const creditApp = express();
+    creditApp.use(express.json());
+    creditApp.use('/api/workspace', requireAuth, createWorkspaceRouter({
+        verifyKey: async () => ({ valid: true }),
+        readSourceDuration: async () => 60,
+        billingConfigured: () => true,
+        checkCredits: async (identity, { sourceDurationSeconds }) => {
+            creditCheckCalls += 1;
+            assert.equal(sourceDurationSeconds, 60);
+            return { sufficient: false, requiredCredits: 2n, availableCredits: 0n };
+        }
+    }));
+    const creditServer = await new Promise(resolve => {
+        const listener = creditApp.listen(0, '127.0.0.1', () => resolve(listener));
+    });
+    const creditUrl = `http://127.0.0.1:${creditServer.address().port}/api/workspace`;
+    try {
+        const body = new FormData();
+        body.append('video', new Blob([Buffer.alloc(512)], { type: 'video/mp4' }), 'insufficient.mp4');
+        const uploaded = await fetch(`${creditUrl}/jobs`, {
+            method: 'POST', headers: authenticated, body
+        });
+        assert.equal(uploaded.status, 201);
+        const job = await uploaded.json();
+
+        const queued = await fetch(`${creditUrl}/jobs/${job.id}/queue`, {
+            method: 'POST',
+            headers: { ...authenticated, 'Content-Type': 'application/json' },
+            body: JSON.stringify({ effects: {} })
+        });
+        assert.equal(queued.status, 402);
+        const payload = await queued.json();
+        assert.equal(payload.code, 'INSUFFICIENT_CREDITS');
+        assert.equal(payload.requiredCredits, '2');
+        assert.equal(payload.availableCredits, '0');
+        assert.equal(creditCheckCalls, 1);
+        assert.equal(getWorkspaceJobInternal(job.id).status, 'pending', 'a job must never be queued when credits are insufficient');
+    } finally {
+        authenticatedUser = owner;
+        await new Promise(resolve => creditServer.close(resolve));
+    }
+});
+
+test('sufficient credits allow queueing to proceed as normal', async () => {
+    authenticatedUser = { ...owner, uid: `sufficient-credits-${randomUUID()}` };
+    const creditApp = express();
+    creditApp.use(express.json());
+    creditApp.use('/api/workspace', requireAuth, createWorkspaceRouter({
+        verifyKey: async () => ({ valid: true }),
+        readSourceDuration: async () => 60,
+        billingConfigured: () => true,
+        checkCredits: async () => ({ sufficient: true, requiredCredits: 2n, availableCredits: 12n })
+    }));
+    const creditServer = await new Promise(resolve => {
+        const listener = creditApp.listen(0, '127.0.0.1', () => resolve(listener));
+    });
+    const creditUrl = `http://127.0.0.1:${creditServer.address().port}/api/workspace`;
+    try {
+        const body = new FormData();
+        body.append('video', new Blob([Buffer.alloc(512)], { type: 'video/mp4' }), 'sufficient.mp4');
+        const uploaded = await fetch(`${creditUrl}/jobs`, {
+            method: 'POST', headers: authenticated, body
+        });
+        assert.equal(uploaded.status, 201);
+        const job = await uploaded.json();
+
+        const queued = await fetch(`${creditUrl}/jobs/${job.id}/queue`, {
+            method: 'POST',
+            headers: { ...authenticated, 'Content-Type': 'application/json' },
+            body: JSON.stringify({ effects: {} })
+        });
+        assert.equal(queued.status, 202);
+        assert.equal(getWorkspaceJobInternal(job.id).status, 'queued');
+        await fetch(`${creditUrl}/jobs/${job.id}/cancel`, { method: 'POST', headers: authenticated });
+    } finally {
+        authenticatedUser = owner;
+        await new Promise(resolve => creditServer.close(resolve));
+    }
+});
+
+test('the credit gate is skipped entirely when the PostgreSQL billing foundation is not configured, preserving existing behavior', async () => {
+    authenticatedUser = { ...owner, uid: `billing-disabled-${randomUUID()}` };
+    let creditCheckCalls = 0;
+    const creditApp = express();
+    creditApp.use(express.json());
+    creditApp.use('/api/workspace', requireAuth, createWorkspaceRouter({
+        verifyKey: async () => ({ valid: true }),
+        readSourceDuration: async () => 60,
+        billingConfigured: () => false,
+        checkCredits: async () => { creditCheckCalls += 1; return { sufficient: false, requiredCredits: 2n, availableCredits: 0n }; }
+    }));
+    const creditServer = await new Promise(resolve => {
+        const listener = creditApp.listen(0, '127.0.0.1', () => resolve(listener));
+    });
+    const creditUrl = `http://127.0.0.1:${creditServer.address().port}/api/workspace`;
+    try {
+        const body = new FormData();
+        body.append('video', new Blob([Buffer.alloc(512)], { type: 'video/mp4' }), 'billing-disabled.mp4');
+        const uploaded = await fetch(`${creditUrl}/jobs`, {
+            method: 'POST', headers: authenticated, body
+        });
+        assert.equal(uploaded.status, 201);
+        const job = await uploaded.json();
+
+        const queued = await fetch(`${creditUrl}/jobs/${job.id}/queue`, {
+            method: 'POST',
+            headers: { ...authenticated, 'Content-Type': 'application/json' },
+            body: JSON.stringify({ effects: {} })
+        });
+        assert.equal(queued.status, 202);
+        assert.equal(creditCheckCalls, 0, 'the credit gate must never be invoked when billing is not configured');
+        await fetch(`${creditUrl}/jobs/${job.id}/cancel`, { method: 'POST', headers: authenticated });
+    } finally {
+        authenticatedUser = owner;
+        await new Promise(resolve => creditServer.close(resolve));
+    }
+});
+
 const uploadVideo = (filename = 'movie.mp4') => {
     const body = new FormData();
     body.append('video', new Blob([Buffer.alloc(512)], { type: 'video/mp4' }), filename);

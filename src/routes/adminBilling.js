@@ -11,8 +11,10 @@ import {
   approveTrialRequest,
   assessTrial,
   configureBank,
+  configureBankAutoCode,
   configureCreditPlan,
   configurePlan,
+  configurePlanDefaults,
   configurePromotion,
   createCreditPackage,
   createPlanPolicy,
@@ -74,7 +76,8 @@ const handler = operation => async (req, res) => {
 
 export const createAdminBillingRouter = (service = {
   adminListCatalog, adminListPurchases, reviewPurchase, configurePlan, createPlanPolicy,
-  configureCreditPlan, configureBank, linkPackageBank, configurePromotion,
+  configurePlanDefaults, configureCreditPlan, configureBank, configureBankAutoCode,
+  linkPackageBank, configurePromotion,
   createCreditPackage, editCreditPackage, setCreditPackageStatus,
   archiveCreditPackage, reorderCreditPackages,
   adjustCredits, assessTrial, verifyScreenshot, adminGetScreenshotMetadata,
@@ -128,6 +131,12 @@ export const createAdminBillingRouter = (service = {
     service.createPlanPolicy(req.user, req.params.code, req.body, {
       idempotencyKey: idempotencyKey(req),
     })));
+  // Owner-facing simplified plan form: name/description/active only. Every
+  // technical field is backend-owned (see PLAN_POLICY_DEFAULTS).
+  router.put('/plans/:code/defaults', handler(req =>
+    service.configurePlanDefaults(req.user, req.params.code, req.body, {
+      idempotencyKey: idempotencyKey(req),
+    })));
   router.post('/credit-packages', handler(req => service.createCreditPackage(
     req.user, req.body, { idempotencyKey: idempotencyKey(req) },
   )));
@@ -152,6 +161,11 @@ export const createAdminBillingRouter = (service = {
   router.put('/banks/:code', handler(req => service.configureBank(req.user, {
     ...req.body, code: req.params.code,
   }, { idempotencyKey: idempotencyKey(req) })));
+  // Owner-facing simplified bank form: no code field -- the backend
+  // generates and safely de-duplicates it (see generateBankCode).
+  router.post('/banks', handler(req => service.configureBankAutoCode(req.user, req.body, {
+    idempotencyKey: idempotencyKey(req),
+  })));
   router.put('/credit-plans/:creditPlanId/banks/:bankAccountId', handler(req =>
     service.linkPackageBank(req.user, {
       creditPlanId: req.params.creditPlanId,

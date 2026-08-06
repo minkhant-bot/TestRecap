@@ -110,24 +110,32 @@ test('SSE progress mirrors every real restored core stage without Gemini-audio p
     assert.equal(getWorkspaceJob(job.id, ownerUid).audioUrl, `/output/${job.id}.mp3`);
 });
 
-test('cancellation aborts the restored core stage and records a cancelled job', async () => {
+test('a job that has already started processing cannot be cancelled and runs to completion in the background', async () => {
     clearWorkspaceJobsForTests();
     const job = createPending('cancel.mp4');
     queueWorkspaceJob(job.id, ownerUid);
+    let resolveCoreStage;
     const worker = new WorkspaceWorker(workerOptions({
-        coreStage: ({ signal }) => new Promise((resolve, reject) => {
-            signal.addEventListener('abort', () => reject(
-                Object.assign(new Error('cancelled'), { name: 'AbortError' })
-            ), { once: true });
+        coreStage: ({ job: activeJob }) => new Promise(resolve => {
+            resolveCoreStage = () => resolve(output(activeJob.id));
         })
     }));
     worker.start();
     await waitFor(() => getWorkspaceJob(job.id, ownerUid)?.status === 'processing');
-    requestWorkspaceJobCancellation(job.id, ownerUid);
-    worker.cancel(job.id);
-    await waitFor(() => getWorkspaceJob(job.id, ownerUid)?.status === 'cancelled');
+
+    assert.throws(
+        () => requestWorkspaceJobCancellation(job.id, ownerUid),
+        error => error.code === 'INVALID_JOB_STATE',
+    );
+    // Rejected, not merely queued for later interruption -- the job is
+    // completely undisturbed and still actively processing.
+    assert.equal(getWorkspaceJob(job.id, ownerUid).status, 'processing');
+    assert.equal(getWorkspaceJob(job.id, ownerUid).cancellationRequested, false);
+
+    resolveCoreStage();
+    await waitFor(() => getWorkspaceJob(job.id, ownerUid)?.status === 'completed');
     await worker.stop();
-    assert.equal(getWorkspaceJob(job.id, ownerUid).workerId, null);
+    assert.equal(getWorkspaceJob(job.id, ownerUid).cancellationRequested, false);
 });
 
 test('restored stage failure remains retryable by the workspace shell without duplicate work', async () => {

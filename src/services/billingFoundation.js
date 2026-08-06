@@ -534,14 +534,52 @@ export const getBalance = async (identity, {
   };
 };
 
+// Reservation-created and released-before-settlement events never get a
+// credit_ledger row (see transitionReservation/reserveLiveJob in
+// liveJobBilling.js -- only settlement and refund are real, balance-backed
+// ledger entries). This maps the corresponding audit_logs rows into the same
+// shape purely for display; it carries no balance effect and is never
+// written back anywhere.
+const mapCreditAuditEventToLedgerEntry = event => {
+  const isReservation = event.eventType === 'job.credits_reserved' || event.eventType === 'job.credits_reserved_retry';
+  const rawAmount = isReservation ? event.afterState?.totalCredits : event.afterState?.amount;
+  const amount = rawAmount === undefined || rawAmount === null ? null : BigInt(rawAmount);
+  return {
+    id: event.id,
+    userId: null,
+    amount: amount === null ? null : (isReservation ? -amount : amount),
+    entryType: isReservation ? 'reservation' : 'release',
+    purchaseRequestId: null,
+    reservationId: null,
+    jobId: event.jobId,
+    reversalOfEntryId: null,
+    correlationKey: null,
+    reason: isReservation ? null : (event.afterState?.reason ?? null),
+    createdByUserId: null,
+    metadata: {},
+    createdAt: event.occurredAt,
+  };
+};
+
 export const getLedger = async (identity, {
   env = process.env, limit = 100, deps = dependencies,
 } = {}) => {
   requireEnabled(env);
   const actor = await ensureActor(identity, { deps });
-  return deps.ledger.listLedgerEntries(actor.user.id, {
-    limit: Math.min(Math.max(Number(limit) || 100, 1), 100),
-  });
+  const boundedLimit = Math.min(Math.max(Number(limit) || 100, 1), 100);
+  const [ledgerEntries, creditEvents] = await Promise.all([
+    deps.ledger.listLedgerEntries(actor.user.id, { limit: boundedLimit }),
+    deps.audit.listJobCreditAuditEventsForUser(actor.user.id, { limit: boundedLimit }),
+  ]);
+  const synthesizedEntries = creditEvents
+    .map(mapCreditAuditEventToLedgerEntry)
+    // A release audit event recorded before this amount-enrichment shipped
+    // has no amount to show -- omit it rather than surface (or crash the
+    // client on) an entry with no value, instead of inventing one.
+    .filter(entry => entry.amount !== null);
+  const merged = [...ledgerEntries, ...synthesizedEntries];
+  merged.sort((left, right) => new Date(right.createdAt) - new Date(left.createdAt));
+  return merged.slice(0, boundedLimit);
 };
 
 export const estimateCredits = async (identity, input, {

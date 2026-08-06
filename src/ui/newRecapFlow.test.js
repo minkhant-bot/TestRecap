@@ -115,6 +115,31 @@ test('active cancellation stays on the existing job until SSE reports cancelled'
   assert.match(list, /onDelete && !\['queued', 'processing'\]\.includes\(job\.status\)/);
 });
 
+test('Cancel is only available before processing starts: hidden once a job is processing, never refunded past that point', () => {
+  const page = read('./pages/NewRecapPage.tsx');
+  const workspaceJobs = read('../services/workspaceJobs.js');
+  const workspaceRoute = read('../routes/workspace.js');
+
+  // Frontend: the Cancel button itself is gated on job.status === 'queued',
+  // nested inside the broader queued/processing progress panel -- it must
+  // not simply be disabled while processing, it must not render at all.
+  assert.match(page, /\{job\.status === 'queued' && \(/);
+  const cancelSection = page.slice(page.indexOf("job.status === 'queued' && ("), page.indexOf('status.cancelJob()') + 20);
+  assert.match(cancelSection, /variant="danger"/);
+
+  // Backend authorization: only a still-queued job can be cancelled: once
+  // 'processing', the request is rejected, not silently converted into an
+  // interrupt-and-refund.
+  assert.match(workspaceJobs, /if \(job\.status !== 'queued'\) \{/);
+  assert.match(workspaceJobs, /This project has already started processing and can no longer be cancelled\./);
+  assert.doesNotMatch(workspaceJobs, /interruptWorker/);
+
+  // The route no longer interrupts a running worker on cancel -- there is
+  // nothing left to interrupt, since cancellation past 'queued' is rejected
+  // before reaching this handler at all.
+  assert.doesNotMatch(workspaceRoute, /worker\.cancel\(/);
+});
+
 test('subtitle and blur setup happens on the uploaded (pending) job before explicit processing start', () => {
   const page = read('./pages/NewRecapPage.tsx');
   const editor = read('./workspace/VideoEffectsEditor.tsx');

@@ -6,6 +6,7 @@ import {
   adminGetUserCredits,
   backfillLegacyPlanEntitlements,
   estimateCredits,
+  getLedger,
   getMyScreenshotMetadata,
   listPlans,
 } from './billingFoundation.js';
@@ -378,4 +379,135 @@ test('after backfill, a default (no-effects) job and a Blur/Flip-enabled job bot
   assert.equal(violatesEntitlement({ blurEnabled: false, flipVideoEnabled: false }), false);
   assert.equal(violatesEntitlement({ blurEnabled: true, flipVideoEnabled: false }), false, 'Trial now has Blur entitled');
   assert.equal(violatesEntitlement({ blurEnabled: false, flipVideoEnabled: true }), false, 'Trial now has Flip entitled');
+});
+
+// Minimal getLedger harness: a real credit_ledger row (trial grant) plus
+// job-credit audit events (reservation/release), exactly mirroring what
+// production actually persists today -- proving the merge surfaces events
+// that were previously invisible without inventing any new balance-backed
+// credit_ledger row.
+const createLedgerHarness = ({ ledgerRows = [], auditEvents = [] } = {}) => ({
+  users: { ensureUser: async () => ({ id: 'ledger-user-id' }) },
+  ledger: {
+    listLedgerEntries: async () => ledgerRows,
+  },
+  audit: {
+    listJobCreditAuditEventsForUser: async () => auditEvents,
+  },
+});
+
+test('credit ledger: a job that only started (reservation, not yet resolved) is visible alongside the Trial grant', async () => {
+  const deps = createLedgerHarness({
+    ledgerRows: [{
+      id: 'ledger-1', entryType: 'trial_grant', amount: 12n, jobId: null,
+      createdAt: '2026-01-01T00:00:00Z',
+    }],
+    auditEvents: [{
+      id: 'audit-1', eventType: 'job.credits_reserved', jobId: 'job-1',
+      occurredAt: '2026-01-02T00:00:00Z', afterState: { totalCredits: '3' },
+    }],
+  });
+  const entries = await getLedger({ uid: 'user' }, { env: enabledEnv, deps });
+  assert.equal(entries.length, 2);
+  assert.equal(entries[0].entryType, 'reservation');
+  assert.equal(entries[0].amount, -3n);
+  assert.equal(entries[0].jobId, 'job-1');
+  assert.equal(entries[1].entryType, 'trial_grant');
+});
+
+test('credit ledger: cancelling (or failing before settlement) shows a release entry with the returned amount and reason, still no fake balance row', async () => {
+  const deps = createLedgerHarness({
+    auditEvents: [
+      {
+        id: 'audit-1', eventType: 'job.credits_reserved', jobId: 'job-1',
+        occurredAt: '2026-01-01T00:00:00Z', afterState: { totalCredits: '3' },
+      },
+      {
+        id: 'audit-2', eventType: 'job.credits_released', jobId: 'job-1',
+        occurredAt: '2026-01-01T00:05:00Z', afterState: { amount: '3', reason: 'user_cancelled' },
+      },
+    ],
+  });
+  const entries = await getLedger({ uid: 'user' }, { env: enabledEnv, deps });
+  assert.equal(entries.length, 2);
+  const release = entries.find(entry => entry.entryType === 'release');
+  assert.equal(release.amount, 3n);
+  assert.equal(release.jobId, 'job-1');
+  assert.equal(release.reason, 'user_cancelled');
+});
+
+test('credit ledger: a completed job\'s real settlement entry still surfaces exactly as before, merged alongside its reservation', async () => {
+  const deps = createLedgerHarness({
+    ledgerRows: [{
+      id: 'ledger-1', entryType: 'settlement', amount: -3n, jobId: 'job-1',
+      createdAt: '2026-01-01T00:10:00Z',
+    }],
+    auditEvents: [{
+      id: 'audit-1', eventType: 'job.credits_reserved', jobId: 'job-1',
+      occurredAt: '2026-01-01T00:00:00Z', afterState: { totalCredits: '3' },
+    }],
+  });
+  const entries = await getLedger({ uid: 'user' }, { env: enabledEnv, deps });
+  assert.equal(entries.length, 2);
+  assert.equal(entries[0].entryType, 'settlement');
+  assert.equal(entries[0].amount, -3n);
+  assert.equal(entries[1].entryType, 'reservation');
+});
+
+test('credit ledger: a retried job shows both the original reservation/release and the retry\'s own reservation -- no event is lost or double-counted', async () => {
+  const deps = createLedgerHarness({
+    auditEvents: [
+      {
+        id: 'audit-1', eventType: 'job.credits_reserved', jobId: 'job-1',
+        occurredAt: '2026-01-01T00:00:00Z', afterState: { totalCredits: '3' },
+      },
+      {
+        id: 'audit-2', eventType: 'job.credits_released', jobId: 'job-1',
+        occurredAt: '2026-01-01T00:05:00Z', afterState: { amount: '3', reason: 'provider_failure' },
+      },
+      {
+        id: 'audit-3', eventType: 'job.credits_reserved_retry', jobId: 'job-1',
+        occurredAt: '2026-01-01T00:06:00Z', afterState: { totalCredits: '3' },
+      },
+    ],
+  });
+  const entries = await getLedger({ uid: 'user' }, { env: enabledEnv, deps });
+  assert.equal(entries.length, 3, 'every distinct lifecycle event for the job must remain visible');
+  assert.deepEqual(entries.map(entry => entry.entryType), ['reservation', 'release', 'reservation']);
+  assert.equal(entries.every(entry => entry.jobId === 'job-1'), true);
+});
+
+test('credit ledger: entries are sorted newest-first and capped to the requested limit', async () => {
+  const deps = createLedgerHarness({
+    ledgerRows: [{
+      id: 'ledger-1', entryType: 'trial_grant', amount: 12n, jobId: null,
+      createdAt: '2026-01-01T00:00:00Z',
+    }],
+    auditEvents: [{
+      id: 'audit-1', eventType: 'job.credits_reserved', jobId: 'job-1',
+      occurredAt: '2026-01-03T00:00:00Z', afterState: { totalCredits: '3' },
+    }],
+  });
+  const entries = await getLedger({ uid: 'user' }, { env: enabledEnv, deps, limit: 1 });
+  assert.equal(entries.length, 1);
+  assert.equal(entries[0].entryType, 'reservation');
+});
+
+test('credit ledger: a pre-fix historical release event with no recorded amount is omitted, never surfaced with a null amount', async () => {
+  const deps = createLedgerHarness({
+    ledgerRows: [{
+      id: 'ledger-1', entryType: 'trial_grant', amount: 12n, jobId: null,
+      createdAt: '2026-01-01T00:00:00Z',
+    }],
+    auditEvents: [{
+      // Matches the shape written before the amount-enrichment fix: only
+      // { reason } in afterState, no amount field at all.
+      id: 'audit-1', eventType: 'job.credits_released', jobId: 'job-old',
+      occurredAt: '2026-01-01T12:00:00Z', afterState: { reason: 'user_cancelled' },
+    }],
+  });
+  const entries = await getLedger({ uid: 'user' }, { env: enabledEnv, deps });
+  assert.equal(entries.length, 1);
+  assert.equal(entries[0].entryType, 'trial_grant');
+  assert.ok(entries.every(entry => entry.amount !== null));
 });

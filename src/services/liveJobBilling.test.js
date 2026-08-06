@@ -621,6 +621,24 @@ test('failure before valid output releases without a debit', async () => {
   assert.equal(harness.state.ledger.length, 0);
 });
 
+test('credit ledger visibility: reservation and release audit events carry the amount, even though release never gets a real credit_ledger row', async () => {
+  const harness = createHarness();
+  const result = await reserveLiveJob(request(), { env, repositories: harness.repositories });
+  const reservedEvent = harness.state.audit.find(entry => entry.eventType === 'job.credits_reserved');
+  assert.ok(reservedEvent, 'a reservation audit event must be recorded on job start');
+  assert.equal(reservedEvent.afterState.totalCredits, result.snapshot.totalCredits);
+  assert.equal(reservedEvent.subjectUserId, harness.state.user.id);
+
+  await handleLiveJobFailure(request().jobId, 'user_cancelled', { repositories: harness.repositories });
+  const releasedEvent = harness.state.audit.find(entry => entry.eventType === 'job.credits_released');
+  assert.ok(releasedEvent, 'a release audit event must be recorded on cancel/failure-before-settlement');
+  assert.equal(releasedEvent.afterState.amount, result.snapshot.totalCredits);
+  assert.equal(releasedEvent.afterState.reason, 'user_cancelled');
+  // Confirms the pre-existing invariant is unchanged: release still never
+  // creates a real, balance-backed credit_ledger row.
+  assert.equal(harness.state.ledger.length, 0);
+});
+
 test('qualifying post-settlement failure creates one full compensating refund', async () => {
   const harness = createHarness();
   await reserveLiveJob(request(), { env, repositories: harness.repositories });

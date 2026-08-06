@@ -436,24 +436,21 @@ export const createWorkspaceRouter = ({
         }
     });
 
+    // Cancel is only ever reachable for a still-queued job (see
+    // requestWorkspaceJobCancellation); a job already picked up by the
+    // worker rejects this with INVALID_JOB_STATE and runs to completion
+    // untouched, so there is no worker to interrupt here.
     router.post('/jobs/:jobId/cancel', admitMutation('workspace.jobs.cancel'), async (req, res) => {
         try {
-            const result = requestWorkspaceJobCancellation(req.params.jobId, req.user.uid);
-            if (!result) return res.status(404).json({ error: 'Project not found.' });
-            if (result.interruptWorker) worker.cancel(req.params.jobId);
-            if (!result.interruptWorker && liveBillingEnabled() && result.job.billing) {
+            let job = requestWorkspaceJobCancellation(req.params.jobId, req.user.uid);
+            if (!job) return res.status(404).json({ error: 'Project not found.' });
+            if (liveBillingEnabled() && job.billing) {
                 const billing = await releaseBilling(req.params.jobId, 'job_cancelled_before_start');
-                result.job = updateWorkspaceJobBilling(
-                    req.params.jobId, req.user.uid, billing
-                );
+                job = updateWorkspaceJobBilling(req.params.jobId, req.user.uid, billing);
             }
-            publishWorkspaceEvent(
-                req.params.jobId,
-                result.interruptWorker ? 'job.cancellation_requested' : 'job.cancelled',
-                result.job
-            );
+            publishWorkspaceEvent(req.params.jobId, 'job.cancelled', job);
             publishQueue();
-            return res.status(202).json(result.job);
+            return res.status(202).json(job);
         } catch (error) {
             if (error?.code === 'INVALID_JOB_STATE') {
                 return res.status(409).json({ error: error.message });

@@ -346,32 +346,34 @@ export const getWorkspaceQueue = ownerUid => {
         .filter(job => getWorkspaceJobInternal(job.id)?.ownerUid === ownerUid);
 };
 
+// Cancellation policy: only a job that has not yet entered active processing
+// (still 'queued') may be cancelled. Once a worker has picked it up
+// ('processing'), Cancel is no longer available -- the job runs to
+// completion in the background and credits are never refunded for a
+// user-initiated cancellation past that point. System failures during
+// processing still release/refund via the existing failure path
+// (WorkspaceWorker's own failure handling), which this does not touch.
 export const requestWorkspaceJobCancellation = (id, ownerUid) => {
     const job = jobs.get(id);
     if (!job || job.ownerUid !== ownerUid) return null;
-    if (!['queued', 'processing'].includes(job.status)) {
-        const error = new Error('Only queued or processing jobs can be cancelled.');
+    if (job.status !== 'queued') {
+        const error = new Error(
+            job.status === 'processing'
+                ? 'This project has already started processing and can no longer be cancelled.'
+                : 'Only queued projects can be cancelled.'
+        );
         error.code = 'INVALID_JOB_STATE';
         throw error;
     }
-    if (job.status === 'queued') {
-        const now = new Date().toISOString();
-        return {
-            job: updateInternal(id, {
-                cancellationRequested: true,
-                status: 'cancelled',
-                stage: 'cancelled',
-                progress: 0,
-                cancelledAt: now,
-                workerId: null
-            }),
-            interruptWorker: false
-        };
-    }
-    return {
-        job: updateInternal(id, { cancellationRequested: true }),
-        interruptWorker: true
-    };
+    const now = new Date().toISOString();
+    return updateInternal(id, {
+        cancellationRequested: true,
+        status: 'cancelled',
+        stage: 'cancelled',
+        progress: 0,
+        cancelledAt: now,
+        workerId: null
+    });
 };
 
 export const recoverWorkspaceJobs = () => {

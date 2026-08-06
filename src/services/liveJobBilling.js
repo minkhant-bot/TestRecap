@@ -262,7 +262,12 @@ const transitionReservation = async (jobId, action, reason, repositories) =>
       actorService: 'live_job_billing',
       subjectUserId: job.userId,
       eventType: `job.credits_${action === 'refund' ? 'refunded' : `${action}d`}`,
-      resourceType: 'job', resourceId: jobId, afterState: { reason },
+      resourceType: 'job', resourceId: jobId,
+      // The amount is recorded here (metadata only, no balance effect) so a
+      // release event -- which never gets its own credit_ledger row, unlike
+      // settle/refund -- can still be surfaced with its amount in the
+      // user-facing ledger view (see getLedger's audit-log merge).
+      afterState: { reason, amount: String(reservation.amount) },
     }, { client });
     return publicSnapshot(await repositories.jobs.findBillingJob(jobId, { client }));
   });

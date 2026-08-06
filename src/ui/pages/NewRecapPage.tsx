@@ -287,11 +287,18 @@ export function NewRecapPage() {
           <div className="row between"><b title={job.filename}>{job.filename}</b><span className="muted">{job.stage === 'final_export' ? finalExportSubLabel(job.progress) : 'Processing'}</span></div>
           <div className="progress"><span style={{ width: `${activeProgress}%` }} /></div>
           <Pipeline job={job} uploadState={uploadPanel.state} />
-          <div className="row wrap" style={{ marginTop: 18 }}>
-            <Button variant="danger" loading={status.cancelling || job.cancellationRequested} disabled={status.cancelling || job.cancellationRequested} onClick={() => void status.cancelJob()}>
-              {job.cancellationRequested ? 'Cancelling' : 'ပယ်ဖျက်မည်'}
-            </Button>
-          </div>
+          {/* Cancel is only available before processing starts (job.status
+             === 'queued'). Once a worker picks it up, the job runs to
+             completion in the background and Cancel is hidden, not merely
+             disabled -- there is nothing left to cancel without losing
+             already-committed work, and no refund applies past this point. */}
+          {job.status === 'queued' && (
+            <div className="row wrap" style={{ marginTop: 18 }}>
+              <Button variant="danger" loading={status.cancelling || job.cancellationRequested} disabled={status.cancelling || job.cancellationRequested} onClick={() => void status.cancelJob()}>
+                {job.cancellationRequested ? 'Cancelling' : 'ပယ်ဖျက်မည်'}
+              </Button>
+            </div>
+          )}
         </div>
       )}
 

@@ -63,3 +63,28 @@ export const listAuditLogs = async ({
   );
   return result.rows;
 };
+
+// User-scoped job-credit lifecycle events (reservation created / released) --
+// read-only, metadata-only rows that never touch credit_ledger or any
+// balance projection. Used only to surface reservation/release visibility in
+// the user-facing ledger view (see getLedger); settlement and refund already
+// have their own real credit_ledger rows and are not queried here.
+export const listJobCreditAuditEventsForUser = async (subjectUserId, {
+  eventTypes = ['job.credits_reserved', 'job.credits_reserved_retry', 'job.credits_released'],
+  limit = 100, client = null,
+} = {}) => {
+  const result = await databaseExecutor(client).query(
+    `SELECT id,occurred_at,subject_user_id,event_type,resource_id,after_state
+     FROM audit_logs
+     WHERE subject_user_id=$1 AND resource_type='job' AND event_type = ANY($2::text[])
+     ORDER BY occurred_at DESC,id DESC LIMIT $3`,
+    [subjectUserId, eventTypes, limit],
+  );
+  return result.rows.map(row => ({
+    id: row.id,
+    occurredAt: row.occurred_at,
+    eventType: row.event_type,
+    jobId: row.resource_id,
+    afterState: row.after_state,
+  }));
+};

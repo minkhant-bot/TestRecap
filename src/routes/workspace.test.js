@@ -623,6 +623,51 @@ test('sufficient credits allow queueing to proceed as normal', async () => {
     }
 });
 
+test('cancelling a job that has already started processing is rejected with 409 and no credits are released', async () => {
+    authenticatedUser = { ...owner, uid: `cancel-processing-${randomUUID()}` };
+    let releaseCalls = 0;
+    const cancelApp = express();
+    cancelApp.use(express.json());
+    cancelApp.use('/api/workspace', requireAuth, createWorkspaceRouter({
+        verifyKey: async () => ({ valid: true }),
+        readSourceDuration: async () => 12,
+        liveBillingEnabled: () => true,
+        reserveBilling: async () => ({ snapshot: { billingStatus: 'reserved' }, replayed: false }),
+        releaseBilling: async () => { releaseCalls += 1; return { billingStatus: 'released' }; }
+    }));
+    const cancelServer = await new Promise(resolve => {
+        const listener = cancelApp.listen(0, '127.0.0.1', () => resolve(listener));
+    });
+    const cancelUrl = `http://127.0.0.1:${cancelServer.address().port}/api/workspace`;
+    try {
+        const body = new FormData();
+        body.append('video', new Blob([Buffer.alloc(512)], { type: 'video/mp4' }), 'processing.mp4');
+        const uploaded = await fetch(`${cancelUrl}/jobs`, { method: 'POST', headers: authenticated, body });
+        assert.equal(uploaded.status, 201);
+        const job = await uploaded.json();
+        const queued = await fetch(`${cancelUrl}/jobs/${job.id}/queue`, {
+            method: 'POST',
+            headers: { ...authenticated, 'Content-Type': 'application/json', 'Idempotency-Key': 'cancel-processing-1' },
+            body: JSON.stringify({ effects: {} })
+        });
+        assert.equal(queued.status, 202);
+
+        // Simulate the worker having already picked this job up.
+        updateWorkspaceJobInternal(job.id, { status: 'processing', stage: 'preparing', progress: 10 });
+
+        const cancelled = await fetch(`${cancelUrl}/jobs/${job.id}/cancel`, {
+            method: 'POST', headers: authenticated
+        });
+        assert.equal(cancelled.status, 409);
+        assert.equal((await cancelled.json()).error, 'This project has already started processing and can no longer be cancelled.');
+        assert.equal(getWorkspaceJobInternal(job.id).status, 'processing', 'the job must be left completely undisturbed');
+        assert.equal(releaseCalls, 0, 'no credits may be released for a rejected cancellation past processing start');
+    } finally {
+        authenticatedUser = owner;
+        await new Promise(resolve => cancelServer.close(resolve));
+    }
+});
+
 test('the credit gate is skipped entirely when the PostgreSQL billing foundation is not configured, preserving existing behavior', async () => {
     authenticatedUser = { ...owner, uid: `billing-disabled-${randomUUID()}` };
     let creditCheckCalls = 0;

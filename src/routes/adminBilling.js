@@ -10,6 +10,7 @@ import {
   adminListPurchases,
   approveTrialRequest,
   assessTrial,
+  backfillLegacyPlanEntitlements,
   configureBank,
   configureBankAutoCode,
   configureCreditPlan,
@@ -76,7 +77,7 @@ const handler = operation => async (req, res) => {
 
 export const createAdminBillingRouter = (service = {
   adminListCatalog, adminListPurchases, reviewPurchase, configurePlan, createPlanPolicy,
-  configurePlanDefaults, configureCreditPlan, configureBank, configureBankAutoCode,
+  configurePlanDefaults, backfillLegacyPlanEntitlements, configureCreditPlan, configureBank, configureBankAutoCode,
   linkPackageBank, configurePromotion,
   createCreditPackage, editCreditPackage, setCreditPackageStatus,
   archiveCreditPackage, reorderCreditPackages,
@@ -135,6 +136,13 @@ export const createAdminBillingRouter = (service = {
   // technical field is backend-owned (see PLAN_POLICY_DEFAULTS).
   router.put('/plans/:code/defaults', handler(req =>
     service.configurePlanDefaults(req.user, req.params.code, req.body, {
+      idempotencyKey: idempotencyKey(req),
+    })));
+  // Explicit, Owner-triggered repair for Trial/Pro policy rows that predate
+  // the Trial/Pro simplification (see backfillLegacyPlanEntitlements) --
+  // never run automatically; always a deliberate Admin action.
+  router.post('/plans/backfill-legacy-entitlements', handler(req =>
+    service.backfillLegacyPlanEntitlements(req.user, {
       idempotencyKey: idempotencyKey(req),
     })));
   router.post('/credit-packages', handler(req => service.createCreditPackage(

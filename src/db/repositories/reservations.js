@@ -43,6 +43,27 @@ export const insertReservation = async (reservation, { client, id = randomUUID()
   return mapReservation(firstRow(result));
 };
 
+// Reopens a job's SOLE reservation row (job_id is UNIQUE by schema, so a
+// retried job can never gain a second, independent reservation) after it
+// was cleanly released by a prior failure. Guarded by status='released' so
+// it can never reactivate an active, settled, or otherwise finalized
+// reservation. The release itself remains permanently recorded in
+// audit_logs even though this row's own released_at is cleared here.
+export const reactivateReservation = async ({ jobId, amount, idempotencyKey }, { client }) => {
+  if (!client) throw new Error('Reservation mutations require an existing transaction client.');
+  const result = await client.query(
+    `UPDATE credit_reservations SET
+       amount = $2, idempotency_key = $3, status = 'reserved',
+       reserved_at = now(), settled_at = NULL, released_at = NULL,
+       refunded_at = NULL, review_required_at = NULL, review_origin_status = NULL,
+       resolution_reason = NULL, version = version + 1
+     WHERE job_id = $1 AND status = 'released'
+     RETURNING ${COLUMNS}`,
+    [jobId, String(amount), idempotencyKey],
+  );
+  return mapReservation(firstRow(result));
+};
+
 export const updateReservationStatus = async ({
   reservationId,
   status,

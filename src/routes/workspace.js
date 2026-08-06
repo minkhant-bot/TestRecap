@@ -166,6 +166,7 @@ export const createWorkspaceRouter = ({
 
     router.post('/jobs/:jobId/retry', admitMutation('workspace.jobs.retry'), async (req, res) => {
         const idempotencyKey = String(req.get('Idempotency-Key') || '').trim();
+        let reserved = false;
         try {
             const job = getWorkspaceJob(req.params.jobId, req.user.uid);
             if (!job) return res.status(404).json({
@@ -192,13 +193,32 @@ export const createWorkspaceRouter = ({
             }
             const internal = getWorkspaceJobInternal(req.params.jobId);
             const eligibility = requireRecoverableWorkspaceRetry(internal);
-            validateSourceVideoDuration(await readSourceDuration(internal.storedPath));
+            const sourceDurationSeconds = validateSourceVideoDuration(
+                await readSourceDuration(internal.storedPath)
+            );
             const geminiApiKey = resolveServerGeminiKey();
             if (!geminiApiKey) {
                 return res.status(503).json({
                     error: 'Recap processing is temporarily unavailable due to a service configuration issue. Please try again later.',
                     code: 'GEMINI_KEY_NOT_CONFIGURED'
                 });
+            }
+            // A failed job's live-billing reservation was already released
+            // (see handleLiveJobFailure, invoked by the worker on failure).
+            // Re-reserve BEFORE re-queueing so a retry can never proceed
+            // without a fresh, active reservation backing it -- re-reservation
+            // failure must block the retry synchronously here, not surface
+            // later as a settlement error after the job has already run again.
+            if (liveBillingEnabled()) {
+                const reservationResult = await reserveBilling({
+                    identity: req.user, jobId: internal.id, sourceDurationSeconds,
+                    requestedPlanCode: String(req.body?.planCode || '').trim(),
+                    requestedMode: String(req.body?.billingMode || '').trim(),
+                    idempotencyKey,
+                    effects: internal.effects
+                });
+                reserved = !reservationResult.replayed;
+                updateWorkspaceJobBilling(internal.id, req.user.uid, reservationResult.snapshot);
             }
             const result = admission.withProcessingAdmission(
                 req.user.uid,
@@ -225,6 +245,16 @@ export const createWorkspaceRouter = ({
                 job: result.job
             });
         } catch (error) {
+            if (reserved) {
+                try {
+                    await releaseBilling(req.params.jobId, 'retry_admission_failed');
+                } catch (releaseError) {
+                    console.error('[Workspace retry] reservation compensation failed', {
+                        jobId: req.params.jobId,
+                        message: releaseError?.message
+                    });
+                }
+            }
             if (sendAdmissionError(res, error, req.requestId)) return;
             if (error instanceof WorkspaceRetryError) {
                 return res.status(error.status).json({ error: error.message, code: error.code });
@@ -247,6 +277,9 @@ export const createWorkspaceRouter = ({
             }
             if (error?.code === 'INVALID_SOURCE_VIDEO_DURATION') {
                 return res.status(422).json({ error: error.message, code: error.code });
+            }
+            if (error?.name === 'BillingError') {
+                return res.status(error.status).json({ error: error.message, code: error.code });
             }
             console.error('[Workspace retry] request failed', {
                 requestId: req.requestId,
@@ -275,13 +308,19 @@ export const createWorkspaceRouter = ({
             }));
             const liveBilling = liveBillingEnabled();
             const requestedPlanCode = String(req.body?.planCode || '').trim();
-            // Every plan (Trial and Pro) is blink_funded-only now -- there is no
-            // BYOK mode and no personal Gemini key to resolve or verify. Every
-            // authorized user, live billing or not, processes through the single
-            // server-managed key; a missing/invalid key is always a generic
-            // service configuration issue, never something the user is asked to
-            // fix.
-            const requestedMode = 'blink_funded';
+            // Neither field is ever sent by our own frontend (which derives
+            // nothing plan/mode-related client-side) -- both are accepted only
+            // as optional, defense-in-depth values that reserveLiveJob checks
+            // against the freshly loaded, authoritative assignment/policy when
+            // present. The real source of truth is always the backend-stored
+            // plan assignment and its currently effective policy, never a
+            // client-supplied guess.
+            const requestedMode = String(req.body?.billingMode || '').trim();
+            // There is no BYOK mode and no personal Gemini key to resolve or
+            // verify -- every authorized user, live billing or not, processes
+            // through the single server-managed key; a missing/invalid key is
+            // always a generic service configuration issue, never something
+            // the user is asked to fix.
             const geminiApiKey = resolveServerGeminiKey();
             if (!geminiApiKey) {
                 return res.status(503).json({

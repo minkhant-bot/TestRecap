@@ -1122,6 +1122,68 @@ export const configurePlanDefaults = async (identity, planCode, input, options =
   });
 };
 
+const currentPolicyIsMigrated = (billingMode, entitlementRows) => {
+  if (billingMode !== PLAN_POLICY_DEFAULTS.billingMode) return false;
+  const enabledByKey = Object.fromEntries(entitlementRows.map(item => [item.key, item.enabled]));
+  return PLAN_POLICY_DEFAULTS.entitlements.every(item => enabledByKey[item.key] === item.enabled);
+};
+
+// One-time, idempotent Admin-triggered repair for plan_policy_versions rows
+// that predate the Trial/Pro simplification and still carry the retired
+// shape (billingMode 'byok', or Blur/Flip disabled for Trial) -- the exact
+// condition that produced the "Requested billing mode is not entitled." /
+// entitlement-mismatch production failures. Versions each affected plan's
+// policy forward with the current billingMode/entitlements, exactly like an
+// Owner re-saving the plan via configurePlanDefaults, but as a single bulk
+// action covering every legacy Trial/Pro policy at once. A genuine no-op
+// (skips the plan entirely) once its policy already matches the current
+// defaults, so running this repeatedly or against an already-migrated
+// deployment changes nothing. Never touches creditsPerBlock,
+// trialAllowanceCredits, prices, credit balances, plan assignments, plans
+// with no existing policy, or any plan code other than trial/pro -- only
+// billingMode and entitlements are ever changed, and the prior policy
+// window is closed (not deleted), preserving policy history.
+export const backfillLegacyPlanEntitlements = async (identity, options = {}) => {
+  const { env = process.env, idempotencyKey, deps = dependencies } = options;
+  return withSuperAdminMutation(identity, {
+    env, idempotencyKey, operation: 'plan.backfill_legacy_entitlements', request: {},
+    resourceType: 'plan', deps,
+    work: async (client, actor) => {
+      const now = new Date();
+      const updated = [];
+      for (const planCode of PLAN_CODES) {
+        const plan = await deps.plans.findPlanByCode(planCode, { client });
+        if (!plan?.active) continue;
+        const latest = await deps.plans.findEffectivePlanPolicy(plan.id, now, { client });
+        if (!latest) continue;
+        const entitlementRows = await deps.plans.listPlanEntitlements(latest.id, { client });
+        if (currentPolicyIsMigrated(latest.billingMode, entitlementRows)) continue;
+        await deps.billing.closePlanPolicyWindow(latest.id, now, { client });
+        const policyRequest = {
+          planCode, version: latest.version + 1,
+          // Pricing/allowance are preserved exactly as configured -- this
+          // repair only ever touches billingMode and entitlements.
+          creditsPerBlock: latest.creditsPerBlock,
+          trialAllowanceCredits: latest.trialAllowanceCredits,
+          billingMode: PLAN_POLICY_DEFAULTS.billingMode,
+          active: true, effectiveFrom: now, effectiveUntil: null,
+          entitlements: PLAN_POLICY_DEFAULTS.entitlements,
+        };
+        const policy = await deps.billing.insertPlanPolicy({
+          ...policyRequest, planId: plan.id, actorUserId: actor.user.id,
+        }, { client });
+        await deps.audit.insertAuditLog({
+          actorUserId: actor.user.id, eventType: 'plan.legacy_entitlements_backfilled',
+          resourceType: 'plan', resourceId: plan.id,
+          afterState: publicJson({ planCode, policy: policyRequest }),
+        }, { client });
+        updated.push({ planCode, policy });
+      }
+      return { status: 200, resourceId: null, body: { updated } };
+    },
+  });
+};
+
 export const configureCreditPlan = async (identity, input, options = {}) => {
   const { env = process.env, idempotencyKey, deps = dependencies } = options;
   requireConfirmation(input);

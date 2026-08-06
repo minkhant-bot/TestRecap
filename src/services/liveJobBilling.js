@@ -70,17 +70,36 @@ export const reserveLiveJob = async ({
   const result = await repositories.transaction(async client => {
     const user = await ensureUser(identity, client, repositories);
     const existing = await repositories.jobs.findBillingJob(jobId, { client, forUpdate: true });
+    let reopening = false;
     if (existing) {
-      if (existing.userId !== user.id || existing.idempotencyKey !== idempotencyKey ||
-          (requestedPlanCode && existing.planCodeSnapshot !== requestedPlanCode) ||
-          existing.billingMode !== requestedMode ||
-          existing.sourceDurationMs !== BigInt(Math.ceil(seconds * 1000))) {
-        fail('Job reservation idempotency conflict.', 'IDEMPOTENCY_CONFLICT', 409);
+      const sameAttempt = existing.idempotencyKey === idempotencyKey;
+      if (sameAttempt) {
+        if (existing.userId !== user.id ||
+            (requestedPlanCode && existing.planCodeSnapshot !== requestedPlanCode) ||
+            (requestedMode && existing.billingMode !== requestedMode) ||
+            existing.sourceDurationMs !== BigInt(Math.ceil(seconds * 1000))) {
+          fail('Job reservation idempotency conflict.', 'IDEMPOTENCY_CONFLICT', 409);
+        }
+        if (existing.billingStatus !== 'reserved') {
+          fail('The existing reservation is no longer active.', 'INVALID_BILLING_STATE', 409);
+        }
+        return { snapshot: publicSnapshot(existing), replayed: true };
       }
-      if (existing.billingStatus !== 'reserved') {
-        fail('The existing reservation is no longer active.', 'INVALID_BILLING_STATE', 409);
+      if (existing.userId !== user.id) fail('Job reservation idempotency conflict.', 'IDEMPOTENCY_CONFLICT', 409);
+      // A different attempt (new Idempotency-Key) for the same job: the
+      // schema allows exactly one reservation row per job, so a retry after
+      // a failed job -- whose reservation was already cleanly released by
+      // handleLiveJobFailure -- reopens that SAME row rather than creating a
+      // second, independent one. Never reopen on top of a reservation that
+      // is still active or already finalized (settled/refunded/under
+      // review); that is a genuine conflict, not a retryable state.
+      if (existing.billingStatus !== 'released') {
+        fail(
+          'This project already has an active or finalized billing reservation.',
+          'RESERVATION_ALREADY_FINALIZED', 409,
+        );
       }
-      return { snapshot: publicSnapshot(existing), replayed: true };
+      reopening = true;
     }
     // The backend-stored assignment is the sole source of truth for which
     // plan a job reserves against -- self-service plan selection is
@@ -115,7 +134,14 @@ export const reserveLiveJob = async ({
       ? await repositories.plans.findEffectivePlanPolicy(plan.id, new Date(), { client })
       : null;
     if (!policy) fail('Plan policy is unavailable.', 'PLAN_POLICY_UNAVAILABLE', 422);
-    if (policy.billingMode !== requestedMode) {
+    // The plan's currently effective policy is the sole source of truth for
+    // billing mode -- the client never legitimately chooses one. A
+    // caller-supplied billingMode is accepted only as an optional
+    // defense-in-depth check, mirroring the planCode check above: present
+    // and mismatched (e.g. a stale/spoofed 'byok') is a genuine, rejected
+    // conflict; absent (the normal case) never blocks an entitled user,
+    // even if the deployed policy predates the current billing mode.
+    if (requestedMode && policy.billingMode !== requestedMode) {
       fail('Requested billing mode is not entitled.', 'BILLING_MODE_NOT_ENTITLED', 422);
     }
     const entitlements = await repositories.plans.listPlanEntitlements(policy.id, { client });
@@ -134,13 +160,22 @@ export const reserveLiveJob = async ({
     await repositories.balances.ensureBalanceAccountForUpdate(user.id, { client });
     const balance = await repositories.balances.reserveCredits(user.id, totalCredits, { client });
     if (!balance) fail('Available credits are insufficient.', 'INSUFFICIENT_CREDITS', 409);
+    // insertBillingJob is a no-op (ON CONFLICT DO NOTHING) when reopening --
+    // the job row already exists and is reused as-is; only the reservation
+    // row itself is either freshly inserted or reactivated below.
     await repositories.jobs.insertBillingJob({
       id: jobId, userId: user.id, idempotencyKey,
     }, { client });
-    const reservation = await repositories.reservations.insertReservation({
-      userId: user.id, jobId, amount: totalCredits,
-      idempotencyKey: `job:${jobId}:${idempotencyKey}`,
-    }, { client });
+    const reservationIdempotencyKey = `job:${jobId}:${idempotencyKey}`;
+    const reservation = reopening
+      ? await repositories.reservations.reactivateReservation({
+          jobId, amount: totalCredits, idempotencyKey: reservationIdempotencyKey,
+        }, { client })
+      : await repositories.reservations.insertReservation({
+          userId: user.id, jobId, amount: totalCredits,
+          idempotencyKey: reservationIdempotencyKey,
+        }, { client });
+    if (!reservation) fail('The existing reservation is no longer active.', 'INVALID_BILLING_STATE', 409);
     const job = await repositories.jobs.attachBillingSnapshot({
       id: jobId, planId: plan.id, planCode: plan.code, billingMode: policy.billingMode,
       sourceDurationMs, blocks, creditsPerBlock: policy.creditsPerBlock, totalCredits,
@@ -151,11 +186,12 @@ export const reserveLiveJob = async ({
         creditsPerBlock: String(policy.creditsPerBlock),
         effectiveFrom: policy.effectiveFrom,
       },
-      entitlementSnapshot, reservationId: reservation.id,
+      entitlementSnapshot, reservationId: reservation.id, idempotencyKey,
     }, { client });
     await repositories.audit.insertAuditLog({
       actorUserId: user.id, subjectUserId: user.id,
-      eventType: 'job.credits_reserved', resourceType: 'job', resourceId: jobId,
+      eventType: reopening ? 'job.credits_reserved_retry' : 'job.credits_reserved',
+      resourceType: 'job', resourceId: jobId,
       afterState: publicSnapshot(job),
     }, { client });
     return { snapshot: publicSnapshot(job), replayed: false };

@@ -315,7 +315,10 @@ test('queueing under live billing never demands a BYOK key, even though the clie
         });
         assert.equal(queued.status, 202);
         assert.doesNotMatch(JSON.stringify(await queued.json()), /byok|BYOK/i);
-        assert.equal(reserveArgs.requestedMode, 'blink_funded');
+        // No billingMode was sent, and none is hardcoded by the route either --
+        // it is left for reserveLiveJob to derive authoritatively from the
+        // freshly loaded plan policy.
+        assert.equal(reserveArgs.requestedMode, '');
         await fetch(`${liveUrl}/jobs/${job.id}/cancel`, { method: 'POST', headers: authenticated });
         await fetch(`${liveUrl}/jobs/${job.id}`, { method: 'DELETE', headers: authenticated });
     } finally {
@@ -1062,6 +1065,108 @@ test('failed workspace retry is owner-only, idempotent, concurrency-safe, and cr
         });
         assert.equal(alreadyActive.status, 409);
         assert.equal((await alreadyActive.json()).code, 'JOB_ALREADY_ACTIVE');
+    } finally {
+        authenticatedUser = owner;
+        await new Promise(resolve => retryServer.close(resolve));
+    }
+});
+
+const createFailedLiveJobFixture = owner => {
+    const id = randomUUID();
+    const directory = path.join(temporaryRoot, 'uploads', 'workspace', id);
+    fs.mkdirSync(directory, { recursive: true });
+    const storedPath = path.join(directory, 'source.mp4');
+    fs.writeFileSync(storedPath, 'valid source');
+    createWorkspaceJob({
+        id, ownerUid: owner.uid, filename: 'retry-live.mp4', fileSize: 12,
+        duration: 10, storedPath
+    });
+    updateWorkspaceJobInternal(id, {
+        status: 'failed', stage: 'failed', failedAt: new Date().toISOString(),
+        diagnostic: { stage: 'audio_extraction' }, error: 'Audio failed.'
+    });
+    return id;
+};
+
+test('a failed live-billing job re-reserves credits before re-queueing on retry', async () => {
+    const retryOwner = { ...owner, uid: `retry-live-owner-${randomUUID()}` };
+    authenticatedUser = retryOwner;
+    const id = createFailedLiveJobFixture(retryOwner);
+    let reserveArgs = null;
+    const retryApp = express();
+    retryApp.use(express.json());
+    retryApp.use('/api/workspace', requireAuth, createWorkspaceRouter({
+        verifyKey: async () => ({ valid: true }),
+        readSourceDuration: async () => 10,
+        resolveServerGeminiKey: () => 'verified-key',
+        liveBillingEnabled: () => true,
+        reserveBilling: async args => {
+            reserveArgs = args;
+            return { snapshot: { billingStatus: 'reserved' }, replayed: false };
+        },
+        releaseBilling: async () => ({ billingStatus: 'released' })
+    }));
+    const retryServer = await new Promise(resolve => {
+        const listener = retryApp.listen(0, '127.0.0.1', () => resolve(listener));
+    });
+    const retryUrl = `http://127.0.0.1:${retryServer.address().port}/api/workspace`;
+    try {
+        const response = await fetch(`${retryUrl}/jobs/${id}/retry`, {
+            method: 'POST', headers: { ...authenticated, 'Idempotency-Key': 'retry-live-1' }
+        });
+        assert.equal(response.status, 202);
+        assert.equal((await response.json()).status, 'accepted');
+        assert.equal(getWorkspaceJobInternal(id).status, 'queued');
+        assert.equal(reserveArgs.jobId, id);
+        assert.equal(reserveArgs.idempotencyKey, 'retry-live-1');
+        assert.equal(reserveArgs.sourceDurationSeconds, 10);
+    } finally {
+        authenticatedUser = owner;
+        await new Promise(resolve => retryServer.close(resolve));
+    }
+});
+
+test('retry is not queued when re-reservation fails -- a clear synchronous error is returned instead of failing later at settlement', async () => {
+    const retryOwner = { ...owner, uid: `retry-live-fail-owner-${randomUUID()}` };
+    authenticatedUser = retryOwner;
+    const id = createFailedLiveJobFixture(retryOwner);
+    let requeueCalled = false;
+    let releaseCalled = false;
+    const retryApp = express();
+    retryApp.use(express.json());
+    retryApp.use('/api/workspace', requireAuth, createWorkspaceRouter({
+        verifyKey: async () => ({ valid: true }),
+        readSourceDuration: async () => 10,
+        resolveServerGeminiKey: () => 'verified-key',
+        liveBillingEnabled: () => true,
+        reserveBilling: async () => {
+            const error = new Error('Available credits are insufficient.');
+            error.name = 'BillingError';
+            error.code = 'INSUFFICIENT_CREDITS';
+            error.status = 409;
+            throw error;
+        },
+        releaseBilling: async () => { releaseCalled = true; return { billingStatus: 'released' }; },
+        admission: {
+            consumeMutation: () => ({ allowed: true }),
+            withProcessingAdmission: (_uid, _jobId, operation) => { requeueCalled = true; return operation({ idempotent: true }); }
+        }
+    }));
+    const retryServer = await new Promise(resolve => {
+        const listener = retryApp.listen(0, '127.0.0.1', () => resolve(listener));
+    });
+    const retryUrl = `http://127.0.0.1:${retryServer.address().port}/api/workspace`;
+    try {
+        const response = await fetch(`${retryUrl}/jobs/${id}/retry`, {
+            method: 'POST', headers: { ...authenticated, 'Idempotency-Key': 'retry-live-fail-1' }
+        });
+        assert.equal(response.status, 409);
+        assert.equal((await response.json()).code, 'INSUFFICIENT_CREDITS');
+        // The job must remain failed -- never queued -- and re-reservation
+        // never having succeeded means there is nothing to compensate.
+        assert.equal(getWorkspaceJobInternal(id).status, 'failed');
+        assert.equal(requeueCalled, false);
+        assert.equal(releaseCalled, false);
     } finally {
         authenticatedUser = owner;
         await new Promise(resolve => retryServer.close(resolve));

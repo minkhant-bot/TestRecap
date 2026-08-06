@@ -60,13 +60,15 @@ export const attachBillingSnapshot = async (job, { client }) => {
        credits_per_block=$7,total_required_credits=$8,
        pricing_policy_version_id=$9,pricing_policy_snapshot=$10,
        entitlement_snapshot=$11,credit_reservation_id=$12,
-       billing_status='reserved',status='queued',stage='queued',updated_at=now()
+       idempotency_key=COALESCE($13,idempotency_key),
+       billing_status='reserved',status='queued',stage='queued',
+       billing_finalized_at=NULL,updated_at=now()
      WHERE id=$1`,
     [
       job.id, job.planId, job.planCode, job.billingMode,
       String(job.sourceDurationMs), String(job.blocks), String(job.creditsPerBlock),
       String(job.totalCredits), job.policyId, job.policySnapshot,
-      job.entitlementSnapshot, job.reservationId,
+      job.entitlementSnapshot, job.reservationId, job.idempotencyKey || null,
     ],
   );
   return findBillingJob(job.id, { client });

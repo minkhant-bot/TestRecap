@@ -43,11 +43,14 @@ const ENTITLEMENT_KEYS = new Set([
 export const PLAN_POLICY_DEFAULTS = Object.freeze({
   creditsPerBlock: CREDITS_PER_BLOCK_DEFAULT,
   billingMode: 'blink_funded',
+  // integerLimit/textValue are explicit here (not omitted) so this shape
+  // matches what insertPlanPolicy expects verbatim -- omitting them relies
+  // on repository-level normalization rather than documenting the intent.
   entitlements: Object.freeze([
-    Object.freeze({ key: 'blur', enabled: true }),
-    Object.freeze({ key: 'flip', enabled: true }),
-    Object.freeze({ key: 'byok_mode', enabled: false }),
-    Object.freeze({ key: 'blink_funded_mode', enabled: true }),
+    Object.freeze({ key: 'blur', enabled: true, integerLimit: null, textValue: null }),
+    Object.freeze({ key: 'flip', enabled: true, integerLimit: null, textValue: null }),
+    Object.freeze({ key: 'byok_mode', enabled: false, integerLimit: null, textValue: null }),
+    Object.freeze({ key: 'blink_funded_mode', enabled: true, integerLimit: null, textValue: null }),
   ]),
 });
 const PLAN_DISPLAY_ORDER = Object.freeze({ trial: 0, pro: 1 });

@@ -46,10 +46,13 @@ test('Trial is no longer BYOK-only: every plan requires blink_funded and full Bl
   assert.doesNotMatch(billing, /BYOK Trial and Pro-only/i, 'the old Rule #4 BYOK-Trial wording must be gone');
 
   assert.match(billing, /entitlements: Object\.freeze\(\[/);
-  assert.match(billing, /Object\.freeze\(\{ key: 'blur', enabled: true \}\)/);
-  assert.match(billing, /Object\.freeze\(\{ key: 'flip', enabled: true \}\)/);
-  assert.match(billing, /Object\.freeze\(\{ key: 'byok_mode', enabled: false \}\)/);
-  assert.match(billing, /Object\.freeze\(\{ key: 'blink_funded_mode', enabled: true \}\)/);
+  // integerLimit/textValue are explicit (not omitted) so an undefined
+  // optional field can never be stringified into the literal "undefined"
+  // and sent to a bigint column (see insertPlanPolicy's 22P02 fix).
+  assert.match(billing, /Object\.freeze\(\{ key: 'blur', enabled: true, integerLimit: null, textValue: null \}\)/);
+  assert.match(billing, /Object\.freeze\(\{ key: 'flip', enabled: true, integerLimit: null, textValue: null \}\)/);
+  assert.match(billing, /Object\.freeze\(\{ key: 'byok_mode', enabled: false, integerLimit: null, textValue: null \}\)/);
+  assert.match(billing, /Object\.freeze\(\{ key: 'blink_funded_mode', enabled: true, integerLimit: null, textValue: null \}\)/);
 });
 
 test('Trial (and every other authorized user) processes jobs through the server-managed Gemini key, with no personal/BYOK branching', () => {

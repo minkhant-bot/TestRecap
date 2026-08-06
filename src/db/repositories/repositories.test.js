@@ -3,7 +3,7 @@ import test from 'node:test';
 import { ensureUser, findUserByFirebaseUid } from './users.js';
 import { assignRole } from './roles.js';
 import { insertLedgerEntry } from './ledger.js';
-import { listCreditPlans } from './billing.js';
+import { insertPlanPolicy, listCreditPlans } from './billing.js';
 import { insertAuditLog } from './auditLogs.js';
 
 test('user lookup uses a parameterized query and stable mapping', async () => {
@@ -94,6 +94,99 @@ test('normal package reads query only active non-archived packages in display or
     },
   };
   assert.deepEqual(await listCreditPlans({ client }), []);
+});
+
+// Reproduces the exact production payload shape configurePlanDefaults sends
+// for Trial and Pro (see PLAN_POLICY_DEFAULTS in billingFoundation.js):
+// entitlement objects that OMIT integerLimit/textValue entirely, rather than
+// setting them to null. Before the fix, String(undefined) === 'undefined'
+// was sent to plan_entitlements.integer_limit (BIGINT), producing Postgres
+// 22P02 "invalid input syntax for type bigint: \"undefined\"" and surfacing
+// as the generic "Billing administration failed." on PUT
+// /api/admin/billing/plans/trial|pro/defaults.
+const capturingClient = () => {
+  const calls = [];
+  return {
+    calls,
+    async query(sql, values) {
+      calls.push({ sql, values });
+      if (/INSERT INTO plan_policy_versions/.test(sql)) {
+        return { rows: [{
+          id: 'policy-id', plan_id: values[1], version: values[2],
+          billing_block_seconds: 30, credits_per_block: values[3],
+          trial_allowance_credits: values[4], billing_mode: values[5],
+          effective_from: values[6], effective_until: values[7], active: values[8],
+        }] };
+      }
+      return { rows: [] };
+    },
+  };
+};
+const assertNoUndefinedStringPersisted = calls => {
+  for (const call of calls) {
+    for (const value of call.values) {
+      assert.notEqual(value, 'undefined', `bind param must never be the literal string "undefined": ${call.sql}`);
+    }
+  }
+};
+
+test('Trial\'s configurePlanDefaults entitlement payload (integerLimit/textValue omitted) never persists the string "undefined" to a bigint column', async () => {
+  const client = capturingClient();
+  await insertPlanPolicy({
+    planCode: 'trial', planId: 'plan-trial-id', version: 1,
+    creditsPerBlock: 1n, trialAllowanceCredits: 12n, billingMode: 'blink_funded',
+    active: true, effectiveFrom: new Date('2026-01-01T00:00:00Z'), effectiveUntil: null,
+    actorUserId: 'actor-id',
+    entitlements: [
+      { key: 'blur', enabled: true },
+      { key: 'flip', enabled: true },
+      { key: 'byok_mode', enabled: false },
+      { key: 'blink_funded_mode', enabled: true },
+    ],
+  }, { client });
+  assertNoUndefinedStringPersisted(client.calls);
+  const entitlementInserts = client.calls.filter(call => /INSERT INTO plan_entitlements/.test(call.sql));
+  assert.equal(entitlementInserts.length, 4);
+  for (const call of entitlementInserts) {
+    assert.equal(call.values[4], null, 'integer_limit must be null, not the string "undefined"');
+    assert.equal(call.values[5], null, 'text_value must be null, not undefined');
+  }
+});
+
+test('Pro\'s configurePlanDefaults entitlement payload (integerLimit/textValue omitted) never persists the string "undefined" to a bigint column', async () => {
+  const client = capturingClient();
+  await insertPlanPolicy({
+    planCode: 'pro', planId: 'plan-pro-id', version: 1,
+    creditsPerBlock: 1n, trialAllowanceCredits: 0n, billingMode: 'blink_funded',
+    active: true, effectiveFrom: new Date('2026-01-01T00:00:00Z'), effectiveUntil: null,
+    actorUserId: 'actor-id',
+    entitlements: [
+      { key: 'blur', enabled: true },
+      { key: 'flip', enabled: true },
+      { key: 'byok_mode', enabled: false },
+      { key: 'blink_funded_mode', enabled: true },
+    ],
+  }, { client });
+  assertNoUndefinedStringPersisted(client.calls);
+  const entitlementInserts = client.calls.filter(call => /INSERT INTO plan_entitlements/.test(call.sql));
+  assert.equal(entitlementInserts.length, 4);
+  for (const call of entitlementInserts) {
+    assert.equal(call.values[4], null, 'integer_limit must be null, not the string "undefined"');
+    assert.equal(call.values[5], null, 'text_value must be null, not undefined');
+  }
+});
+
+test('an entitlement with an explicit numeric integerLimit is still normalized to a proper bigint string, not blocked by the undefined-guard', async () => {
+  const client = capturingClient();
+  await insertPlanPolicy({
+    planCode: 'pro', planId: 'plan-pro-id', version: 2,
+    creditsPerBlock: 1n, trialAllowanceCredits: 0n, billingMode: 'blink_funded',
+    active: true, effectiveFrom: new Date('2026-01-01T00:00:00Z'), effectiveUntil: null,
+    actorUserId: 'actor-id',
+    entitlements: [{ key: 'active_job_limit', enabled: true, integerLimit: 5, textValue: null }],
+  }, { client });
+  const [entitlementInsert] = client.calls.filter(call => /INSERT INTO plan_entitlements/.test(call.sql));
+  assert.equal(entitlementInsert.values[4], '5');
 });
 
 test('audit JSON parameters serialize objects and arrays explicitly for PostgreSQL jsonb', async () => {

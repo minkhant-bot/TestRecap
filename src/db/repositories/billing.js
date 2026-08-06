@@ -155,13 +155,20 @@ export const insertPlanPolicy = async (policy, { client }) => {
       policy.effectiveUntil, policy.active, policy.actorUserId],
   );
   for (const entitlement of policy.entitlements) {
+    // A missing (undefined) optional field must persist as NULL, never as
+    // the literal string "undefined" -- String(undefined) === 'undefined',
+    // which Postgres then rejects with 22P02 on the bigint column. Callers
+    // that omit these keys entirely (e.g. PLAN_POLICY_DEFAULTS.entitlements)
+    // are exactly as valid as ones that pass null explicitly.
+    const integerLimit = entitlement.integerLimit ?? null;
+    const textValue = entitlement.textValue ?? null;
     await client.query(
       `INSERT INTO plan_entitlements
         (id, policy_version_id, entitlement_key, enabled, integer_limit, text_value)
        VALUES ($1,$2,$3,$4,$5,$6)`,
       [randomUUID(), id, entitlement.key, entitlement.enabled,
-        entitlement.integerLimit === null ? null : String(entitlement.integerLimit),
-        entitlement.textValue],
+        integerLimit === null ? null : String(integerLimit),
+        textValue],
     );
   }
   return mapPolicy(firstRow(result));

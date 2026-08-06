@@ -121,7 +121,7 @@ test('subtitle and blur setup happens on the uploaded (pending) job before expli
 
   assert.match(page, /job\?\.status === 'pending'/);
   assert.match(page, /VideoEffectsEditor/);
-  assert.match(page, /queueWorkspaceJob\(job\.id, key, latestEffectsRef\.current\)/);
+  assert.match(page, /queueWorkspaceJob\(job\.id, key, latestEffectsRef\.current, attempt\)/);
   assert.match(editor, /burnSubtitlesEnabled: false/);
   assert.match(editor, /blurEnabled: false/);
   assert.match(editor, /colorGrading: 'original'/);
@@ -179,7 +179,7 @@ test('Color Grading and Flip Video are optional effects persisted with the pendi
   assert.match(editor, /effects-editor__video--flipped/);
   assert.match(app, /\.effects-editor__video--flipped \{ transform: scaleX\(-1\); \}/);
   assert.match(editor, /effects-editor__media-controls/);
-  assert.match(page, /queueWorkspaceJob\(job\.id, key, latestEffectsRef\.current\)/);
+  assert.match(page, /queueWorkspaceJob\(job\.id, key, latestEffectsRef\.current, attempt\)/);
   assert.match(page, /latestEffectsRef\.current = nextEffects;[\s\S]*setEffects\(nextEffects\)/);
   assert.match(api, /const body = \{ effects \}/);
   assert.match(api, /body: JSON\.stringify\(body\)/);
@@ -325,7 +325,7 @@ test('Start Recap sends a stable, per-job Idempotency-Key: reused on retry of th
 
   // The queue API client requires and forwards a real key -- it must never
   // fall back to a fixed/global value or omit the header.
-  assert.match(api, /export const queueWorkspaceJob = async \(jobId: string, idempotencyKey: string, effects\?: VideoEffects\)/);
+  assert.match(api, /export const queueWorkspaceJob = async \(\n\s*jobId: string, idempotencyKey: string, effects\?: VideoEffects, attemptNumber = 1,\n\s*\) => \{/);
   assert.match(api, /headers: \{ 'Content-Type': 'application\/json', 'Idempotency-Key': idempotencyKey \}/);
 
   // One key per intentional Start Recap attempt: stable across re-clicks on
@@ -333,9 +333,35 @@ test('Start Recap sends a stable, per-job Idempotency-Key: reused on retry of th
   // failure), regenerated only when the tracked job actually changes (a
   // genuinely new upload/job) -- the same pattern already used for the
   // failed-job Retry button's key (retryKeyRef in useJobStatus.ts).
-  assert.match(page, /const queueKeyRef = useRef<\{ jobId: string; key: string \} \| null>\(null\);/);
+  assert.match(page, /const queueKeyRef = useRef<\{ jobId: string; key: string; attempt: number \} \| null>\(null\);/);
   assert.match(page, /const current = queueKeyRef\.current;/);
-  assert.match(page, /const key = current\?\.jobId === job\.id \? current\.key : crypto\.randomUUID\(\);/);
-  assert.match(page, /queueKeyRef\.current = \{ jobId: job\.id, key \};/);
-  assert.match(page, /await queueWorkspaceJob\(job\.id, key, latestEffectsRef\.current\);/);
+  assert.match(page, /const key = sameAttempt \? current\.key : crypto\.randomUUID\(\);/);
+  assert.match(page, /queueKeyRef\.current = \{ jobId: job\.id, key, attempt \};/);
+  assert.match(page, /await queueWorkspaceJob\(job\.id, key, latestEffectsRef\.current, attempt\);/);
+});
+
+test('the queueWorkspaceJob diagnostic log reports only presence/length/attempt metadata, never the raw Idempotency-Key value', () => {
+  const api = read('./workspace/api.ts');
+  const match = api.match(
+    /const logQueueIdempotencyDiagnostics = \(idempotencyKey: string, endpoint: string, attemptNumber: number\) => \{([\s\S]*?)\n\};/,
+  );
+  assert.ok(match, 'logQueueIdempotencyDiagnostics must exist with this exact signature');
+  const body = match[1];
+
+  // The logged payload only ever derives safe, non-reversible facts from the
+  // key -- never the key itself.
+  assert.match(body, /idempotencyKeyGenerated: Boolean\(idempotencyKey\)/);
+  assert.match(body, /idempotencyKeyLength: idempotencyKey \? idempotencyKey\.length : 0/);
+  assert.match(body, /attemptNumber,?\s*\n/);
+  // Every occurrence of the standalone `idempotencyKey` identifier (not as
+  // a prefix of a property name like idempotencyKeyLength) must be
+  // consumed by Boolean(...) or the ternary computing .length -- never
+  // passed through as a bare object value that JSON.stringify (and
+  // therefore console.info) would serialize verbatim.
+  const occurrences = body.match(/\bidempotencyKey\b/g) || [];
+  const safeOccurrences = body.match(/Boolean\(idempotencyKey\)|idempotencyKey \? idempotencyKey\.length : 0/g) || [];
+  const safeOccurrenceCount = safeOccurrences.reduce(
+    (count, snippet) => count + (snippet.match(/\bidempotencyKey\b/g) || []).length, 0,
+  );
+  assert.equal(occurrences.length, safeOccurrenceCount, 'idempotencyKey must never appear as a bare, directly-logged value');
 });

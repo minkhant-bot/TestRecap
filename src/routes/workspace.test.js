@@ -16,7 +16,7 @@ process.env.WORKSPACE_JOB_STORE_PATH = path.join(temporaryRoot, 'workspace-jobs.
 // there is no personal-key UI or fallback left in the route handlers.
 process.env.GEMINI_API_KEY = 'server-managed-test-key';
 
-const { createWorkspaceRouter } = await import('./workspace.js');
+const { createWorkspaceRouter, buildQueueIdempotencyDiagnostics } = await import('./workspace.js');
 const {
     createJob: createProcessingJob,
     deleteJob: deleteProcessingJob,
@@ -325,6 +325,69 @@ test('queueing under live billing never demands a BYOK key, even though the clie
         await new Promise(resolve => liveServer.close(resolve));
         authenticatedUser = owner;
     }
+});
+
+test('queue diagnostics report only presence/length/names, never the Idempotency-Key value or any cookie/authorization header value', () => {
+    const fakeReq = {
+        requestId: 'req-123',
+        params: { jobId: 'job-456' },
+        headers: {
+            'idempotency-key': 'super-secret-attempt-key-do-not-log-me',
+            'content-type': 'application/json',
+            'user-agent': 'Mozilla/5.0 TestAgent',
+            origin: 'https://blink.example',
+            cookie: '__session=top-secret-session-cookie',
+            authorization: 'Bearer super-secret-bearer-token',
+        },
+        get(name) {
+            const key = String(name).toLowerCase();
+            return this.headers[key];
+        },
+    };
+    const diagnostics = buildQueueIdempotencyDiagnostics(fakeReq);
+    const serialized = JSON.stringify(diagnostics);
+
+    // The exact secret strings must never appear anywhere in the output.
+    assert.doesNotMatch(serialized, /super-secret-attempt-key-do-not-log-me/);
+    assert.doesNotMatch(serialized, /top-secret-session-cookie/);
+    assert.doesNotMatch(serialized, /super-secret-bearer-token/);
+    assert.doesNotMatch(serialized, /Bearer /);
+    assert.doesNotMatch(serialized, /__session=/);
+
+    // Only presence/length/safe metadata is reported.
+    assert.equal(diagnostics.requestId, 'req-123');
+    assert.equal(diagnostics.jobId, 'job-456');
+    assert.equal(diagnostics.idempotencyKeyHeaderPresent, true);
+    assert.equal(diagnostics.idempotencyKeyHeaderLength, 'super-secret-attempt-key-do-not-log-me'.length);
+    assert.equal(diagnostics.idempotencyKeyViaReqGetPresent, true);
+    assert.equal(diagnostics.userAgent, 'Mozilla/5.0 TestAgent');
+    assert.equal(diagnostics.contentType, 'application/json');
+    assert.equal(diagnostics.origin, 'https://blink.example');
+
+    // Header NAMES may be reported (they are not secrets), but cookie and
+    // authorization are excluded even at the name level, and their values
+    // are never present anywhere in the diagnostics object.
+    assert.ok(diagnostics.headerNames.includes('idempotency-key'));
+    assert.ok(diagnostics.headerNames.includes('content-type'));
+    assert.ok(!diagnostics.headerNames.includes('cookie'));
+    assert.ok(!diagnostics.headerNames.includes('authorization'));
+});
+
+test('queue diagnostics correctly report an absent Idempotency-Key header without ever inventing or logging a value', () => {
+    const fakeReq = {
+        requestId: 'req-789',
+        params: { jobId: 'job-000' },
+        headers: { 'content-type': 'application/json' },
+        get(name) {
+            const key = String(name).toLowerCase();
+            return this.headers[key];
+        },
+    };
+    const diagnostics = buildQueueIdempotencyDiagnostics(fakeReq);
+    assert.equal(diagnostics.idempotencyKeyHeaderPresent, false);
+    assert.equal(diagnostics.idempotencyKeyHeaderLength, null);
+    assert.equal(diagnostics.idempotencyKeyViaReqGetPresent, false);
+    assert.doesNotMatch(JSON.stringify(diagnostics), /undefined/);
 });
 
 test('a missing Idempotency-Key still returns the existing validation error, and a duplicate submission with the reused key creates only one reservation', async () => {

@@ -60,9 +60,25 @@ export const retryWorkspaceJob = async (jobId: string, idempotencyKey: string) =
     },
   ));
 
-export const queueWorkspaceJob = async (jobId: string, idempotencyKey: string, effects?: VideoEffects) => {
+// TEMPORARY diagnostics for the "Idempotency-Key is required." production
+// investigation. Reports only presence/length/attempt count -- never the
+// actual key value. Remove once the header-loss cause is found.
+const logQueueIdempotencyDiagnostics = (idempotencyKey: string, endpoint: string, attemptNumber: number) => {
+  console.info('[queueWorkspaceJob diagnostics]', JSON.stringify({
+    event: 'queueWorkspaceJob.idempotency_diagnostics',
+    endpoint,
+    idempotencyKeyGenerated: Boolean(idempotencyKey),
+    idempotencyKeyLength: idempotencyKey ? idempotencyKey.length : 0,
+    attemptNumber,
+  }));
+};
+
+export const queueWorkspaceJob = async (
+  jobId: string, idempotencyKey: string, effects?: VideoEffects, attemptNumber = 1,
+) => {
   const body = { effects };
   const url = `/api/workspace/jobs/${encodeURIComponent(jobId)}/queue`;
+  logQueueIdempotencyDiagnostics(idempotencyKey, url, attemptNumber);
   try {
     return parseResponse<WorkspaceJobStatus>(await fetch(url, {
       method: 'POST',

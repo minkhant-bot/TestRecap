@@ -75,6 +75,27 @@ const sendQuotaExceeded = (res, quota) => res.status(429).json({
     activeJobLimit: quota.activeJobLimit
 });
 
+// TEMPORARY diagnostics for the "Idempotency-Key is required." production
+// investigation (queue endpoint only). Reports only presence/length/names --
+// never any header VALUE, and explicitly excludes cookie/authorization from
+// the reported header-name list. Remove once the header-loss cause is found.
+export const buildQueueIdempotencyDiagnostics = req => {
+    const idempotencyKeyHeader = req.headers['idempotency-key'];
+    return {
+        event: 'workspace.queue.idempotency_diagnostics',
+        requestId: req.requestId,
+        jobId: req.params?.jobId ?? null,
+        idempotencyKeyHeaderPresent: idempotencyKeyHeader !== undefined,
+        idempotencyKeyHeaderLength: typeof idempotencyKeyHeader === 'string' ? idempotencyKeyHeader.length : null,
+        idempotencyKeyViaReqGetPresent: Boolean(req.get('Idempotency-Key')),
+        headerNames: Object.keys(req.headers || {})
+            .filter(name => !['cookie', 'authorization'].includes(name.toLowerCase())),
+        userAgent: req.get('User-Agent') || null,
+        contentType: req.get('Content-Type') || null,
+        origin: req.get('Origin') || null
+    };
+};
+
 export const createWorkspaceRouter = ({
     verifyKey = verifyGeminiApiKey,
     admission = admissionService,
@@ -293,6 +314,7 @@ export const createWorkspaceRouter = ({
     });
 
     router.post('/jobs/:jobId/queue', admitMutation('workspace.jobs.queue'), async (req, res) => {
+        console.info('[Workspace queue]', JSON.stringify(buildQueueIdempotencyDiagnostics(req)));
         let reserved = false;
         try {
             const existing = getWorkspaceJob(req.params.jobId, req.user.uid);

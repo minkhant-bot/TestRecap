@@ -178,7 +178,7 @@ export function NewRecapPage() {
   // of the same Start Recap attempt (including the credit-reservation gate
   // inside the queue endpoint), regenerated only when the user starts a
   // genuinely new job (a different jobId).
-  const queueKeyRef = useRef<{ jobId: string; key: string } | null>(null);
+  const queueKeyRef = useRef<{ jobId: string; key: string; attempt: number } | null>(null);
 
   const activeJobCount = jobs.filter(job => ACTIVE_STATUSES.has(job.status)).length;
   const activeLimitReached = activeJobCount >= 2;
@@ -199,10 +199,12 @@ export function NewRecapPage() {
     setStartError(null);
     setInsufficientCredits(false);
     const current = queueKeyRef.current;
-    const key = current?.jobId === job.id ? current.key : crypto.randomUUID();
-    queueKeyRef.current = { jobId: job.id, key };
+    const sameAttempt = current?.jobId === job.id;
+    const key = sameAttempt ? current.key : crypto.randomUUID();
+    const attempt = sameAttempt ? current.attempt + 1 : 1;
+    queueKeyRef.current = { jobId: job.id, key, attempt };
     try {
-      await queueWorkspaceJob(job.id, key, latestEffectsRef.current);
+      await queueWorkspaceJob(job.id, key, latestEffectsRef.current, attempt);
       await refresh();
     } catch (requestError) {
       if (requestError instanceof WorkspaceApiError && requestError.code === 'INSUFFICIENT_CREDITS') {

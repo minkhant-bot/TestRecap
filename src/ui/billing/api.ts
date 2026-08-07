@@ -1,3 +1,5 @@
+import { dedupeRequest } from '../utils/requestCache.js';
+
 export interface BillingBalance {
   postedBalance: string;
   reservedBalance: string;
@@ -135,12 +137,21 @@ const fetchWithTimeout = (input: RequestInfo | URL, init: RequestInit = {}) => {
     .finally(() => clearTimeout(timer));
 };
 
-const get = <T>(path: string) => fetchWithTimeout(path, { credentials: 'include' }).then(parseResponse<T>);
+// Short coalescing window (well under useAutoRefresh's >=12s cadence): merges
+// requests that land close together -- e.g. AppShell's sidebar balance poll
+// and BuyCreditsPage's own overview poll both reading /api/credits/balance --
+// into a single network call, without changing how stale data can ever get.
+const DEDUPE_TTL_MS = 4000;
+const get = <T>(path: string) =>
+  dedupeRequest(path, DEDUPE_TTL_MS, () => fetchWithTimeout(path, { credentials: 'include' }).then(parseResponse<T>));
+
+export const getBalance = () => get<BillingBalance>('/api/credits/balance');
+export const getMyPlanAssignment = () => get<PlanAssignment | null>('/api/plans/me');
 
 export const getBillingOverview = async () => {
   const [balance, assignment, plans, ledger, purchases] = await Promise.all([
-    get<BillingBalance>('/api/credits/balance'),
-    get<PlanAssignment | null>('/api/plans/me'),
+    getBalance(),
+    getMyPlanAssignment(),
     get<BillingPlan[]>('/api/plans'),
     get<LedgerEntry[]>('/api/credits/ledger?limit=30'),
     get<PurchaseRequest[]>('/api/credit-purchase-requests'),

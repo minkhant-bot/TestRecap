@@ -1,14 +1,19 @@
-import { useRef, useState } from 'react';
+import { lazy, Suspense, useRef, useState } from 'react';
 import { useNavigate, useSearchParams } from 'react-router-dom';
-import { Button, LiveStatusHint } from '../components';
+import { Button, LiveStatusHint, Skeleton } from '../components';
 import { formatDuration, formatFileSize } from '../workspace/format';
 import { queueWorkspaceJob, WorkspaceApiError } from '../workspace/api';
 import { useJobStatus } from '../workspace/useJobStatus';
 import { useUploadPanel } from '../workspace/useUploadPanel';
 import type { WorkspaceJob, WorkspaceJobStatus, VideoEffects } from '../workspace/types';
 import { useWorkspaceJobs } from '../workspace/useWorkspaceJobs';
-import { DEFAULT_VIDEO_EFFECTS, VideoEffectsEditor } from '../workspace/VideoEffectsEditor';
+import { DEFAULT_VIDEO_EFFECTS } from '../workspace/effectsState.js';
 import { getDisplayedProgress, getWorkflowStepState, WORKFLOW_STEPS } from '../workspace/workflowPresentation';
+
+// The effects editor (drag/resize handles, color-grading previews, lucide
+// icons) is only ever shown once a job reaches `pending` -- never on first
+// paint -- so it splits into its own chunk instead of bloating New Recap's.
+const VideoEffectsEditor = lazy(() => import('../workspace/VideoEffectsEditor').then(m => ({ default: m.VideoEffectsEditor })));
 
 const ACTIVE_STATUSES = new Set(['uploading', 'ready', 'pending', 'queued', 'processing']);
 
@@ -257,15 +262,17 @@ export function NewRecapPage() {
 
       {job?.status === 'pending' && (
         <div className="panel">
-          <VideoEffectsEditor
-            jobId={job.id}
-            effects={effects}
-            onChange={nextEffects => {
-              latestEffectsRef.current = nextEffects;
-              setEffects(nextEffects);
-            }}
-            readOnly={starting}
-          />
+          <Suspense fallback={<Skeleton height="16rem" />}>
+            <VideoEffectsEditor
+              jobId={job.id}
+              effects={effects}
+              onChange={nextEffects => {
+                latestEffectsRef.current = nextEffects;
+                setEffects(nextEffects);
+              }}
+              readOnly={starting}
+            />
+          </Suspense>
           <div className="row wrap" style={{ marginTop: 18 }}>
             <Button loading={starting} disabled={starting || insufficientCredits} onClick={() => void beginProcessing()}>Recap စတင်ဖန်တီးမည် →</Button>
           </div>

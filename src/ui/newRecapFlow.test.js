@@ -143,14 +143,19 @@ test('Cancel is only available before processing starts: hidden once a job is pr
 test('subtitle and blur setup happens on the uploaded (pending) job before explicit processing start', () => {
   const page = read('./pages/NewRecapPage.tsx');
   const editor = read('./workspace/VideoEffectsEditor.tsx');
+  // Defaults live in effectsState.js, not VideoEffectsEditor.tsx: the editor
+  // is lazy-loaded (only mounts once a job reaches pending), so a page that
+  // needs a starting value beforehand must not have to import the whole
+  // editor component for it.
+  const defaults = read('./workspace/effectsState.js');
 
   assert.match(page, /job\?\.status === 'pending'/);
   assert.match(page, /VideoEffectsEditor/);
   assert.match(page, /queueWorkspaceJob\(job\.id, key, latestEffectsRef\.current, attempt\)/);
-  assert.match(editor, /burnSubtitlesEnabled: false/);
-  assert.match(editor, /blurEnabled: false/);
-  assert.match(editor, /colorGrading: 'original'/);
-  assert.match(editor, /flipVideoEnabled: false/);
+  assert.match(defaults, /burnSubtitlesEnabled: false/);
+  assert.match(defaults, /blurEnabled: false/);
+  assert.match(defaults, /colorGrading: 'original'/);
+  assert.match(defaults, /flipVideoEnabled: false/);
   assert.match(editor, /Burn subtitles/);
   assert.match(editor, /Blur masks/);
   assert.match(page, /Recap စတင်ဖန်တီးမည်/);
@@ -320,8 +325,13 @@ test('mobile shell is a bottom nav bar (not a drawer), reachable via real routin
 
   assert.match(shell, /className="mobileNav"/);
   assert.doesNotMatch(shell, /Dropdown|Modal/);
-  assert.match(shell, /fetch\('\/api\/credits\/balance'/);
-  assert.match(shell, /fetch\('\/api\/plans\/me'/);
+  // Bound via billing/api's shared getBalance()/getMyPlanAssignment() (not a
+  // raw fetch) so this shares its request cache with Buy Credits' own poll
+  // of the same two endpoints instead of duplicating the request.
+  assert.match(shell, /import \{ getBalance, getMyPlanAssignment \} from '\.\.\/billing\/api';/);
+  const api = read('./billing/api.ts');
+  assert.match(api, /export const getBalance = \(\) => get<BillingBalance>\('\/api\/credits\/balance'\);/);
+  assert.match(api, /export const getMyPlanAssignment = \(\) => get<PlanAssignment \| null>\('\/api\/plans\/me'\);/);
   assert.match(shell, /profile\?\.role === 'super_admin'/);
   assert.match(reference, /^\.mobileNav\{display:none\}/m);
   assert.match(app, /\.mobileNav a \{/);

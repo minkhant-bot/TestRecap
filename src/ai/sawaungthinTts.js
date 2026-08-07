@@ -4,12 +4,16 @@ import crypto from 'node:crypto';
 import { EdgeTTS } from 'node-edge-tts';
 import { getVoiceConfig } from './voices.js';
 import { synthesizeEdgeTts } from './edgeTtsRequest.js';
+import { normalizeNumbersForBurmeseTts } from './burmeseNumberNormalization.js';
 import { runFFmpeg, getDuration } from '../ffmpeg/index.js';
 import { getSetting } from '../services/settings.js';
 import { WORKFLOW_VERSION } from '../domain/workflow.js';
 import { isAbortError, throwIfAborted, waitWithSignal } from '../services/cancellation.js';
 
-export const SAWAUNGTHIN_TTS_ALGORITHM_VERSION = 'sawaungthin-edge-tts-continuous-v1';
+// Bumped to -v2: TTS input now runs through Burmese number normalization
+// (see burmeseNumberNormalization.js) before synthesis, so a cache entry
+// written by -v1 (raw digits, mispronounced) must never be reused as-is.
+export const SAWAUNGTHIN_TTS_ALGORITHM_VERSION = 'sawaungthin-edge-tts-continuous-v2';
 
 export const buildSawaungthinTtsBlocks = (sceneNarration, dialogueMode = false) => {
     const maxGap = dialogueMode ? 3.0 : 0.75;
@@ -152,7 +156,18 @@ export const generateNarrationTTS = async (
 
         const dialogueVal = getSetting('DIALOGUE_MODE');
         const isDialogue = dialogueVal === 'true' || dialogueVal === '1' || dialogueVal === true;
-        const mergedBlocks = buildSawaungthinTtsBlocks(sceneNarration, isDialogue);
+        // Numbers are normalized into Burmese words only for what's actually
+        // spoken -- sceneNarration itself (and its narration_text) stays
+        // untouched, since authoritativeTimeline.text (below) is restored
+        // from it and becomes the subtitle/transcript text. Blocks are
+        // merged from this TTS-only copy, not the original, so downstream
+        // character-index timing math (buildSawaungthinTimelineEntries)
+        // stays consistent with the text actually sent to and spoken by TTS.
+        const ttsSceneNarration = sceneNarration.map(scene => ({
+            ...scene,
+            narration_text: normalizeNumbersForBurmeseTts(scene.narration_text)
+        }));
+        const mergedBlocks = buildSawaungthinTtsBlocks(ttsSceneNarration, isDialogue);
 
         const chunks = [];
         const ttsClient = new EdgeTTS({ voice: edgeVoice, pitch, rate, saveSubtitles: true, timeout: 30000 });
@@ -277,9 +292,17 @@ export const generateNarrationTTS = async (
                 }
             }
 
+            // sceneNarration here is intentionally ttsSceneNarration: charToTime
+            // was built from EdgeTTS's own timing over the normalized text, so
+            // the character-index proportional math must use the same
+            // (normalized) lengths to stay aligned. The `text` field this
+            // produces is the normalized narration_text; it's immediately
+            // restored to the original, un-normalized text below so the
+            // subtitle/transcript this timeline ultimately produces is
+            // unaffected by TTS-only number normalization.
             authoritativeTimeline.push(...buildSawaungthinTimelineEntries({
-                block, sceneNarration, chunkDuration: actualFinalDur, runningAudioTime, charToTime
-            }));
+                block, sceneNarration: ttsSceneNarration, chunkDuration: actualFinalDur, runningAudioTime, charToTime
+            }).map(entry => ({ ...entry, text: sceneNarration[entry.chunk_index].narration_text })));
 
             runningAudioTime += actualFinalDur;
         }

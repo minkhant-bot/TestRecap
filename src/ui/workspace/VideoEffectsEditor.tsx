@@ -1,8 +1,10 @@
 import { FlipHorizontal2, Pause, Play, Plus, Sparkles, Trash2 } from 'lucide-react';
 import { useEffect, useRef, useState } from 'react';
 import { Button } from '../components';
-import { mergeVideoEffects } from './effectsState.js';
+import { DEFAULT_VIDEO_EFFECTS, mergeVideoEffects } from './effectsState.js';
 import type { BlurBox, EffectRect, VideoEffects } from './types';
+
+export { DEFAULT_VIDEO_EFFECTS };
 
 interface Props {
   jobId: string;
@@ -21,16 +23,6 @@ const formatMediaTime = (seconds: number) => {
   if (!Number.isFinite(seconds)) return '0:00';
   const minutes = Math.floor(seconds / 60);
   return `${minutes}:${Math.floor(seconds % 60).toString().padStart(2, '0')}`;
-};
-
-export const DEFAULT_VIDEO_EFFECTS: VideoEffects = {
-  colorGrading: 'original',
-  flipVideoEnabled: false,
-  burnSubtitlesEnabled: false,
-  subtitlePosition: { xPct: 10, yPct: 78, widthPct: 80, heightPct: 12 },
-  subtitleColor: 'yellow',
-  blurEnabled: false,
-  blurBoxes: [],
 };
 
 // One color applies to every subtitle cue in the whole video -- selecting a

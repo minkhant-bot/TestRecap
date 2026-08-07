@@ -133,6 +133,83 @@ test('effects controls use an explicit grid layout matching the required groupin
   assert.match(css, /@media \(max-width: 480px\) \{/);
 });
 
+// --- 4. Performance: bundle splitting, request dedup, mobile compositing ---
+
+test('per-role and heavy routes are code-split so a user never downloads screens they cannot reach', () => {
+  const foundation = read('./AppFoundation.tsx');
+  for (const [name, path] of [
+    ['DashboardPage', './pages/DashboardPage'],
+    ['NewRecapPage', './pages/NewRecapPage'],
+    ['HistoryPage', './pages/HistoryPage'],
+    ['BuyCreditsPage', './pages/BuyCreditsPage'],
+    ['SuperAdminPage', './pages/SuperAdminPage'],
+  ]) {
+    const escapedPath = path.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    assert.match(
+      foundation,
+      new RegExp(`const ${name} = lazy\\(\\(\\) => import\\('${escapedPath}'\\)`),
+      `${name} must be lazy-loaded, not bundled into the main chunk`,
+    );
+  }
+  // Landing/Login must stay eager -- they're the first thing an
+  // unauthenticated visitor needs, so splitting them would add a chunk
+  // round-trip to the very page this optimizes for.
+  assert.match(foundation, /import \{ LandingPage \} from '\.\/pages\/LandingPage';/);
+  assert.match(foundation, /import \{ LoginPage \} from '\.\/pages\/LoginPage';/);
+  assert.doesNotMatch(foundation, /lazy\(\(\) => import\('\.\/pages\/LandingPage'\)/);
+});
+
+test('lazy routes render behind a Suspense boundary with the existing session-loading fallback (no new loading UI introduced)', () => {
+  const shell = read('./layout/AppShell.tsx');
+  assert.match(shell, /import \{ SessionLoading \} from '\.\.\/pages\/SessionLoading';/);
+  assert.match(shell, /<Suspense fallback=\{<SessionLoading \/>\}>\s*<Outlet \/>\s*<\/Suspense>/);
+});
+
+test('the effects editor is lazy-loaded inside New Recap and only mounts once a job reaches pending', () => {
+  const page = read('./pages/NewRecapPage.tsx');
+  assert.match(page, /const VideoEffectsEditor = lazy\(\(\) => import\('\.\.\/workspace\/VideoEffectsEditor'\)/);
+  assert.match(page, /job\?\.status === 'pending' &&[\s\S]{0,80}<Suspense fallback=\{<Skeleton height="16rem" \/>\}>/);
+  // DEFAULT_VIDEO_EFFECTS must come from the small, always-eager
+  // effectsState module -- pulling it from VideoEffectsEditor itself would
+  // defeat the point of lazy-loading the editor.
+  assert.match(page, /import \{ DEFAULT_VIDEO_EFFECTS \} from '\.\.\/workspace\/effectsState\.js';/);
+});
+
+test('the sidebar credit balance shares its request cache with Buy Credits instead of firing a second identical poll', () => {
+  const shell = read('./layout/AppShell.tsx');
+  const api = read('./billing/api.ts');
+  assert.match(shell, /import \{ getBalance, getMyPlanAssignment \} from '\.\.\/billing\/api';/);
+  assert.doesNotMatch(shell, /fetch\('\/api\/credits\/balance'/, 'AppShell must go through the shared getBalance(), not a raw fetch');
+  assert.doesNotMatch(shell, /fetch\('\/api\/plans\/me'/, 'AppShell must go through the shared getMyPlanAssignment(), not a raw fetch');
+  assert.match(api, /export const getBalance = \(\) => get<BillingBalance>\('\/api\/credits\/balance'\);/);
+  assert.match(api, /export const getMyPlanAssignment = \(\) => get<PlanAssignment \| null>\('\/api\/plans\/me'\);/);
+  assert.match(api, /const get = <T>\(path: string\) =>\s*dedupeRequest\(path, DEDUPE_TTL_MS,/);
+  // getBillingOverview must reuse the same exported getters (same cache
+  // key) rather than re-issuing its own separate calls to the same paths.
+  const overview = api.slice(api.indexOf('export const getBillingOverview'));
+  assert.match(overview, /getBalance\(\),/);
+  assert.match(overview, /getMyPlanAssignment\(\),/);
+});
+
+test('the mobile nav panel no longer forces a backdrop blur behind an already-opaque background', () => {
+  const css = read('./styles/app.css');
+  const panelBlock = css.slice(css.indexOf('.mobileNavPanel {'), css.indexOf('.mobileNavPanel.is-open'));
+  assert.match(panelBlock, /background: rgba\(5, 5, 5, 0\.98\);/, 'background must stay effectively opaque');
+  assert.doesNotMatch(panelBlock, /backdrop-filter/, 'a blur behind an opaque background is pure compositing cost with no visible effect');
+});
+
+test('the completed-video preview box never clips its own error/retry state at narrow mobile widths', () => {
+  const css = read('./styles/app.css');
+  // At 360-430px, the .alert error message + Retry button rendered inside
+  // the 9:16 .videoBox--portrait can be taller than the box itself; without
+  // this override, the box's own overflow:hidden clips the Retry button,
+  // making it unreachable (a real "unusable touch target" regression).
+  assert.match(css, /\.videoBox--portrait:has\(\.alert\) \{ aspect-ratio: auto; \}/);
+  // .videoBox's 52px font-size (sized for the bare '▶' placeholder glyph)
+  // must not cascade into the error alert's text/button.
+  assert.match(css, /\.videoBox \.alert \{ font-size: 1rem; \}/);
+});
+
 test('no feature was removed from the effects editor while restructuring its layout', () => {
   const editor = read('./workspace/VideoEffectsEditor.tsx');
   for (const feature of [

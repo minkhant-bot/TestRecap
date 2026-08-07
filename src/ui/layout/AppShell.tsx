@@ -1,9 +1,11 @@
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { Suspense, useCallback, useEffect, useRef, useState } from 'react';
 import { NavLink, Outlet, useLocation, useNavigate } from 'react-router-dom';
 import { Clapperboard, ChevronDown, History as HistoryIcon, LayoutDashboard, LogOut, Settings as SettingsIcon, ShieldCheck, Wallet } from 'lucide-react';
 import { useAuth } from '../../auth/AuthProvider';
 import { Avatar } from '../components';
 import { useAutoRefresh } from '../hooks/useAutoRefresh';
+import { getBalance, getMyPlanAssignment } from '../billing/api';
+import { SessionLoading } from '../pages/SessionLoading';
 
 // Premium-SaaS refinement pass: the original reference (BlinkAutomationFull_v2.jsx)
 // used plain text labels with no icons anywhere. Real mobile SaaS navigation
@@ -149,19 +151,19 @@ export function AppShell() {
   const accountName = profile?.displayName || profile?.email || 'Google အကောင့်';
 
   const loadBillingSummary = useCallback(async (silent = false) => {
-    const [balanceResponse, planResponse] = await Promise.all([
-      fetch('/api/credits/balance', { credentials: 'include' }),
-      fetch('/api/plans/me', { credentials: 'include' }),
-    ]);
-    if (!balanceResponse.ok || !planResponse.ok) {
-      if (silent) throw new Error('Billing summary request failed.');
-      return;
+    // Routed through billing/api's shared getBalance/getMyPlanAssignment
+    // (not a raw fetch) so this shares its request-coalescing cache with
+    // BuyCreditsPage's own overview poll instead of firing a second,
+    // identical request to the same two endpoints every tick.
+    try {
+      const [balance, plan] = await Promise.all([getBalance(), getMyPlanAssignment()]);
+      setBillingSummary({
+        credits: formatCreditBalance(balance?.availableBalance),
+        plan: typeof plan?.planName === 'string' && plan.planName.trim() ? plan.planName.trim() : null,
+      });
+    } catch (error) {
+      if (silent) throw error;
     }
-    const [balance, plan] = await Promise.all([balanceResponse.json(), planResponse.json()]);
-    setBillingSummary({
-      credits: formatCreditBalance(balance?.availableBalance),
-      plan: typeof plan?.planName === 'string' && plan.planName.trim() ? plan.planName.trim() : null,
-    });
   }, []);
 
   useEffect(() => {
@@ -235,7 +237,9 @@ export function AppShell() {
 
         <main id="main-content" className="apppage" tabIndex={-1}>
           <div key={location.pathname} className="routeFade">
-            <Outlet />
+            <Suspense fallback={<SessionLoading />}>
+              <Outlet />
+            </Suspense>
           </div>
         </main>
       </div>

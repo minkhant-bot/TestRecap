@@ -1,16 +1,24 @@
+import { lazy } from 'react';
 import { Navigate, Route, Routes } from 'react-router-dom';
 import { ProtectedRoute } from '../auth/ProtectedRoute';
 import { AppShell } from './layout/AppShell';
-import { DashboardPage } from './pages/DashboardPage';
 import { LandingPage } from './pages/LandingPage';
 import { LoginPage } from './pages/LoginPage';
-import { NewRecapPage } from './pages/NewRecapPage';
-import { BuyCreditsPage } from './pages/BuyCreditsPage';
-import { HistoryPage } from './pages/HistoryPage';
 import { SettingsPage } from './pages/SettingsPage';
-import { SuperAdminPage } from './pages/SuperAdminPage';
 import { UnauthorizedPage } from './pages/UnauthorizedPage';
 import { useAuth } from '../auth/AuthProvider';
+
+// Landing/Login/Settings/Unauthorized stay eager (small, and Landing/Login
+// are the first thing an unauthenticated visitor needs -- lazy-loading them
+// would add a chunk round-trip to the very page this task optimizes for).
+// The heavier, per-role screens split into their own chunks instead, so a
+// user who only ever visits New Recap/History never downloads the Super
+// Admin console (and vice versa).
+const DashboardPage = lazy(() => import('./pages/DashboardPage').then(m => ({ default: m.DashboardPage })));
+const NewRecapPage = lazy(() => import('./pages/NewRecapPage').then(m => ({ default: m.NewRecapPage })));
+const HistoryPage = lazy(() => import('./pages/HistoryPage').then(m => ({ default: m.HistoryPage })));
+const BuyCreditsPage = lazy(() => import('./pages/BuyCreditsPage').then(m => ({ default: m.BuyCreditsPage })));
+const SuperAdminPage = lazy(() => import('./pages/SuperAdminPage').then(m => ({ default: m.SuperAdminPage })));
 
 function DefaultHome() {
   const { profile } = useAuth();

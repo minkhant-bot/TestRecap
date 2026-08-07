@@ -372,7 +372,10 @@ button {
   z-index: 39;
   padding: 8px 16px 16px;
   background: rgba(5, 5, 5, 0.98);
-  backdrop-filter: blur(18px);
+  /* Deliberately no blur-behind-content property here: the background above
+     is already ~opaque, so blurring what's behind it is visually a no-op
+     but still forces the compositor to redo that blur every open/close
+     frame -- costly on mobile GPUs for zero visible difference. */
   border-bottom: 1px solid var(--line);
   box-shadow: 0 24px 60px rgba(0, 0, 0, 0.45);
   opacity: 0;
@@ -582,6 +585,21 @@ button {
    is a genuine 9:16 shape rather than a compromise — the page scrolls past
    it like any real portrait video preview would). */
 .videoBox--portrait { aspect-ratio: 9 / 16; width: 100%; }
+
+/* A preview load failure renders an .alert (message + Retry button) inside
+   this same fixed 9:16 box. At narrow mobile widths that content is taller
+   than the box, and the box's own overflow:hidden (above) was clipping the
+   Retry button -- unlike the real <video> or the idle '▶' glyph, an error
+   must never be clipped since that makes Retry unreachable. Only relaxes
+   the ratio for this one fallback state; the video/idle box is unchanged. */
+.videoBox--portrait:has(.alert) { aspect-ratio: auto; }
+
+/* .videoBox's own font-size: 52px (reference.css) is sized for the bare '▶'
+   placeholder glyph and was cascading into the error alert's message and
+   Retry button, rendering both at 52px -- illegible wrapped text and a
+   Retry button too small for its own oversized label. 1rem escapes back to
+   the root font-size, matching every other .alert in the app. */
+.videoBox .alert { font-size: 1rem; }
 
 /* Inline (non-modal) expand-in-place panels — mirrors the reference's own
    BuyFlow pattern (a .panel appearing directly in the page flow). */

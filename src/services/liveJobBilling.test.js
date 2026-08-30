@@ -13,6 +13,12 @@ const env = {
   DATABASE_URL: 'postgres://unit-test',
 };
 
+// Active (non-terminal) reservation statuses -- mirrors the partial unique
+// index added in 0005_retryable_reservations.sql, which permits at most one
+// such row per job at a time while letting 'released' rows accumulate as
+// permanent history.
+const ACTIVE_RESERVATION_STATUSES = ['reserved', 'settled', 'review_required'];
+
 const createHarness = ({
   balance = 20n, planCode = 'normal', mode = 'byok',
 } = {}) => {
@@ -20,10 +26,15 @@ const createHarness = ({
     user: { id: '00000000-0000-4000-8000-000000000001' },
     balance: { postedBalance: balance, reservedBalance: 0n },
     job: null,
-    reservation: null,
+    reservations: [],
     ledger: [],
     audit: [],
   };
+  // Convenience accessor for tests that only ever deal with one job: the
+  // most recently inserted reservation row across all jobs in this harness.
+  Object.defineProperty(state, 'reservation', {
+    get: () => state.reservations.length ? { ...state.reservations.at(-1) } : null,
+  });
   let lock = Promise.resolve();
   const transaction = work => {
     const result = lock.then(() => work({}));
@@ -112,23 +123,33 @@ const createHarness = ({
       },
     },
     reservations: {
+      // Mirrors credit_reservations_one_active_per_job_idx: rejects a new
+      // row while an active one already exists for the job, exactly like
+      // the real partial unique index would under a genuine race.
       insertReservation: async reservation => {
-        state.reservation = {
-          id: 'reservation-1', ...reservation, status: 'reserved',
+        const activeExisting = state.reservations.find(row =>
+          row.jobId === reservation.jobId && ACTIVE_RESERVATION_STATUSES.includes(row.status));
+        if (activeExisting) {
+          const error = new Error(
+            'duplicate key value violates unique constraint "credit_reservations_one_active_per_job_idx"',
+          );
+          error.code = '23505';
+          throw error;
+        }
+        const record = {
+          id: `reservation-${state.reservations.length + 1}`, ...reservation, status: 'reserved',
         };
-        return state.reservation;
+        state.reservations.push(record);
+        return { ...record };
       },
-      findReservationByJobId: async () => state.reservation && { ...state.reservation },
-      updateReservationStatus: async update => {
-        state.reservation.status = update.status;
-        return state.reservation;
+      findReservationByJobId: async jobId => {
+        const forJob = state.reservations.filter(row => row.jobId === jobId);
+        return forJob.length ? { ...forJob.at(-1) } : null;
       },
-      reactivateReservation: async ({ amount, idempotencyKey }) => {
-        if (!state.reservation || state.reservation.status !== 'released') return null;
-        state.reservation = {
-          ...state.reservation, amount, idempotencyKey, status: 'reserved',
-        };
-        return state.reservation;
+      updateReservationStatus: async ({ reservationId, ...update }) => {
+        const record = state.reservations.find(row => row.id === reservationId);
+        Object.assign(record, update);
+        return { ...record };
       },
     },
     ledger: {
@@ -413,7 +434,7 @@ test('retrying the same attempt with no billingMode replays the existing reserva
   assert.equal(harness.state.balance.reservedBalance, 3n);
 });
 
-test('a failed job\'s retry re-reserves exactly once by reopening the same reservation row, not creating a duplicate', async () => {
+test('a failed job\'s retry re-reserves exactly once via a brand-new reservation row, never mutating the released one', async () => {
   const harness = createHarness({ planCode: 'pro', mode: 'blink_funded', balance: 12n });
   const first = await reserveLiveJob(
     request({ requestedPlanCode: '', requestedMode: '', idempotencyKey: 'attempt-1', sourceDurationSeconds: 30 }),
@@ -434,10 +455,69 @@ test('a failed job\'s retry re-reserves exactly once by reopening the same reser
   );
   assert.equal(retry.replayed, false);
   assert.equal(retry.snapshot.billingStatus, 'reserved');
-  // Same reservation row, reactivated -- not a second, independent one.
-  assert.equal(harness.state.reservation.id, originalReservationId);
+  // A brand-new row -- the DB trigger forbids mutating a released
+  // reservation (see validate_reservation_transition in
+  // 0001_p2_foundation.sql), so a retry must insert, never update.
+  assert.notEqual(harness.state.reservation.id, originalReservationId);
   assert.equal(harness.state.reservation.status, 'reserved');
   assert.equal(harness.state.balance.reservedBalance, 3n);
+  // The original row remains, permanently, exactly as it was released.
+  assert.equal(harness.state.reservations.length, 2);
+  assert.equal(harness.state.reservations[0].id, originalReservationId);
+  assert.equal(harness.state.reservations[0].status, 'released');
+});
+
+test('retry with a different calculated amount charges the new amount, leaving the original release untouched', async () => {
+  const harness = createHarness({ planCode: 'pro', mode: 'blink_funded', balance: 12n });
+  const first = await reserveLiveJob(
+    request({ requestedPlanCode: '', requestedMode: '', idempotencyKey: 'attempt-1', sourceDurationSeconds: 30 }),
+    { env, repositories: harness.repositories },
+  );
+  assert.equal(first.snapshot.totalCredits, '3');
+  await handleLiveJobFailure(harness.state.job.id, 'no_valid_output', { repositories: harness.repositories });
+
+  // Retry recalculates from a longer authoritative source duration -- a
+  // different amount than the original attempt. The immutable-amount DB
+  // trigger is satisfied because this is a new row, not an update.
+  const retry = await reserveLiveJob(
+    request({ requestedPlanCode: '', requestedMode: '', idempotencyKey: 'attempt-2', sourceDurationSeconds: 90 }),
+    { env, repositories: harness.repositories },
+  );
+  assert.equal(retry.snapshot.totalCredits, '9');
+  assert.equal(harness.state.reservation.amount, 9n);
+  assert.equal(harness.state.reservations[0].amount, 3n, 'the original released row keeps its original amount forever');
+  assert.equal(harness.state.balance.reservedBalance, 9n);
+});
+
+test('concurrent retries for the same released job insert at most one new reservation', async () => {
+  const harness = createHarness({ planCode: 'pro', mode: 'blink_funded', balance: 12n });
+  await reserveLiveJob(
+    request({ requestedPlanCode: '', requestedMode: '', idempotencyKey: 'attempt-1', sourceDurationSeconds: 30 }),
+    { env, repositories: harness.repositories },
+  );
+  await handleLiveJobFailure(harness.state.job.id, 'no_valid_output', { repositories: harness.repositories });
+
+  const results = await Promise.allSettled([
+    reserveLiveJob(
+      request({ requestedPlanCode: '', requestedMode: '', idempotencyKey: 'attempt-2a', sourceDurationSeconds: 30 }),
+      { env, repositories: harness.repositories },
+    ),
+    reserveLiveJob(
+      request({ requestedPlanCode: '', requestedMode: '', idempotencyKey: 'attempt-2b', sourceDurationSeconds: 30 }),
+      { env, repositories: harness.repositories },
+    ),
+  ]);
+  // The jobs row lock (findBillingJob forUpdate) serializes the two
+  // attempts: whichever commits first flips the job to 'reserved', so the
+  // second sees a no-longer-released job and is rejected as a genuine
+  // conflict -- never a second reservation row for the same job.
+  assert.equal(results.filter(item => item.status === 'fulfilled').length, 1);
+  const rejected = results.find(item => item.status === 'rejected');
+  assert.equal(rejected.reason.code, 'RESERVATION_ALREADY_FINALIZED');
+  assert.equal(harness.state.balance.reservedBalance, 3n);
+  assert.equal(
+    harness.state.reservations.filter(row => row.status === 'reserved').length, 1,
+  );
 });
 
 test('re-reservation on retry still enforces insufficient credits and never reactivates a still-active or already-settled reservation', async () => {

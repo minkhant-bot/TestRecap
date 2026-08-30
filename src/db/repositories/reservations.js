@@ -22,10 +22,22 @@ const mapReservation = row => row && ({
   version: Number(row.version),
 });
 
+// A job can accumulate multiple historical reservation rows across retries
+// (see insertReservation), but credit_reservations_one_active_per_job_idx
+// (0005_retryable_reservations.sql) guarantees at most one row per job is
+// ever in an active status ('reserved', 'settled', 'review_required') at a
+// time. Ordering active status first -- rather than by reserved_at alone --
+// makes that row an unambiguous, timestamp-independent pick: reserved_at is
+// Postgres' transaction-start time, not commit time, so under lock
+// contention a later attempt's reserved_at is not guaranteed to sort after
+// an earlier one's. Falling back to reserved_at DESC only matters when no
+// active row exists (e.g. inspecting a fully released/refunded job).
 export const findReservationByJobId = async (jobId, { client = null, forUpdate = false } = {}) => {
   const result = await databaseExecutor(client).query(
     `SELECT ${COLUMNS} FROM credit_reservations
-     WHERE job_id = $1${forUpdate ? ' FOR UPDATE' : ''}`,
+     WHERE job_id = $1
+     ORDER BY (status IN ('reserved', 'settled', 'review_required')) DESC, reserved_at DESC
+     LIMIT 1${forUpdate ? ' FOR UPDATE' : ''}`,
     [jobId],
   );
   return mapReservation(firstRow(result));
@@ -39,27 +51,6 @@ export const insertReservation = async (reservation, { client, id = randomUUID()
      VALUES ($1, $2, $3, $4, 'reserved', $5)
      RETURNING ${COLUMNS}`,
     [id, reservation.userId, reservation.jobId, String(reservation.amount), reservation.idempotencyKey],
-  );
-  return mapReservation(firstRow(result));
-};
-
-// Reopens a job's SOLE reservation row (job_id is UNIQUE by schema, so a
-// retried job can never gain a second, independent reservation) after it
-// was cleanly released by a prior failure. Guarded by status='released' so
-// it can never reactivate an active, settled, or otherwise finalized
-// reservation. The release itself remains permanently recorded in
-// audit_logs even though this row's own released_at is cleared here.
-export const reactivateReservation = async ({ jobId, amount, idempotencyKey }, { client }) => {
-  if (!client) throw new Error('Reservation mutations require an existing transaction client.');
-  const result = await client.query(
-    `UPDATE credit_reservations SET
-       amount = $2, idempotency_key = $3, status = 'reserved',
-       reserved_at = now(), settled_at = NULL, released_at = NULL,
-       refunded_at = NULL, review_required_at = NULL, review_origin_status = NULL,
-       resolution_reason = NULL, version = version + 1
-     WHERE job_id = $1 AND status = 'released'
-     RETURNING ${COLUMNS}`,
-    [jobId, String(amount), idempotencyKey],
   );
   return mapReservation(firstRow(result));
 };

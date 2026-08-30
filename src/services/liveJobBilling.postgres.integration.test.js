@@ -170,6 +170,66 @@ integration('live billing uses real PostgreSQL locks, ledger compensation, and w
     const afterRelease = await balances.findBalanceAccount(user.id, { client: pool });
     assert.equal(afterRelease.postedBalance, 6n);
     assert.equal(afterRelease.reservedBalance, 0n);
+
+    // Retrying a released job against the REAL validate_reservation_transition
+    // trigger (0001_p2_foundation.sql) and credit_reservations_one_active_per_job_idx
+    // (0005_retryable_reservations.sql) -- this is the exact production path
+    // that used to raise "Reservation identity and amount are immutable".
+    const retryIdempotencyKey = 'live-release-retry';
+    const retryResult = await reserveLiveJob({
+      ...base, sourceDurationSeconds: 31, jobId: releasedJobId,
+      idempotencyKey: retryIdempotencyKey,
+    }, { env, repositories });
+    assert.equal(retryResult.replayed, false);
+    const retriedReservation = await reservations.findReservationByJobId(
+      releasedJobId, { client: pool },
+    );
+    assert.equal(retriedReservation.status, 'reserved');
+    // A brand-new row -- the released row is immutable financial history,
+    // never resurrected in place.
+    assert.notEqual(retriedReservation.id, releasedReservation.id);
+    const afterRetryReserve = await balances.findBalanceAccount(user.id, { client: pool });
+    assert.equal(afterRetryReserve.reservedBalance, retriedReservation.amount);
+    assert.equal(afterRetryReserve.postedBalance, 6n);
+
+    // The client's own retry of the HTTP request (same Idempotency-Key)
+    // must replay, never insert a second reservation for the job.
+    const retryReplay = await reserveLiveJob({
+      ...base, sourceDurationSeconds: 31, jobId: releasedJobId,
+      idempotencyKey: retryIdempotencyKey,
+    }, { env, repositories });
+    assert.equal(retryReplay.replayed, true);
+    const afterRetryReplay = await balances.findBalanceAccount(user.id, { client: pool });
+    assert.equal(afterRetryReplay.reservedBalance, retriedReservation.amount);
+
+    // Settling the retried reservation must never touch the original,
+    // already-released row -- confirms real, permanent immutable history.
+    await settleLiveJob(releasedJobId, { outputValidated: true }, { repositories });
+    const originalRowAfterSettle = await pool.query(
+      `SELECT status, amount, idempotency_key FROM credit_reservations WHERE id = $1`,
+      [releasedReservation.id],
+    );
+    assert.equal(originalRowAfterSettle.rows[0].status, 'released');
+    assert.equal(BigInt(originalRowAfterSettle.rows[0].amount), releasedReservation.amount);
+    assert.equal(originalRowAfterSettle.rows[0].idempotency_key, releasedReservation.idempotencyKey);
+    const afterSettle = await balances.findBalanceAccount(user.id, { client: pool });
+    assert.equal(afterSettle.reservedBalance, 0n);
+    assert.equal(afterSettle.postedBalance, 6n - retriedReservation.amount);
+
+    // A settled reservation must never be reopened by a stray retry --
+    // enforced by the app (RESERVATION_ALREADY_FINALIZED) since the DB
+    // partial unique index only blocks a second row while one is ACTIVE,
+    // and a settled row still counts as active by that index.
+    await assert.rejects(
+      reserveLiveJob({
+        ...base, sourceDurationSeconds: 31, jobId: releasedJobId,
+        idempotencyKey: 'live-release-retry-2',
+      }, { env, repositories }),
+      error => error.code === 'RESERVATION_ALREADY_FINALIZED',
+    );
+    const afterRejectedRetry = await balances.findBalanceAccount(user.id, { client: pool });
+    assert.equal(afterRejectedRetry.reservedBalance, 0n);
+    assert.equal(afterRejectedRetry.postedBalance, 6n - retriedReservation.amount);
   } finally {
     await pool.end();
     const cleanup = new pg.Client({ connectionString: url });

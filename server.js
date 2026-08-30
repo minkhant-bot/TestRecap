@@ -93,6 +93,33 @@ async function startServer() {
     });
   }
 
+  // Required PostgreSQL migrations must complete before the HTTP port opens
+  // -- otherwise the app could accept billing/reservation traffic against a
+  // schema the running code doesn't match (see the credit_reservations
+  // retry fix in 0005_retryable_reservations.sql, which depends on this).
+  // Optional-database deployments (DATABASE_REQUIRED unset/false) must
+  // still start normally even if migrations fail or PostgreSQL is absent --
+  // matches runStartupMigrations' own non-production/not-configured no-op.
+  try {
+    const migrationResult = await runStartupMigrations({ configuration: databaseConfiguration });
+    console.info(JSON.stringify({
+      event: 'database.startup_migrations.complete',
+      attempted: migrationResult.attempted,
+      applied: migrationResult.applied,
+      reason: migrationResult.reason,
+    }));
+  } catch (error) {
+    console.error(JSON.stringify({
+      event: 'database.startup_migrations.failed',
+      required: databaseConfiguration.required,
+      message: error?.message || String(error),
+    }));
+    if (databaseConfiguration.required) {
+      await shutdownDatabase();
+      throw error;
+    }
+  }
+
   const { port, host } = getServerBinding();
   const server = await new Promise((resolve, reject) => {
     const listener = app.listen(port, host);
@@ -157,9 +184,10 @@ async function startServer() {
     }
   };
 
-  // Liveness is available before migrations and operational background work.
-  // Required migration failures stop the process; optional PostgreSQL cannot
-  // take down the existing file-backed Core AI service.
+  // Required migrations have already completed (above, before the port
+  // opened). Payment-proof cleanup is unrelated background housekeeping --
+  // it never gated traffic before and still doesn't; deferred via
+  // setImmediate purely so it runs off the initial synchronous tick.
   setImmediate(() => {
     void paymentProofStorage.cleanupTemporaryFiles()
       .then(removedTemporaryProofs => {
@@ -174,32 +202,9 @@ async function startServer() {
         event: 'payment_proof.temporary_cleanup.failed',
         message: error?.message || String(error),
       })));
-
-    void runStartupMigrations({ configuration: databaseConfiguration })
-      .then(result => {
-        console.info(JSON.stringify({
-          event: 'database.startup_migrations.complete',
-          attempted: result.attempted,
-          applied: result.applied,
-          reason: result.reason,
-        }));
-        startWorkspaceServices();
-      })
-      .catch(async error => {
-        console.error(JSON.stringify({
-          event: 'database.startup_migrations.failed',
-          required: databaseConfiguration.required,
-          message: error?.message || String(error),
-        }));
-        if (!databaseConfiguration.required) {
-          startWorkspaceServices();
-          return;
-        }
-        await new Promise(resolve => server.close(resolve));
-        await shutdownDatabase();
-        process.exitCode = 1;
-      });
   });
+  startWorkspaceServices();
+
   let shuttingDown = false;
   const shutdown = async signal => {
     if (shuttingDown) return;

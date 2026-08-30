@@ -86,11 +86,11 @@ export const reserveLiveJob = async ({
         return { snapshot: publicSnapshot(existing), replayed: true };
       }
       if (existing.userId !== user.id) fail('Job reservation idempotency conflict.', 'IDEMPOTENCY_CONFLICT', 409);
-      // A different attempt (new Idempotency-Key) for the same job: the
-      // schema allows exactly one reservation row per job, so a retry after
-      // a failed job -- whose reservation was already cleanly released by
-      // handleLiveJobFailure -- reopens that SAME row rather than creating a
-      // second, independent one. Never reopen on top of a reservation that
+      // A different attempt (new Idempotency-Key) for the same job: a retry
+      // after a failed job -- whose reservation was already cleanly
+      // released by handleLiveJobFailure -- inserts a NEW reservation row
+      // for that job (see insertReservation below), leaving the released
+      // row as permanent history. Never reopen on top of a reservation that
       // is still active or already finalized (settled/refunded/under
       // review); that is a genuine conflict, not a retryable state.
       if (existing.billingStatus !== 'released') {
@@ -162,20 +162,23 @@ export const reserveLiveJob = async ({
     if (!balance) fail('Available credits are insufficient.', 'INSUFFICIENT_CREDITS', 409);
     // insertBillingJob is a no-op (ON CONFLICT DO NOTHING) when reopening --
     // the job row already exists and is reused as-is; only the reservation
-    // row itself is either freshly inserted or reactivated below.
+    // gets a freshly inserted row below.
     await repositories.jobs.insertBillingJob({
       id: jobId, userId: user.id, idempotencyKey,
     }, { client });
+    // A retry never mutates the prior (now 'released') reservation row --
+    // it inserts a brand-new one, exactly like the first attempt. Each
+    // reservation row is permanent, immutable financial history once
+    // written; reusing/mutating one row across attempts is what the
+    // credit_reservation_transition trigger (0001_p2_foundation.sql)
+    // correctly rejects. The partial unique index added in
+    // 0005_retryable_reservations.sql still guarantees at most one active
+    // reservation per job at a time.
     const reservationIdempotencyKey = `job:${jobId}:${idempotencyKey}`;
-    const reservation = reopening
-      ? await repositories.reservations.reactivateReservation({
-          jobId, amount: totalCredits, idempotencyKey: reservationIdempotencyKey,
-        }, { client })
-      : await repositories.reservations.insertReservation({
-          userId: user.id, jobId, amount: totalCredits,
-          idempotencyKey: reservationIdempotencyKey,
-        }, { client });
-    if (!reservation) fail('The existing reservation is no longer active.', 'INVALID_BILLING_STATE', 409);
+    const reservation = await repositories.reservations.insertReservation({
+      userId: user.id, jobId, amount: totalCredits,
+      idempotencyKey: reservationIdempotencyKey,
+    }, { client });
     const job = await repositories.jobs.attachBillingSnapshot({
       id: jobId, planId: plan.id, planCode: plan.code, billingMode: policy.billingMode,
       sourceDurationMs, blocks, creditsPerBlock: policy.creditsPerBlock, totalCredits,

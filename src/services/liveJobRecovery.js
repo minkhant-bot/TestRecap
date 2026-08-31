@@ -21,6 +21,27 @@
 // Jobs already `review_required` are left for Super Admin resolution, not
 // auto-resolved -- no safe automatic resolution path exists for that state,
 // and resolving it is by design a human decision.
+//
+// One JSON status needs a narrower rule than "genuinely active, leave
+// alone": `pending`. reserveLiveJob's own transaction already commits
+// Postgres `jobs.status = 'queued'` (attachBillingSnapshot) before the route
+// handler's later, separate admission check and JSON `queueWorkspaceJob`
+// write ever run. If admission rejects the request (e.g.
+// PROCESSING_USAGE_LIMIT_EXCEEDED) -- or the process crashes first -- that
+// JSON write never happens and the job is stuck at `pending` forever; no
+// later event ever revisits a `pending` job. A same-attempt compensating
+// release in the request path is best-effort and can itself fail or never
+// run. `pending` + Postgres `reserved` is therefore only reachable through
+// that failure window, never through a job someone is legitimately still
+// working with -- UNLESS the sweep races a request that is still mid-flight
+// (reservation committed, JSON write not yet applied). The
+// `jobs.updated_at` timestamp `attachBillingSnapshot` sets at reservation
+// commit is used as the durable staleness signal: only a reservation older
+// than ORPHANED_RESERVATION_GRACE_MS is treated as orphaned, which is far
+// longer than any real request (including its own inline release retries)
+// should ever take. `queued`/`processing` are never subject to this rule at
+// any age -- only a genuinely idle worker tick, not a timer, may resolve
+// those.
 
 import { auditLogsRepository } from '../db/repositories/index.js';
 import { withTransaction } from '../db/client.js';
@@ -37,6 +58,16 @@ import { assertCompletedCoreOutput } from './corePipelineBridge.js';
 
 const ACTIVE_WORKSPACE_STATUSES = new Set(['pending', 'queued', 'processing']);
 const ACTIONABLE_BILLING_STATUSES = new Set(['reserved', 'settled']);
+
+// Comfortably longer than a single request (including its own inline
+// release-retry attempts) should ever take, so this can never race a
+// reservation that is still legitimately mid-flight.
+const ORPHANED_RESERVATION_GRACE_MS = 5 * 60 * 1000;
+
+const isStaleReservation = (billingJob, nowMs) => {
+  const updatedAtMs = billingJob.updatedAt ? new Date(billingJob.updatedAt).getTime() : NaN;
+  return Number.isFinite(updatedAtMs) && nowMs - updatedAtMs > ORPHANED_RESERVATION_GRACE_MS;
+};
 
 const logRecoveryDecision = async (jobId, decision, details = {}) => {
   try {
@@ -56,7 +87,7 @@ const logRecoveryDecision = async (jobId, decision, details = {}) => {
 };
 
 const reconcileOne = async (jobId, {
-  getBillingStatus, getWorkspaceJob, validateOutput, settle, release, reviewRequired, audit,
+  getBillingStatus, getWorkspaceJob, validateOutput, settle, release, reviewRequired, audit, now,
 }) => {
   const billingJob = await getBillingStatus(jobId);
   if (!billingJob || !ACTIONABLE_BILLING_STATUSES.has(billingJob.billingStatus)) {
@@ -76,6 +107,18 @@ const reconcileOne = async (jobId, {
   }
 
   if (ACTIVE_WORKSPACE_STATUSES.has(workspaceJob.status)) {
+    if (workspaceJob.status === 'pending' && billingJob.billingStatus === 'reserved' &&
+        isStaleReservation(billingJob, now())) {
+      // Orphaned by an admission failure (or a crash) after the reservation
+      // already committed -- see the file-level comment. Never reachable for
+      // queued/processing, and never reachable for a pending reservation
+      // still inside the grace window.
+      await release(jobId, 'startup_reconciliation_orphaned_pending_reservation');
+      await audit(jobId, 'released', {
+        workspaceStatus: workspaceJob.status, reason: 'orphaned_pending_reservation',
+      });
+      return 'reconciled';
+    }
     // Genuinely still active (requeued by the ordinary recovery path) -- it
     // will settle/release itself through the normal worker tick. Touching
     // the reservation here would risk releasing a still-valid reservation.
@@ -138,6 +181,7 @@ export const reconcileStrandedLiveJobs = async ({
   release = releaseLiveJob,
   reviewRequired = markLiveJobReviewRequired,
   audit = logRecoveryDecision,
+  now = () => Date.now(),
 } = {}) => {
   if (!isEnabled()) return { enabled: false, reconciled: 0, skipped: 0, total: 0 };
   const jobIds = await listStranded();
@@ -146,7 +190,7 @@ export const reconcileStrandedLiveJobs = async ({
   for (const jobId of jobIds) {
     try {
       const outcome = await reconcileOne(jobId, {
-        getBillingStatus, getWorkspaceJob, validateOutput, settle, release, reviewRequired, audit,
+        getBillingStatus, getWorkspaceJob, validateOutput, settle, release, reviewRequired, audit, now,
       });
       if (outcome === 'reconciled') reconciled += 1;
       else skipped += 1;

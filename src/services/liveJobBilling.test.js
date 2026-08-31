@@ -3,6 +3,7 @@ import test from 'node:test';
 import {
   handleLiveJobFailure,
   markLiveJobReviewRequired,
+  releaseLiveJob,
   reserveLiveJob,
   settleLiveJob,
 } from './liveJobBilling.js';
@@ -464,6 +465,40 @@ test('a failed job\'s retry re-reserves exactly once via a brand-new reservation
   // The original row remains, permanently, exactly as it was released.
   assert.equal(harness.state.reservations.length, 2);
   assert.equal(harness.state.reservations[0].id, originalReservationId);
+  assert.equal(harness.state.reservations[0].status, 'released');
+});
+
+test('a job orphaned by an admission failure after reservation can be reserved again once startup reconciliation releases it', async () => {
+  // Mirrors src/services/liveJobRecovery.js's orphaned-pending-reservation
+  // path: admission (e.g. PROCESSING_USAGE_LIMIT_EXCEEDED) rejects the
+  // request after reserveLiveJob already committed, the inline compensating
+  // release never runs (failed, or the process crashed), and startup
+  // reconciliation later calls releaseLiveJob with this same reason string.
+  // The reservation-lifecycle mechanics don't depend on why release was
+  // called -- this proves a fresh queue attempt afterward reserves normally.
+  const harness = createHarness({ planCode: 'pro', mode: 'blink_funded', balance: 12n });
+  const first = await reserveLiveJob(
+    request({ requestedPlanCode: '', requestedMode: '', idempotencyKey: 'attempt-1', sourceDurationSeconds: 30 }),
+    { env, repositories: harness.repositories },
+  );
+  assert.equal(first.replayed, false);
+  const orphanedReservationId = harness.state.reservation.id;
+
+  await releaseLiveJob(
+    harness.state.job.id, 'startup_reconciliation_orphaned_pending_reservation',
+    { repositories: harness.repositories },
+  );
+  assert.equal(harness.state.reservation.status, 'released');
+  assert.equal(harness.state.balance.reservedBalance, 0n);
+
+  const retry = await reserveLiveJob(
+    request({ requestedPlanCode: '', requestedMode: '', idempotencyKey: 'attempt-2', sourceDurationSeconds: 30 }),
+    { env, repositories: harness.repositories },
+  );
+  assert.equal(retry.replayed, false);
+  assert.equal(retry.snapshot.billingStatus, 'reserved');
+  assert.notEqual(harness.state.reservation.id, orphanedReservationId);
+  assert.equal(harness.state.balance.reservedBalance, 3n);
   assert.equal(harness.state.reservations[0].status, 'released');
 });
 

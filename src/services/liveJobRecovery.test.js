@@ -11,15 +11,22 @@ import { reconcileStrandedLiveJobs } from './liveJobRecovery.js';
 
 const makeCalls = () => ({ settle: [], release: [], reviewRequired: [], audit: [] });
 
-const harness = ({ billingStatuses = {}, workspaceJobs = {} } = {}) => {
+const harness = ({ billingStatuses = {}, workspaceJobs = {}, now = () => Date.now() } = {}) => {
   const calls = makeCalls();
   const deps = {
     isEnabled: () => true,
     listStranded: async () => Object.keys(billingStatuses),
-    getBillingStatus: async jobId => (billingStatuses[jobId]
-      ? { id: jobId, billingStatus: billingStatuses[jobId] }
-      : null),
+    getBillingStatus: async jobId => {
+      const entry = billingStatuses[jobId];
+      if (!entry) return null;
+      // Most tests only care about the status string; the orphaned-pending
+      // reservation tests need an updatedAt timestamp too, so a job's entry
+      // may be either a bare status string or { status, updatedAt }.
+      if (typeof entry === 'string') return { id: jobId, billingStatus: entry };
+      return { id: jobId, billingStatus: entry.status, updatedAt: entry.updatedAt };
+    },
     getWorkspaceJob: jobId => workspaceJobs[jobId] || null,
+    now,
     validateOutput: (jobId, output) => {
       const job = workspaceJobs[jobId];
       if (!job || job.hasValidOutput === false) throw new Error('invalid output');
@@ -118,6 +125,108 @@ test('CRITICAL: a job that is still genuinely active (pending/queued/processing)
     assert.equal(calls.release.length, 0, `status=${status} must never be released`);
     assert.equal(calls.reviewRequired.length, 0, `status=${status} must never be marked review_required`);
   }
+});
+
+// Orphaned-pending-reservation tests: reserveLiveJob's transaction commits
+// Postgres jobs.status='queued' + billing_status='reserved' before the route
+// handler's later admission check and JSON queueWorkspaceJob write run. If
+// admission rejects the request (or the process crashes) before that JSON
+// write happens, the job is stuck at JSON status 'pending' forever with a
+// live reservation nothing else will ever revisit. These tests prove the
+// sweep recovers that case using reservation age as the safety signal,
+// without ever touching a reservation that could still be legitimately
+// mid-flight, and without ever touching a queued/processing job at any age.
+
+const NOW = 1_700_000_000_000;
+const FIVE_MINUTES_MS = 5 * 60 * 1000;
+
+test('ORPHANED RESERVATION: pending JSON + reserved billing, stale past the grace window, is released', async () => {
+  const { deps, calls } = harness({
+    billingStatuses: { 'job-orphan': { status: 'reserved', updatedAt: NOW - FIVE_MINUTES_MS - 1 } },
+    workspaceJobs: { 'job-orphan': { status: 'pending' } },
+    now: () => NOW,
+  });
+  const result = await reconcileStrandedLiveJobs(deps);
+  assert.equal(result.reconciled, 1);
+  assert.equal(calls.release.length, 1);
+  assert.equal(calls.release[0].jobId, 'job-orphan');
+  assert.equal(calls.release[0].reason, 'startup_reconciliation_orphaned_pending_reservation');
+  assert.equal(calls.settle.length, 0);
+  assert.equal(calls.reviewRequired.length, 0);
+  assert.equal(calls.audit[0].decision, 'released');
+  assert.equal(calls.audit[0].details.reason, 'orphaned_pending_reservation');
+});
+
+test('a pending reservation still inside the grace window is left alone -- may still be mid-flight', async () => {
+  const { deps, calls } = harness({
+    billingStatuses: { 'job-fresh': { status: 'reserved', updatedAt: NOW - 1000 } },
+    workspaceJobs: { 'job-fresh': { status: 'pending' } },
+    now: () => NOW,
+  });
+  const result = await reconcileStrandedLiveJobs(deps);
+  assert.equal(result.skipped, 1);
+  assert.equal(result.reconciled, 0);
+  assert.equal(calls.release.length, 0);
+  assert.equal(calls.reviewRequired.length, 0);
+});
+
+test('a pending reservation with no updatedAt signal is never released -- missing data must never be treated as stale', async () => {
+  const { deps, calls } = harness({
+    billingStatuses: { 'job-no-timestamp': 'reserved' },
+    workspaceJobs: { 'job-no-timestamp': { status: 'pending' } },
+    now: () => NOW,
+  });
+  const result = await reconcileStrandedLiveJobs(deps);
+  assert.equal(result.skipped, 1);
+  assert.equal(calls.release.length, 0);
+});
+
+test('CRITICAL: a stale reservation on a queued or processing job is never released -- staleness only applies to pending', async () => {
+  for (const status of ['queued', 'processing']) {
+    const { deps, calls } = harness({
+      billingStatuses: { 'job-active-old': { status: 'reserved', updatedAt: NOW - FIVE_MINUTES_MS * 10 } },
+      workspaceJobs: { 'job-active-old': { status } },
+      now: () => NOW,
+    });
+    const result = await reconcileStrandedLiveJobs(deps);
+    assert.equal(result.skipped, 1, `status=${status} should be skipped regardless of reservation age`);
+    assert.equal(calls.release.length, 0, `status=${status} must never be released by the age rule`);
+  }
+});
+
+test('SIMULATED CRASH: reservation committed but the JSON queue write never ran is recovered on the next reconciliation pass', async () => {
+  // Mirrors reserveLiveJob committing (Postgres queued/reserved) followed by
+  // a process crash before admission.withProcessingAdmission's queued write
+  // (or its compensating release) ever executes -- the JSON record is left
+  // exactly as createWorkspaceJob wrote it: 'pending'.
+  const billingStatuses = { 'job-crashed': { status: 'reserved', updatedAt: NOW - FIVE_MINUTES_MS - 1 } };
+  const workspaceJobs = { 'job-crashed': { status: 'pending' } };
+  const { deps, calls } = harness({ billingStatuses, workspaceJobs, now: () => NOW });
+  deps.release = async (jobId, reason) => {
+    calls.release.push({ jobId, reason });
+    billingStatuses[jobId] = { ...billingStatuses[jobId], status: 'released' };
+    return { billingStatus: 'released' };
+  };
+  const first = await reconcileStrandedLiveJobs(deps);
+  assert.equal(first.reconciled, 1);
+  assert.equal(calls.release.length, 1);
+
+  // IDEMPOTENCY: a subsequent restart (or re-run) must not release again.
+  const second = await reconcileStrandedLiveJobs(deps);
+  assert.equal(second.skipped, 1);
+  assert.equal(second.reconciled, 0);
+  assert.equal(calls.release.length, 1, 'release must not be called a second time');
+});
+
+test('a job already released (by an earlier orphan sweep) is left alone -- no double-release', async () => {
+  const { deps, calls } = harness({
+    billingStatuses: { 'job-already-released': { status: 'released', updatedAt: NOW - FIVE_MINUTES_MS - 1 } },
+    workspaceJobs: { 'job-already-released': { status: 'pending' } },
+    now: () => NOW,
+  });
+  const result = await reconcileStrandedLiveJobs(deps);
+  assert.equal(result.skipped, 1);
+  assert.equal(calls.release.length, 0);
 });
 
 test('a job already review_required is left for Super Admin, never auto-resolved', async () => {

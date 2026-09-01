@@ -623,6 +623,145 @@ test('sufficient credits allow queueing to proceed as normal', async () => {
     }
 });
 
+test('the processing-usage tier is never consulted when billing is not configured -- every user stays on the flat Trial ceiling', async () => {
+    authenticatedUser = { ...owner, uid: `tier-unconfigured-${randomUUID()}` };
+    let tierCalls = 0;
+    let observedTier;
+    const tierApp = express();
+    tierApp.use(express.json());
+    tierApp.use('/api/workspace', requireAuth, createWorkspaceRouter({
+        verifyKey: async () => ({ valid: true }),
+        readSourceDuration: async () => 60,
+        billingConfigured: () => false,
+        getQuotaTier: async () => { tierCalls += 1; return 'credited'; },
+        admission: {
+            consumeMutation: () => ({ allowed: true }),
+            withProcessingAdmission: (_uid, _jobId, operation, options) => {
+                observedTier = options?.tier;
+                return operation({ consumed: true });
+            }
+        },
+        worker: { wake: () => {}, snapshot: () => ({}) },
+        publishQueue: () => undefined
+    }));
+    const tierServer = await new Promise(resolve => {
+        const listener = tierApp.listen(0, '127.0.0.1', () => resolve(listener));
+    });
+    const tierUrl = `http://127.0.0.1:${tierServer.address().port}/api/workspace`;
+    try {
+        const body = new FormData();
+        body.append('video', new Blob([Buffer.alloc(512)], { type: 'video/mp4' }), 'unconfigured.mp4');
+        const uploaded = await fetch(`${tierUrl}/jobs`, { method: 'POST', headers: authenticated, body });
+        assert.equal(uploaded.status, 201);
+        const job = await uploaded.json();
+        const queued = await fetch(`${tierUrl}/jobs/${job.id}/queue`, {
+            method: 'POST',
+            headers: { ...authenticated, 'Content-Type': 'application/json' },
+            body: JSON.stringify({ effects: {} })
+        });
+        assert.equal(queued.status, 202);
+        assert.equal(tierCalls, 0, 'getQuotaTier must never be called when billing is not configured');
+        assert.equal(observedTier, 'trial');
+        await fetch(`${tierUrl}/jobs/${job.id}/cancel`, { method: 'POST', headers: authenticated });
+    } finally {
+        authenticatedUser = owner;
+        await new Promise(resolve => tierServer.close(resolve));
+    }
+});
+
+test('a resolved credited tier is threaded through to the processing-usage admission check', async () => {
+    authenticatedUser = { ...owner, uid: `tier-credited-${randomUUID()}` };
+    let observedTier;
+    const tierApp = express();
+    tierApp.use(express.json());
+    tierApp.use('/api/workspace', requireAuth, createWorkspaceRouter({
+        verifyKey: async () => ({ valid: true }),
+        readSourceDuration: async () => 60,
+        billingConfigured: () => true,
+        checkCredits: async () => ({ sufficient: true, requiredCredits: 2n, availableCredits: 999n }),
+        getQuotaTier: async identity => {
+            assert.equal(identity.uid, authenticatedUser.uid);
+            return 'credited';
+        },
+        admission: {
+            consumeMutation: () => ({ allowed: true }),
+            withProcessingAdmission: (_uid, _jobId, operation, options) => {
+                observedTier = options?.tier;
+                return operation({ consumed: true });
+            }
+        },
+        worker: { wake: () => {}, snapshot: () => ({}) },
+        publishQueue: () => undefined
+    }));
+    const tierServer = await new Promise(resolve => {
+        const listener = tierApp.listen(0, '127.0.0.1', () => resolve(listener));
+    });
+    const tierUrl = `http://127.0.0.1:${tierServer.address().port}/api/workspace`;
+    try {
+        const body = new FormData();
+        body.append('video', new Blob([Buffer.alloc(512)], { type: 'video/mp4' }), 'credited.mp4');
+        const uploaded = await fetch(`${tierUrl}/jobs`, { method: 'POST', headers: authenticated, body });
+        assert.equal(uploaded.status, 201);
+        const job = await uploaded.json();
+        const queued = await fetch(`${tierUrl}/jobs/${job.id}/queue`, {
+            method: 'POST',
+            headers: { ...authenticated, 'Content-Type': 'application/json' },
+            body: JSON.stringify({ effects: {} })
+        });
+        assert.equal(queued.status, 202);
+        assert.equal(observedTier, 'credited');
+        await fetch(`${tierUrl}/jobs/${job.id}/cancel`, { method: 'POST', headers: authenticated });
+    } finally {
+        authenticatedUser = owner;
+        await new Promise(resolve => tierServer.close(resolve));
+    }
+});
+
+test('a getQuotaTier failure fails safe to the Trial tier rather than surfacing an error or bypassing the limit', async () => {
+    authenticatedUser = { ...owner, uid: `tier-error-${randomUUID()}` };
+    let observedTier;
+    const tierApp = express();
+    tierApp.use(express.json());
+    tierApp.use('/api/workspace', requireAuth, createWorkspaceRouter({
+        verifyKey: async () => ({ valid: true }),
+        readSourceDuration: async () => 60,
+        billingConfigured: () => true,
+        checkCredits: async () => ({ sufficient: true, requiredCredits: 2n, availableCredits: 999n }),
+        getQuotaTier: async () => { throw new Error('billing lookup unavailable'); },
+        admission: {
+            consumeMutation: () => ({ allowed: true }),
+            withProcessingAdmission: (_uid, _jobId, operation, options) => {
+                observedTier = options?.tier;
+                return operation({ consumed: true });
+            }
+        },
+        worker: { wake: () => {}, snapshot: () => ({}) },
+        publishQueue: () => undefined
+    }));
+    const tierServer = await new Promise(resolve => {
+        const listener = tierApp.listen(0, '127.0.0.1', () => resolve(listener));
+    });
+    const tierUrl = `http://127.0.0.1:${tierServer.address().port}/api/workspace`;
+    try {
+        const body = new FormData();
+        body.append('video', new Blob([Buffer.alloc(512)], { type: 'video/mp4' }), 'error.mp4');
+        const uploaded = await fetch(`${tierUrl}/jobs`, { method: 'POST', headers: authenticated, body });
+        assert.equal(uploaded.status, 201);
+        const job = await uploaded.json();
+        const queued = await fetch(`${tierUrl}/jobs/${job.id}/queue`, {
+            method: 'POST',
+            headers: { ...authenticated, 'Content-Type': 'application/json' },
+            body: JSON.stringify({ effects: {} })
+        });
+        assert.equal(queued.status, 202);
+        assert.equal(observedTier, 'trial');
+        await fetch(`${tierUrl}/jobs/${job.id}/cancel`, { method: 'POST', headers: authenticated });
+    } finally {
+        authenticatedUser = owner;
+        await new Promise(resolve => tierServer.close(resolve));
+    }
+});
+
 test('cancelling a job that has already started processing is rejected with 409 and no credits are released', async () => {
     authenticatedUser = { ...owner, uid: `cancel-processing-${randomUUID()}` };
     let releaseCalls = 0;

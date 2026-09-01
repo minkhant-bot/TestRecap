@@ -674,7 +674,7 @@ test('Rule #2: an expired Trial blocks a new reservation and forfeits remaining 
   const harness = createHarness({ planCode: 'trial', balance: 12n });
   harness.repositories.billing = {
     findTrialGrant: async () => ({
-      id: 'grant-1', user_id: harness.state.user.id,
+      id: 'grant-1', user_id: harness.state.user.id, credit_amount: '12',
       expires_at: new Date(Date.now() - 1000), expired_at: null,
     }),
     markTrialGrantExpired: async () => ({ id: 'grant-1', expired_at: new Date() }),

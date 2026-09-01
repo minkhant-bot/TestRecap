@@ -24,6 +24,7 @@ import {
     settleLiveJob
 } from './liveJobBilling.js';
 import { inspectQueuedWorkspaceRetry } from './workspaceRetry.js';
+import { admissionService } from './admissionControl.js';
 
 const storagePaths = ensureStoragePaths(getStoragePaths());
 
@@ -90,7 +91,14 @@ export class WorkspaceWorker {
             settle: settleLiveJob,
             fail: handleLiveJobFailure,
             review: markLiveJobReviewRequired
-        }
+        },
+        // Refunds a processing-usage-quota slot when a genuinely queued job
+        // later fails or is cancelled by the pipeline (bounded, see
+        // refundProcessingStartOnFailure) -- a system/pipeline failure must
+        // not permanently cost the user a slot the same way a completed job
+        // does. Injectable so tests can assert on it without touching the
+        // real on-disk admission store.
+        admission = admissionService
     } = {}) {
         this.workerId = workerId;
         this.pollIntervalMs = pollIntervalMs;
@@ -100,6 +108,7 @@ export class WorkspaceWorker {
         this.cleanup = cleanup;
         this.liveBillingEnabled = liveBillingEnabled;
         this.billing = billing;
+        this.admission = admission;
         this.running = false;
         this.timer = null;
         this.activeJobId = null;
@@ -313,6 +322,7 @@ export class WorkspaceWorker {
                     cancellationRequested: false
                 });
                 publishWorkspaceEvent(job.id, 'job.failed', failed);
+                this.refundProcessingUsage(job);
                 if (usesLiveBilling) {
                     const billingSnapshot = await this.billing.fail(
                         job.id, `system_failure:${failedStage || 'unknown'}`
@@ -341,6 +351,7 @@ export class WorkspaceWorker {
                         cancellationRequested: true
                     });
                     publishWorkspaceEvent(job.id, 'job.cancelled', cancelled);
+                    this.refundProcessingUsage(job);
                     if (usesLiveBilling) {
                         const billingSnapshot = await this.billing.fail(job.id, 'job_cancelled');
                         if (billingSnapshot) {
@@ -369,6 +380,18 @@ export class WorkspaceWorker {
 
     cancel(jobId) {
         if (this.activeJobId === jobId) this.activeController?.abort();
+    }
+
+    // A bookkeeping failure here must never break failure/cancellation
+    // handling itself -- worst case, a slot stays consumed exactly as it
+    // did before this refund path existed.
+    refundProcessingUsage(job) {
+        try {
+            this.admission.refundProcessingStartOnFailure(job.ownerUid, job.id);
+        } catch (error) {
+            console.error(`[WorkspaceWorker] Processing-usage refund failed for ${job.id}:`,
+                error?.message || error);
+        }
     }
 
     wake() {

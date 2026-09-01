@@ -32,7 +32,7 @@ import {
     WorkspaceRetryError
 } from '../services/workspaceRetry.js';
 import { verifyGeminiApiKey } from '../services/geminiKeyVerification.js';
-import { checkCreditSufficiency } from '../services/billingFoundation.js';
+import { checkCreditSufficiency, getProcessingQuotaTier } from '../services/billingFoundation.js';
 import { getBillingConfiguration } from '../config/billing.js';
 import {
     admissionService,
@@ -118,10 +118,32 @@ export const createWorkspaceRouter = ({
     // billing foundation itself isn't configured/enabled, preserving
     // existing behavior for deployments that never activated it. Injectable
     // so tests can exercise the gate without a real DATABASE_URL.
-    billingConfigured = () => getBillingConfiguration().enabled
+    billingConfigured = () => getBillingConfiguration().enabled,
+    // Processing-usage-quota tier ('trial' | 'credited') for the
+    // PROCESSING_USAGE_LIMIT admission check below -- resolved from plan/
+    // ledger provenance, never from credit balance alone (see
+    // getProcessingQuotaTier). Only ever consulted when billingConfigured()
+    // is true; otherwise every user stays on the flat Trial ceiling exactly
+    // as before this tiering existed. Injectable so tests can exercise both
+    // tiers without a real DATABASE_URL.
+    getQuotaTier = getProcessingQuotaTier
 } = {}) => {
     const router = express.Router();
     const admitMutation = endpoint => createMutationAdmissionMiddleware(admission, endpoint);
+    // Never touches billing/ledger lookups when the PostgreSQL billing
+    // foundation isn't configured -- every user stays on the flat Trial
+    // ceiling, identical to behavior before this tiering existed. Fails safe
+    // to 'trial' on any error, even though getQuotaTier already does the
+    // same internally -- defense in depth for an injected test double that
+    // doesn't.
+    const resolveQuotaTier = async identity => {
+        if (!billingConfigured()) return 'trial';
+        try {
+            return await getQuotaTier(identity);
+        } catch {
+            return 'trial';
+        }
+    };
 
     router.get('/config', (req, res) => {
         const config = getUploadConfiguration();
@@ -241,6 +263,7 @@ export const createWorkspaceRouter = ({
                 reserved = !reservationResult.replayed;
                 updateWorkspaceJobBilling(internal.id, req.user.uid, reservationResult.snapshot);
             }
+            const retryQuotaTier = await resolveQuotaTier(req.user);
             const result = admission.withProcessingAdmission(
                 req.user.uid,
                 req.params.jobId,
@@ -248,7 +271,8 @@ export const createWorkspaceRouter = ({
                     idempotencyKey,
                     resumeStage: eligibility.resumeStage,
                     resumeProgress: eligibility.resumeProgress
-                })
+                }),
+                { tier: retryQuotaTier }
             );
             setJobKeys(req.params.jobId, { geminiApiKey });
             publishWorkspaceEvent(req.params.jobId, 'job.retry_accepted', {
@@ -390,10 +414,12 @@ export const createWorkspaceRouter = ({
                 reserved = !result.replayed;
                 updateWorkspaceJobBilling(internal.id, req.user.uid, result.snapshot);
             }
+            const quotaTier = await resolveQuotaTier(req.user);
             const job = admission.withProcessingAdmission(
                 req.user.uid,
                 req.params.jobId,
-                () => queueWorkspaceJob(req.params.jobId, req.user.uid)
+                () => queueWorkspaceJob(req.params.jobId, req.user.uid),
+                { tier: quotaTier }
             );
             if (!job) return res.status(404).json({ error: 'Project not found.' });
             setJobKeys(job.id, { geminiApiKey });

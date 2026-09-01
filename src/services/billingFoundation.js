@@ -503,24 +503,35 @@ export const checkAndExpireTrial = async (userId, { client, deps = dependencies 
   const marked = await deps.billing.markTrialGrantExpired(userId, { client });
   if (!marked) return null;
   const balance = await deps.balances.ensureBalanceAccountForUpdate(userId, { client });
-  if (balance.availableBalance > 0n) {
+  // Forfeiture is capped at the original Trial grant's face value, never the
+  // whole balance -- the balance is a single undifferentiated pool, so any
+  // manually-granted or purchased credits sitting alongside an unspent Trial
+  // allowance must survive Trial expiry. This is an approximation (credits
+  // are fungible; we cannot trace which specific credit was spent), but it
+  // guarantees Trial expiry never forfeits more than the Trial grant itself
+  // was ever worth.
+  const trialGrantAmount = bigint(grant.credit_amount);
+  const forfeitedCredits = balance.availableBalance < trialGrantAmount
+    ? balance.availableBalance
+    : trialGrantAmount;
+  if (forfeitedCredits > 0n) {
     await deps.ledger.insertLedgerEntry({
       userId,
-      amount: -balance.availableBalance,
+      amount: -forfeitedCredits,
       entryType: 'manual_deduction',
       correlationKey: `trial-expired:${userId}`,
-      reason: 'Trial expired 120 hours after grant; remaining credits forfeited automatically.',
+      reason: 'Trial expired 120 hours after grant; remaining Trial-allowance credits forfeited automatically.',
       createdByUserId: userId,
       metadata: { system: true, trigger: 'trial_expiry' },
     }, { client });
-    await deps.balances.addPostedCredits(userId, -balance.availableBalance, { client });
+    await deps.balances.addPostedCredits(userId, -forfeitedCredits, { client });
   }
   await deps.audit.insertAuditLog({
     actorService: 'trial_lifecycle', subjectUserId: userId,
     eventType: 'trial.expired', resourceType: 'trial_grant', resourceId: grant.id,
-    afterState: { forfeitedCredits: String(balance.availableBalance) },
+    afterState: { forfeitedCredits: String(forfeitedCredits) },
   }, { client });
-  return { forfeitedCredits: balance.availableBalance };
+  return { forfeitedCredits };
 };
 
 export const getBalance = async (identity, {
@@ -646,6 +657,74 @@ export const checkCreditSufficiency = async (identity, { sourceDurationSeconds }
     sufficient: availableCredits >= requiredCredits,
     requiredCredits, availableCredits,
   };
+};
+
+// The ledger records provenance per entry (trial_grant/manual_grant/
+// purchase/...), but credit_balance_accounts holds one undifferentiated
+// pool -- spend (settlement/refund/reversal/manual_deduction) is never
+// attributed back to a specific originating entry, so there is no ledger
+// column or query that can say "this exact remaining credit came from a
+// purchase, not the Trial grant." Precise per-source attribution is not a
+// supported accounting semantic in this schema and must not be invented.
+//
+// What IS knowable and durable: the Trial grant's own face value
+// (trial_grants.credit_amount) never changes once granted. Since Trial can
+// never have contributed more than that face value to the current balance,
+// ANY balance in excess of it is necessarily non-Trial-sourced, regardless
+// of spend order. This mirrors the exact capping rule already used by
+// checkAndExpireTrial's forfeiture (min(availableBalance,
+// trialGrantAmount)) -- the two computations are deliberately symmetric:
+// whatever that rule would NOT forfeit as Trial's own money is exactly the
+// amount this function reports as currently-usable non-Trial credit.
+//
+// This makes historical provenance alone (a past manual_grant/purchase)
+// insufficient for 'credited': once that non-Trial value is fully spent
+// down to (or below) the Trial grant's face value, this returns 0 and the
+// tier falls back to 'trial', even though the ledger still shows the old
+// grant/purchase entry forever (the ledger is append-only history, not a
+// live entitlement).
+const currentNonTrialUsableCredits = async (userId, deps) => {
+  const [grant, balance] = await Promise.all([
+    deps.billing.findTrialGrant(userId),
+    deps.balances.findBalanceAccount(userId),
+  ]);
+  const availableBalance = balance?.availableBalance ?? 0n;
+  const trialGrantAmount = grant ? bigint(grant.credit_amount) : 0n;
+  const trialAttributable = availableBalance < trialGrantAmount ? availableBalance : trialGrantAmount;
+  return availableBalance - trialAttributable;
+};
+
+// Processing-usage-quota tier for a user:
+// - 'credited': an ACTIVE paid 'pro' plan assignment (regardless of credit
+//   balance -- an active paid entitlement is credited on its own), OR a
+//   Trial/free user who currently holds usable non-Trial credit value
+//   (see currentNonTrialUsableCredits above).
+// - 'trial': everyone else, including a Trial user with only an unspent
+//   Trial allowance, or a user whose non-Trial credits (manual grant or
+//   purchase) have since been fully spent, or a lapsed/expired Pro
+//   assignment with no remaining non-Trial credit.
+// Deliberately NOT based on raw balance, and NOT based on ledger provenance
+// existing at any point in the past -- either would let a fully-exhausted
+// grant/purchase (or an unspent Trial allowance) keep the higher tier
+// forever. Fails safe to 'trial' (the more restrictive tier) whenever
+// billing is disabled, the actor/lookup fails, or anything else goes wrong
+// -- this function must never throw, and must never fail open to the more
+// permissive tier.
+export const getProcessingQuotaTier = async (identity, {
+  env = process.env, deps = dependencies,
+} = {}) => {
+  try {
+    if (!getBillingConfiguration(env).enabled) return 'trial';
+    const actor = await ensureActor(identity, { deps });
+    const assignment = await deps.assignments.findCurrentPlanAssignment(actor.user.id);
+    if (assignment?.planCode === 'pro') return 'credited';
+    const nonTrialUsable = await currentNonTrialUsableCredits(actor.user.id, deps);
+    return nonTrialUsable > 0n ? 'credited' : 'trial';
+  } catch (error) {
+    console.error('[Billing] getProcessingQuotaTier failed; defaulting to the Trial tier:',
+      error?.message || error);
+    return 'trial';
+  }
 };
 
 export const listCreditPackages = async (identity, {

@@ -10,6 +10,7 @@ function emptyState() {
     schemaVersion: SCHEMA_VERSION,
     mutationEvents: {},
     processingStarts: {},
+    processingFailures: {},
   };
 }
 
@@ -48,6 +49,15 @@ function normalizeState(value) {
     processingStarts:
       value.processingStarts && typeof value.processingStarts === 'object'
         ? value.processingStarts
+        : {},
+    // Added after SCHEMA_VERSION 1 shipped -- deliberately tolerated as a
+    // missing/absent field on existing persisted state rather than forcing a
+    // schema bump, which would otherwise wipe every already-recorded
+    // mutationEvents/processingStarts entry via the emptyState() branch
+    // above the moment an older file is first loaded.
+    processingFailures:
+      value.processingFailures && typeof value.processingFailures === 'object'
+        ? value.processingFailures
         : {},
   };
 }
@@ -130,9 +140,18 @@ export function createAdmissionService({
     });
   }
 
-  function consumeProcessingStart(uid, jobId, at = now()) {
+  // 'credited' = a paid 'pro' plan, or a ledger history containing a manual
+  // grant or purchase (see getProcessingQuotaTier in billingFoundation.js).
+  // Callers that never resolve a tier (or fail to) get 'trial', the more
+  // restrictive ceiling -- this function must never fail open.
+  function resolveProcessingLimit(tier) {
+    return tier === 'credited' ? config.processingUsageLimitCredited : config.processingUsageLimit;
+  }
+
+  function consumeProcessingStart(uid, jobId, { at = now(), tier = 'trial' } = {}) {
     assertUid(uid);
     if (typeof jobId !== 'string' || !jobId) throw new Error('Admission requires a job ID');
+    const limit = resolveProcessingLimit(tier);
     return store.transact((state) => {
       const starts = state.processingStarts[uid] || [];
       const existing = starts.find((entry) => entry.jobId === jobId);
@@ -140,11 +159,11 @@ export function createAdmissionService({
         return { changed: false, value: { consumed: false, idempotent: true } };
       }
       const active = starts.filter((entry) => entry.at > at - config.processingUsageWindowMs);
-      if (active.length >= config.processingUsageLimit) {
+      if (active.length >= limit) {
         const oldest = active.reduce((left, right) => left.at <= right.at ? left : right);
         throw new AdmissionLimitError({
           code: 'PROCESSING_USAGE_LIMIT_EXCEEDED',
-          limit: config.processingUsageLimit,
+          limit,
           remaining: 0,
           windowSeconds: processingWindowSeconds,
           retryAfterSeconds: Math.max(1, Math.ceil((oldest.at + config.processingUsageWindowMs - at) / 1000)),
@@ -157,8 +176,8 @@ export function createAdmissionService({
         value: {
           consumed: true,
           idempotent: false,
-          limit: config.processingUsageLimit,
-          remaining: config.processingUsageLimit - active.length - 1,
+          limit,
+          remaining: limit - active.length - 1,
           windowSeconds: processingWindowSeconds,
         },
       };
@@ -173,6 +192,51 @@ export function createAdmissionService({
       if (retained.length === starts.length) return { changed: false, value: false };
       state.processingStarts[uid] = retained;
       return { changed: true, value: true };
+    });
+  }
+
+  // Refunds a processing-usage slot after a job that was successfully
+  // admitted (queued) later fails or is cancelled by the pipeline -- a
+  // genuine system/pipeline failure must not permanently cost the user a
+  // slot the same way a successful job does. Bounded per uid per rolling
+  // window (processingFailureRefundLimit) so this cannot be exploited by
+  // repeatedly submitting deliberately-broken uploads for unlimited free
+  // retries: once the cap is reached in the window, further failures behave
+  // like today and permanently consume their slot. Idempotent per jobId --
+  // a job's failure is only ever refunded/recorded once, even if the
+  // caller's failure/cancellation handling somehow runs twice for it.
+  function refundProcessingStartOnFailure(uid, jobId, { at = now() } = {}) {
+    assertUid(uid);
+    if (typeof jobId !== 'string' || !jobId) throw new Error('Admission requires a job ID');
+    return store.transact((state) => {
+      const failures = state.processingFailures[uid] || [];
+      if (failures.some((entry) => entry.jobId === jobId)) {
+        return { changed: false, value: { refunded: false, idempotent: true } };
+      }
+      const cutoff = at - config.processingUsageWindowMs;
+      const recentFailureCount = failures.filter((entry) => entry.at > cutoff).length;
+      const withinCap = recentFailureCount < config.processingFailureRefundLimit;
+      failures.push({ at, jobId, refunded: withinCap });
+      state.processingFailures[uid] = failures;
+
+      let released = false;
+      if (withinCap) {
+        const starts = state.processingStarts[uid] || [];
+        const retained = starts.filter((entry) => entry.jobId !== jobId);
+        if (retained.length !== starts.length) {
+          state.processingStarts[uid] = retained;
+          released = true;
+        }
+      }
+      return {
+        changed: true,
+        value: {
+          refunded: withinCap && released,
+          capReached: !withinCap,
+          failureCount: recentFailureCount + 1,
+          failureRefundLimit: config.processingFailureRefundLimit,
+        },
+      };
     });
   }
 
@@ -225,8 +289,8 @@ export function createAdmissionService({
     });
   }
 
-  function withProcessingAdmission(uid, jobId, operation, at = now()) {
-    const reservation = consumeProcessingStart(uid, jobId, at);
+  function withProcessingAdmission(uid, jobId, operation, options = {}) {
+    const reservation = consumeProcessingStart(uid, jobId, options);
     try {
       return operation(reservation);
     } catch (error) {
@@ -239,6 +303,7 @@ export function createAdmissionService({
     consumeMutation,
     consumeProcessingStart,
     releaseProcessingStart,
+    refundProcessingStartOnFailure,
     getSnapshot,
     prune,
     reconcileProcessingStarts,

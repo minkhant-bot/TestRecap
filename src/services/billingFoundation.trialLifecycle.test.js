@@ -239,7 +239,7 @@ test('a granted Trial can never be requested or granted again', async () => {
 test('checkAndExpireTrial forfeits remaining balance with a durable, distinct audit record once past 120 hours', async () => {
   const { state, deps } = createHarness();
   state.trialGrants.set('requester-id', {
-    id: 'grant-1', user_id: 'requester-id',
+    id: 'grant-1', user_id: 'requester-id', credit_amount: '9',
     expires_at: new Date(Date.now() - 1000), expired_at: null,
   });
   state.balances.set('requester-id', { postedBalance: 9n, reservedBalance: 0n });
@@ -251,6 +251,44 @@ test('checkAndExpireTrial forfeits remaining balance with a durable, distinct au
     true,
   );
   assert.equal(state.audit.some(entry => entry.eventType === 'trial.expired'), true);
+});
+
+test('checkAndExpireTrial preserves manually-granted/purchased credits: forfeiture never exceeds the original Trial grant amount', async () => {
+  const { state, deps } = createHarness();
+  // 9 credits from the Trial grant itself, plus a 1000-credit manual grant
+  // (e.g. Owner goodwill credit) sitting in the same undifferentiated balance.
+  state.trialGrants.set('requester-id', {
+    id: 'grant-1', user_id: 'requester-id', credit_amount: '9',
+    expires_at: new Date(Date.now() - 1000), expired_at: null,
+  });
+  state.balances.set('requester-id', { postedBalance: 1009n, reservedBalance: 0n });
+  state.ledger.push({
+    id: 'ledger-manual-1', userId: 'requester-id', amount: 1000n,
+    entryType: 'manual_grant', correlationKey: 'manual:grant-1',
+    reason: 'Goodwill credit', createdByUserId: 'owner-id',
+  });
+  const result = await checkAndExpireTrial('requester-id', { client: {}, deps });
+  // Only the Trial grant's own face value (9) is forfeited -- the manually
+  // granted 1000 credits must survive Trial expiry untouched.
+  assert.equal(result.forfeitedCredits, 9n);
+  assert.equal(state.balances.get('requester-id').postedBalance, 1000n);
+  assert.equal(
+    state.ledger.some(entry => entry.correlationKey === 'trial-expired:requester-id' && entry.amount === -9n),
+    true,
+  );
+});
+
+test('checkAndExpireTrial forfeits only the remaining (already-partially-spent) balance when it is less than the original Trial grant', async () => {
+  const { state, deps } = createHarness();
+  state.trialGrants.set('requester-id', {
+    id: 'grant-1', user_id: 'requester-id', credit_amount: '12',
+    expires_at: new Date(Date.now() - 1000), expired_at: null,
+  });
+  // User already spent most of the Trial grant; only 3 credits remain.
+  state.balances.set('requester-id', { postedBalance: 3n, reservedBalance: 0n });
+  const result = await checkAndExpireTrial('requester-id', { client: {}, deps });
+  assert.equal(result.forfeitedCredits, 3n);
+  assert.equal(state.balances.get('requester-id').postedBalance, 0n);
 });
 
 test('checkAndExpireTrial is a no-op before expiry and a no-op on a second call', async () => {

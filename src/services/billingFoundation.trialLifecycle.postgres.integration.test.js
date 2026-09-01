@@ -18,6 +18,7 @@ import {
   configureCreditPlan,
   createScreenshotIntent,
   completeScreenshotUpload,
+  getProcessingQuotaTier,
   requestTrial,
   reviewPurchase,
   submitPurchase,
@@ -110,6 +111,9 @@ integration('Trial request -> Owner approval -> Purchase -> Pro, full flow again
     assert.ok(expiresAt - Date.now() >= 120 * 60 * 60 * 1000 - 5000);
     const balanceAfterGrant = await balances.findBalanceAccount(user.id, { client: pool });
     assert.equal(balanceAfterGrant.postedBalance, 12n);
+    // A Trial-only balance (however large) never crosses into the credited
+    // processing-usage tier -- only non-Trial credit value does.
+    assert.equal(await getProcessingQuotaTier(userIdentity, { env, deps }), 'trial');
 
     // Re-requesting must be permanently blocked (one-time only).
     await assert.rejects(
@@ -143,6 +147,9 @@ integration('Trial request -> Owner approval -> Purchase -> Pro, full flow again
     const balanceAfterExpiry = await balances.findBalanceAccount(user.id, { client: pool });
     assert.equal(balanceAfterExpiry.postedBalance, 1n); // only the already-reserved credit remains
     assert.equal(balanceAfterExpiry.reservedBalance, 1n); // untouched, first job still in flight
+    // No usable (available) credit remains and there was never any non-Trial
+    // grant -- still Trial tier, not credited.
+    assert.equal(await getProcessingQuotaTier(userIdentity, { env, deps }), 'trial');
     const expiredAudit = await pool.query(
       `SELECT * FROM audit_logs WHERE event_type = 'trial.expired' AND subject_user_id = $1`, [user.id],
     );
@@ -185,6 +192,9 @@ integration('Trial request -> Owner approval -> Purchase -> Pro, full flow again
     assert.ok(purchaseApproval.body.proAssignment);
     const finalAssignment = await assignments.findCurrentPlanAssignment(user.id, { client: pool });
     assert.equal(finalAssignment.planCode, 'pro');
+    // An active Pro assignment is 'credited' on its own, independent of
+    // remaining credit balance.
+    assert.equal(await getProcessingQuotaTier(userIdentity, { env, deps }), 'credited');
     const proAudit = await pool.query(
       `SELECT * FROM audit_logs WHERE event_type = 'plan.pro_assigned_via_purchase' AND subject_user_id = $1`, [user.id],
     );

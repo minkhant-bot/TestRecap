@@ -15,7 +15,8 @@ const {
     getWorkspaceJob,
     getWorkspaceJobInternal,
     queueWorkspaceJob,
-    requestWorkspaceJobCancellation
+    requestWorkspaceJobCancellation,
+    updateWorkspaceJobInternal
 } = await import('./workspaceJobs.js');
 const { WorkspaceWorker } = await import('./workspaceWorker.js');
 const { subscribeToWorkspaceJob } = await import('./workspaceEvents.js');
@@ -157,4 +158,69 @@ test('restored stage failure remains retryable by the workspace shell without du
     assert.equal(calls, 1);
     assert.equal(getWorkspaceJob(job.id, ownerUid).error, 'translation provider unavailable');
     assert.equal(getWorkspaceJobInternal(job.id).diagnostic.stage, 'transcript_translation');
+});
+
+test('a genuine pipeline failure refunds the processing-usage slot exactly once', async () => {
+    clearWorkspaceJobsForTests();
+    const job = createPending('refund-failure.mp4');
+    queueWorkspaceJob(job.id, ownerUid);
+    const refundCalls = [];
+    const worker = new WorkspaceWorker(workerOptions({
+        coreStage: async () => { throw new Error('pipeline exploded'); },
+        admission: {
+            refundProcessingStartOnFailure: (uid, jobId) => {
+                refundCalls.push({ uid, jobId });
+                return { refunded: true };
+            }
+        }
+    }));
+    worker.start();
+    await waitFor(() => getWorkspaceJob(job.id, ownerUid)?.status === 'failed');
+    await worker.stop();
+    assert.deepEqual(refundCalls, [{ uid: ownerUid, jobId: job.id }]);
+});
+
+test('a refund bookkeeping failure does not prevent the job from being marked failed', async () => {
+    clearWorkspaceJobsForTests();
+    const job = createPending('refund-error.mp4');
+    queueWorkspaceJob(job.id, ownerUid);
+    const worker = new WorkspaceWorker(workerOptions({
+        coreStage: async () => { throw new Error('pipeline exploded'); },
+        admission: {
+            refundProcessingStartOnFailure: () => { throw new Error('admission store unavailable'); }
+        }
+    }));
+    worker.start();
+    await waitFor(() => getWorkspaceJob(job.id, ownerUid)?.status === 'failed');
+    await worker.stop();
+    assert.equal(getWorkspaceJob(job.id, ownerUid).status, 'failed');
+});
+
+test('a mid-processing cancellation refunds the processing-usage slot', async () => {
+    clearWorkspaceJobsForTests();
+    const job = createPending('refund-cancel.mp4');
+    queueWorkspaceJob(job.id, ownerUid);
+    const refundCalls = [];
+    const worker = new WorkspaceWorker(workerOptions({
+        coreStage: ({ signal }) => new Promise((_resolve, reject) => {
+            signal.addEventListener('abort', () => {
+                const error = new Error('Processing cancelled.');
+                error.name = 'AbortError';
+                reject(error);
+            });
+        }),
+        admission: {
+            refundProcessingStartOnFailure: (uid, jobId) => {
+                refundCalls.push({ uid, jobId });
+                return { refunded: true };
+            }
+        }
+    }));
+    worker.start();
+    await waitFor(() => getWorkspaceJob(job.id, ownerUid)?.status === 'processing');
+    updateWorkspaceJobInternal(job.id, { cancellationRequested: true });
+    worker.cancel(job.id);
+    await waitFor(() => getWorkspaceJob(job.id, ownerUid)?.status === 'cancelled');
+    await worker.stop();
+    assert.deepEqual(refundCalls, [{ uid: ownerUid, jobId: job.id }]);
 });

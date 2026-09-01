@@ -13,7 +13,9 @@ import {
 
 const config = {
   processingUsageLimit: 2,
+  processingUsageLimitCredited: 5,
   processingUsageWindowMs: 1_000,
+  processingFailureRefundLimit: 2,
   mutationRateLimit: 3,
   mutationRateWindowMs: 500,
 };
@@ -200,4 +202,168 @@ test('mutation middleware applies the same contract before route handlers', () =
   assert.equal(nextCalled, false);
   assert.equal(response.statusCode, 429);
   assert.equal(response.body.requestId, 'request-2');
+});
+
+test('a credited-tier user is governed by the higher ceiling, not the Trial limit', () => {
+  const value = fixture();
+  try {
+    value.service.consumeProcessingStart('user-a', 'job-a', { tier: 'credited' });
+    value.service.consumeProcessingStart('user-a', 'job-b', { tier: 'credited' });
+    // A Trial-tier caller would already be blocked here (processingUsageLimit=2).
+    assert.doesNotThrow(
+      () => value.service.consumeProcessingStart('user-a', 'job-c', { tier: 'credited' }),
+    );
+    value.service.consumeProcessingStart('user-a', 'job-d', { tier: 'credited' });
+    value.service.consumeProcessingStart('user-a', 'job-e', { tier: 'credited' });
+    assert.throws(
+      () => value.service.consumeProcessingStart('user-a', 'job-f', { tier: 'credited' }),
+      error => error.code === 'PROCESSING_USAGE_LIMIT_EXCEEDED' && error.limit === 5,
+    );
+  } finally {
+    fs.rmSync(value.directory, { recursive: true, force: true });
+  }
+});
+
+test('omitting a tier (or passing an unrecognized one) defaults to the Trial ceiling -- never fails open', () => {
+  const value = fixture();
+  try {
+    value.service.consumeProcessingStart('user-a', 'job-a');
+    value.service.consumeProcessingStart('user-a', 'job-b', { tier: 'nonsense' });
+    assert.throws(
+      () => value.service.consumeProcessingStart('user-a', 'job-c'),
+      error => error.code === 'PROCESSING_USAGE_LIMIT_EXCEEDED' && error.limit === 2,
+    );
+  } finally {
+    fs.rmSync(value.directory, { recursive: true, force: true });
+  }
+});
+
+test('an existing pre-deploy processingStarts entry is re-evaluated against the new tier limit on the very next call', () => {
+  // Simulates a user already blocked under the old flat limit before this
+  // change shipped: their recorded entries are untouched, but the next
+  // admission call for their (now-resolved) tier applies the right ceiling
+  // immediately -- no migration or reset required.
+  const value = fixture();
+  try {
+    value.service.consumeProcessingStart('user-a', 'job-a');
+    value.service.consumeProcessingStart('user-a', 'job-b');
+    assert.throws(
+      () => value.service.consumeProcessingStart('user-a', 'job-c'),
+      error => error.code === 'PROCESSING_USAGE_LIMIT_EXCEEDED',
+    );
+    assert.doesNotThrow(
+      () => value.service.consumeProcessingStart('user-a', 'job-c', { tier: 'credited' }),
+    );
+  } finally {
+    fs.rmSync(value.directory, { recursive: true, force: true });
+  }
+});
+
+test('withProcessingAdmission threads the tier through to the underlying limit', () => {
+  const value = fixture();
+  try {
+    for (const jobId of ['a', 'b', 'c', 'd', 'e']) {
+      value.service.withProcessingAdmission('user-a', `job-${jobId}`, () => 'queued', { tier: 'credited' });
+    }
+    assert.throws(
+      () => value.service.withProcessingAdmission('user-a', 'job-f', () => 'queued', { tier: 'credited' }),
+      error => error.code === 'PROCESSING_USAGE_LIMIT_EXCEEDED',
+    );
+  } finally {
+    fs.rmSync(value.directory, { recursive: true, force: true });
+  }
+});
+
+test('refundProcessingStartOnFailure releases the slot so a fresh job can be admitted', () => {
+  const value = fixture();
+  try {
+    value.service.consumeProcessingStart('user-a', 'job-a');
+    value.service.consumeProcessingStart('user-a', 'job-b');
+    assert.throws(
+      () => value.service.consumeProcessingStart('user-a', 'job-c'),
+      error => error.code === 'PROCESSING_USAGE_LIMIT_EXCEEDED',
+    );
+    const result = value.service.refundProcessingStartOnFailure('user-a', 'job-a');
+    assert.equal(result.refunded, true);
+    assert.doesNotThrow(() => value.service.consumeProcessingStart('user-a', 'job-c'));
+  } finally {
+    fs.rmSync(value.directory, { recursive: true, force: true });
+  }
+});
+
+test('refundProcessingStartOnFailure is idempotent per job -- never double-refunds or double-counts a failure', () => {
+  const value = fixture();
+  try {
+    value.service.consumeProcessingStart('user-a', 'job-a');
+    const first = value.service.refundProcessingStartOnFailure('user-a', 'job-a');
+    assert.equal(first.refunded, true);
+    const second = value.service.refundProcessingStartOnFailure('user-a', 'job-a');
+    assert.equal(second.idempotent, true);
+    assert.equal(second.refunded, false);
+  } finally {
+    fs.rmSync(value.directory, { recursive: true, force: true });
+  }
+});
+
+test('refundProcessingStartOnFailure stops refunding once the bounded failure cap is reached in the window', () => {
+  // config.processingUsageLimit = 2, config.processingFailureRefundLimit = 2
+  // for this fixture: each refund frees a slot so the next job can be
+  // admitted, simulating a user repeatedly submitting failing uploads.
+  const value = fixture();
+  try {
+    value.service.consumeProcessingStart('user-a', 'job-a');
+    value.service.consumeProcessingStart('user-a', 'job-b');
+
+    const firstRefund = value.service.refundProcessingStartOnFailure('user-a', 'job-a');
+    assert.equal(firstRefund.refunded, true);
+    value.service.consumeProcessingStart('user-a', 'job-c');
+
+    const secondRefund = value.service.refundProcessingStartOnFailure('user-a', 'job-b');
+    assert.equal(secondRefund.refunded, true);
+    value.service.consumeProcessingStart('user-a', 'job-d');
+
+    // Third failure in the window exceeds processingFailureRefundLimit (2):
+    // it is recorded but NOT refunded -- the slot stays permanently consumed,
+    // exactly like today's behavior, bounding abuse via repeated bad uploads.
+    const thirdRefund = value.service.refundProcessingStartOnFailure('user-a', 'job-c');
+    assert.equal(thirdRefund.refunded, false);
+    assert.equal(thirdRefund.capReached, true);
+    assert.equal(value.service.getSnapshot('user-a').processing.used, 2);
+  } finally {
+    fs.rmSync(value.directory, { recursive: true, force: true });
+  }
+});
+
+test('refundProcessingStartOnFailure never refunds a slot for a different, still-active job', () => {
+  const value = fixture();
+  try {
+    value.service.consumeProcessingStart('user-a', 'job-a');
+    value.service.consumeProcessingStart('user-a', 'job-b');
+    value.service.refundProcessingStartOnFailure('user-a', 'job-a');
+    assert.equal(value.service.getSnapshot('user-a').processing.used, 1);
+    assert.equal(value.service.consumeProcessingStart('user-a', 'job-b').idempotent, true);
+  } finally {
+    fs.rmSync(value.directory, { recursive: true, force: true });
+  }
+});
+
+test('a JSON admission store from before processingFailures existed loads without wiping recorded processingStarts', () => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'blink-admission-legacy-'));
+  const filePath = path.join(directory, 'state.json');
+  try {
+    fs.writeFileSync(filePath, JSON.stringify({
+      schemaVersion: 1,
+      mutationEvents: {},
+      processingStarts: { 'user-a': [{ at: 10_000, jobId: 'pre-existing-job' }] },
+    }));
+    const service = createAdmissionService({
+      store: new JsonAdmissionStore(filePath),
+      config,
+      now: () => 10_500,
+    });
+    assert.equal(service.getSnapshot('user-a').processing.used, 1);
+    assert.equal(service.consumeProcessingStart('user-a', 'pre-existing-job').idempotent, true);
+  } finally {
+    fs.rmSync(directory, { recursive: true, force: true });
+  }
 });
